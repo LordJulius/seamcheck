@@ -102,6 +102,29 @@ end
         self.assertGreaterEqual(row["reach"], 3)  # show, fill, and the Car functions they call
         self.assertEqual(self.gate()["tests"], [])
 
+    def test_a_test_whose_head_spans_two_lines_is_a_test(self):
+        # ota_changelog_test.exs: `test "...",\n       %{repo: repo} do` was no function at all,
+        # and car_controller_test.exs' `%{\n conn: conn\n } do` ended at its `} do` line
+        self.write({"test/car_controller_test.exs": '''defmodule AppWeb.CarControllerTest do
+  use AppWeb.ConnCase
+
+  test "read the car back",
+       %{conn: conn} do
+    assert conn |> get(~p"/api/car") |> json_response(200)
+  end
+
+  test "fill the car", %{
+    conn: conn
+  } do
+    assert post(conn, "/api/car/7/fill", %{}) |> json_response(200)
+  end
+end
+'''})
+        p = core.load(self.root, os.path.join(self.root, "seamcheck.toml"), use_cache=False)
+        rows = {r["id"].rsplit(".", 1)[-1]: r["reach"] for r in tidy.test_audit(p)}
+        self.assertEqual(sorted(rows), ["test fill the car", "test read the car back"])
+        self.assertTrue(all(n >= 2 for n in rows.values()), rows)
+
     def test_an_unknown_route_still_reaches_nothing(self):
         self.write({"test/car_controller_test.exs": '''defmodule AppWeb.CarControllerTest do
   use AppWeb.ConnCase

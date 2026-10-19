@@ -51,6 +51,10 @@ _DECL = re.compile(r"\b(?:class|object|interface|enum|struct|record|trait|type)\
 # to nothing, which is right).
 _KT_TYPED = re.compile(r"(?:\b(?:val|var)\s+|[(,{]\s*|^\s*)([a-z_]\w*)\s*:\s*([A-Z]\w*)(?![\w.])", re.M)
 _KT_FIELD = re.compile(r"\b(?:val|var)\s+([a-z_]\w*)\s*:\s*([A-Z]\w*)(?![\w.])")
+# built by its constructor: `val prefs = OsaPrefs(ctx)`, `const hub = new HubClient(url)`
+_KT_NEW = re.compile(r"\b(?:val|var)\s+([a-z_]\w*)\s*=\s*([A-Z]\w*)\s*\(")
+_TS_NEW = re.compile(r"(?:\b(?:const|let|var)\s+|^\s*(?:(?:private|public|protected|readonly|static)\s+)*)"
+                     r"([A-Za-z_$][\w$]*)\s*=\s*new\s+([A-Z][\w$]*)\s*[(<]", re.M)
 _TS_TYPED = re.compile(r"(?:\b(?:const|let|var)\s+|[(,]\s*|^\s*)([A-Za-z_$][\w$]*)\s*\??\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])", re.M)
 _TS_FIELD = re.compile(r"^\s*(?:(?:private|public|protected|readonly|static|declare)\s+)*([a-z_$][\w$]*)\s*[?!]?\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])\s*[;=]", re.M)
 _TS_PARAM_FIELD = re.compile(r"\b(?:private|public|protected|readonly)\s+([a-z_$][\w$]*)\s*\??\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])")
@@ -66,9 +70,9 @@ _ALLCAPS = re.compile(r"[A-Z0-9_]+$")
 def _typed(fam: str, cpp: bool, text: str) -> list[tuple[str, str]]:
     """(name, type) declarations in a stretch of blanked code."""
     if fam == "kotlin":
-        return [(m.group(1), m.group(2)) for m in _KT_TYPED.finditer(text)]
+        return [(m.group(1), m.group(2)) for pat in (_KT_TYPED, _KT_NEW) for m in pat.finditer(text)]
     if fam == "js":
-        return [(m.group(1), m.group(2)) for m in _TS_TYPED.finditer(text)]
+        return [(m.group(1), m.group(2)) for pat in (_TS_TYPED, _TS_NEW) for m in pat.finditer(text)]
     if cpp:
         return [(m.group(2), m.group(1)) for pat in (_CPP_TYPED, _CPP_VALUE) for m in pat.finditer(text)
                 if not _ALLCAPS.match(m.group(1))]
@@ -381,7 +385,7 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     typed_by_line: dict[int, list[tuple[str, str]]] = {}
     if fam in ("kotlin", "js") or cpp:
         for i, ln in enumerate(lines):
-            if ":" in ln or cpp:
+            if ":" in ln or cpp or "=" in ln:  # `x: T`, or `val x = T(...)` / `new T(...)`
                 got = _typed(fam, cpp, ln)
                 if got:
                     typed_by_line[i] = got
@@ -393,9 +397,9 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         for i, ln in enumerate(lines):
             pats_ = []
             if fam == "kotlin":
-                pats_ = [] if inside[i] else [_KT_FIELD]
+                pats_ = [] if inside[i] else [_KT_FIELD, _KT_NEW]
             elif fam == "js":
-                pats_ = [_TS_PARAM_FIELD] + ([] if inside[i] else [_TS_FIELD])
+                pats_ = [_TS_PARAM_FIELD] + ([] if inside[i] else [_TS_FIELD, _TS_NEW])
             elif cpp and not inside[i]:
                 for m in _CPP_FIELD.finditer(ln):
                     if not _ALLCAPS.match(m.group(1)) and m.group(1) not in ("Q_OBJECT", "Q_PROPERTY"):

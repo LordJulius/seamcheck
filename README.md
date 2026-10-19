@@ -63,10 +63,21 @@ seamcheck fuzz --seeds 1-8 [--jobs 4] -- CMD... {seed} ...
 
 SPEC: `name` (glob ok), `Module.name`, or `path/glob:funcglob`.
 
-Edges are **exact** when the target is certain (same module, parent class,
-alias / preload / qualified module, a declared type) and **fuzzy** when the
-call is on an unknown receiver: every function with that name is a
-candidate, unless more than 8 share it (then it's dropped as noise).
+Edges are **exact** when the target is certain: same module, parent class,
+alias / preload / qualified module, an Elixir `use` (the imports its
+`__using__` / `using` block injects), a declared type or one a constructor
+gives (`val prefs = Prefs()`, `new Hub()`), a QML context property typed by
+its C++ variable (`setContextProperty("continuity", &continuity)`), a C++
+namespace (`api::parse()`), a helper the caller defines, a file's own
+extension (it shadows other files'), overloads in the one module in scope.
+They are **fuzzy** when the call is on an unknown receiver: every function
+with that name is a candidate, unless more than 8 share it (then it's dropped
+as noise). A guess never crosses languages (Kotlin never calls TypeScript)
+and product code is never guessed into a test file. In Elixir, Kotlin, Java
+and TypeScript a bare call with nothing in scope is the language's own
+library (`Enum`, Compose's `Row`, vitest's `expect`): nothing, not a guess.
+`seamcheck stats` shows, per language, how many calls into project code are
+exact.
 
 Queries say how sure they are. `callers`, `callees`, `path` and `impact` walk
 exact edges; `--fuzzy` adds the guesses. `find` and the `callers` header print
