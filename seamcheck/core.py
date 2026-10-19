@@ -26,7 +26,7 @@ from . import lang_elixir, lang_gdscript, lang_other
 from .model import Func, Module
 from .scan import blank
 
-CACHE_VERSION = 25
+CACHE_VERSION = 33
 DEFAULT_EXCLUDE = ["**/.git/**", "**/node_modules/**", "**/deps/**", "**/_build/**", "**/target/**",
                    "**/.godot/**", "**/.claude/**", "**/dist/**", "**/build/**", "**/.venv/**", "**/__pycache__/**"]
 
@@ -425,6 +425,94 @@ def _resolve_where(project: Project, where: str, cache: dict) -> str:
     return ""
 
 
+_EX_IMPORT = re.compile(r"^\s*import\s+([A-Z]\w*(?:\.[A-Z]\w*)*|__MODULE__)")
+_EX_USE = re.compile(r"^\s*use\s+([A-Z]\w*(?:\.[A-Z]\w*)*|__MODULE__)(?:\s*,\s*:(\w+))?")
+
+
+def _injected_imports(project: Project, use: str, depth: int) -> list[str]:
+    """The modules an Elixir `use X` (or `use X, :controller`) imports into
+    the caller: the `import` lines in X's `__using__` / `using do` block, or in
+    X's `def controller` (and the helpers it unquotes), and in the project
+    modules those blocks `use` in turn. Without this every call to a
+    DataCase / ConnCase helper or a component imported by `use App, :html`
+    was a name guess."""
+    name, _, which = use.partition(":")
+    m = project.modules.get(name)
+    if m is None or depth < 0:
+        return []
+    lines = m.code
+    heads = [rf"^\s*def\s+{which}\b"] if which else [r"^\s*defmacro\s+__using__\b", r"^\s*using\b.*\bdo\s*$"]
+    spans = []
+
+    def span_of(i):
+        ind = len(lines[i]) - len(lines[i].lstrip())
+        for j in range(i + 1, len(lines)):
+            t = lines[j]
+            if t.strip() and len(t) - len(t.lstrip()) <= ind:
+                return (i, j)
+        return (i, len(lines) - 1)
+
+    for i, ln in enumerate(lines):
+        if any(re.match(h, ln) for h in heads):
+            spans.append(span_of(i))
+    # `unquote(html_helpers())` inside the block: that helper's imports too
+    for a, b in list(spans):
+        for helper in re.findall(r"unquote\((\w+)\(\)\)", "\n".join(lines[a:b + 1])):
+            for i, ln in enumerate(lines):
+                if re.match(rf"^\s*defp?\s+{helper}\b", ln):
+                    spans.append(span_of(i))
+    out = []
+    for a, b in spans:
+        for ln in lines[a:b + 1]:
+            if (im := _EX_IMPORT.match(ln)):
+                q = im.group(1)
+                q = m.name if q == "__MODULE__" else m.aliases.get(q.split(".")[0], q.split(".")[0]) + q[len(q.split(".")[0]):]
+                out.append(q)
+            elif (us := _EX_USE.match(ln)):
+                q = us.group(1)
+                q = m.aliases.get(q.split(".")[0], q.split(".")[0]) + q[len(q.split(".")[0]):]
+                out += _injected_imports(project, q + (f":{us.group(2)}" if us.group(2) else ""), depth - 1)
+    return out
+
+
+_CONTEXT_PROP = re.compile(r"""setContextProperty\(\s*(?:QStringLiteral\()?\s*"(\w+)"\s*\)?\s*,\s*&?\s*(\w+)""")
+
+
+def _qml_context(project: Project) -> None:
+    """Objects C++ hands to QML by name (`setContextProperty("continuity",
+    &continuity)`), typed by the variable's declaration in that file
+    (`ContinuityClient continuity;`): every QML file's `continuity.refresh()`
+    is then a call on ContinuityClient, not a guess."""
+    names: dict[str, set[str]] = {}
+    for rel, mods in project.by_file.items():
+        if not rel.endswith((".cpp", ".cc", ".cxx")) or not mods:
+            continue
+        raw = "\n".join(mods[0].raw)
+        if "setContextProperty" not in raw:
+            continue
+        for name, var in _CONTEXT_PROP.findall(raw):
+            decl = re.search(rf"(?:^|[;{{}}(\s])([A-Z]\w*)\s*[\*&]?\s*\b{var}\b\s*[;({{=]", raw, re.M) or \
+                re.search(rf"\b{var}\s*=\s*(?:new\s+|std::make_unique<|std::make_shared<)([A-Z]\w*)", raw)
+            if decl:
+                names.setdefault(name, set()).add(decl.group(1))
+    bound = {n: "type:" + next(iter(t)) for n, t in names.items() if len(t) == 1}
+    if not bound:
+        return
+    for rel, mods in project.by_file.items():
+        if rel.endswith((".qml", ".js")):
+            for m in mods:
+                for n, t in bound.items():
+                    m.bound.setdefault(n, t)
+
+
+def _is_test_file(project: Project, rel: str) -> bool:
+    cache = project.__dict__.setdefault("_test_files", {})
+    if rel not in cache:
+        from . import tidy
+        cache[rel] = tidy.is_test(project, rel)
+    return cache[rel]
+
+
 def _resolve_imports(project: Project) -> None:
     cache: dict = {}
     for m in project.modules.values():
@@ -432,6 +520,12 @@ def _resolve_imports(project: Project) -> None:
             project.packages[m.package].append(m.name)
         m.aliases = {k: r for k, v in m.aliases.items() if (r := _resolve_where(project, v, cache))}
         m.imported = {k: (r, n) for k, (v, n) in m.imported.items() if (r := _resolve_where(project, v, cache))}
+    _qml_context(project)
+    for m in project.modules.values():
+        for u in m.using:
+            for w in _injected_imports(project, u, 2):
+                if w not in m.uses:
+                    m.uses.append(w)
 
 
 def _in_scope(project: Project, where: str, name: str) -> list[Func]:
@@ -517,6 +611,30 @@ def _typed_targets(project: Project, mod: Module | None, ty: str, name: str, ext
 _MODULE_Q = re.compile(r"(?![A-Z0-9_]+$)[A-Z]\w*(?:\.[A-Z]\w*)*$")
 
 
+# Which files a call can land in: a Kotlin call never runs a TypeScript
+# function. QML calls its JS libraries and C++ types; .js is shared by the web
+# and QML families.
+_FAMILIES = {
+    ".ex": {"ex"}, ".exs": {"ex"},
+    ".kt": {"jvm"}, ".kts": {"jvm"}, ".java": {"jvm"},
+    ".ts": {"web"}, ".tsx": {"web"}, ".jsx": {"web"}, ".mjs": {"web"}, ".cjs": {"web"}, ".js": {"web", "qt"},
+    ".qml": {"qt"}, ".cpp": {"qt"}, ".cc": {"qt"}, ".cxx": {"qt"}, ".h": {"qt"}, ".hpp": {"qt"}, ".hh": {"qt"},
+    ".py": {"py"}, ".gd": {"gd"}, ".rs": {"rs"}, ".go": {"go"}, ".cs": {"cs"},
+}
+
+
+def _family(rel: str) -> set[str]:
+    ext = os.path.splitext(rel)[1]
+    return _FAMILIES.get(ext, {ext})
+
+
+def _scoped_language(rel: str) -> bool:
+    """A language where a bare name resolves only through the file's own
+    definitions and imports. A plain .js script (a QML library, a browser
+    script) sees globals from anywhere, so it is not."""
+    return os.path.splitext(rel)[1] in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts")
+
+
 def _build_edges(project: Project) -> None:
     _resolve_imports(project)
     _locals_cache.clear()
@@ -574,6 +692,9 @@ def _build_edges(project: Project) -> None:
                     # `split` is not ours). A project type that misses (inherited
                     # from a library, an extension we can't see): the usual ways.
                     hits, in_project = _typed_targets(project, mod, held[5:], c.name, ext_cache)
+                    own = [t for t in hits if t.file == f.file]
+                    if len(own) == 1:
+                        hits = own  # a file's own (private) extension shadows the others'
                     if hits:
                         targets = [(t, len(hits) == 1) for t in hits]
                     elif not in_project:
@@ -595,7 +716,13 @@ def _build_edges(project: Project) -> None:
                             targets = [(t, len(hits) == 1) for t in hits]
                             break
             elif not q and mod and _shadowed(f, c.name):
-                pass  # a parameter or local holding a function: a name guess at most
+                # a parameter or local holding a function: the helper the
+                # caller itself defines (`const nudge = () => ...` inside a
+                # component) when there is one, else a name guess at most
+                inner = [g for g in project.by_name.get(c.name, []) if g.file == f.file
+                         and f.start <= g.start <= f.end and g.id != f.id]
+                if len(inner) == 1:
+                    targets = [(inner[0], True)]
             elif not q and mod:
                 # own module, then a name imported by itself, then modules and
                 # packages imported whole, then the rest of its own package
@@ -610,6 +737,14 @@ def _build_edges(project: Project) -> None:
                 if not hits and mod.package:
                     hits = _in_scope(project, "pkg:" + mod.package, c.name)
                 targets = [(t, len(hits) == 1) for t in hits]
+                if not targets and _scoped_language(f.file) and c.name not in mod.imported:
+                    # Elixir, Kotlin, Java, an ES module: a bare call reaches only
+                    # what is local, imported or in its package. Nothing in scope
+                    # means a library or the language's own (Enum, Compose's Row,
+                    # vitest's expect, ConnTest's post): not a guess at every
+                    # project function of that name.
+                    project.resolution[os.path.splitext(f.file)[1]][2] += 1
+                    continue
             if not targets and q and _MODULE_Q.match(q) and q != "Self":
                 # A qualifier that names a module (`Enum.reject`, `Repo.rollback`)
                 # and misses: the function lives outside the project (or the alias
@@ -621,7 +756,17 @@ def _build_edges(project: Project) -> None:
             if not targets:
                 # A method on some object, or an import we can't see: every
                 # function with that name is a candidate (a "fuzzy" edge).
-                cands = [g for g in project.by_name.get(c.name, []) if g.kind != "top"]
+                fam = _family(f.file)
+                in_test = _is_test_file(project, f.file)
+                cands = [g for g in project.by_name.get(c.name, []) if g.kind != "top" and fam & _family(g.file)
+                         and (in_test or not _is_test_file(project, g.file))]  # product code never calls a test
+                if q and mod and 0 < c.line <= len(mod.raw) and f"{q}::{c.name}" in mod.raw[c.line - 1]:
+                    # `veridian::api::parseClaim(...)`: the namespace names where it lives
+                    named = [g for g in cands if f"/{q}/" in "/" + g.file or g.module.split("::")[-1] == q
+                             or g.module.endswith("." + q)]
+                    if len(named) == 1:
+                        cands = named
+                        targets = [(named[0], True)]
                 # A guess by name is never "exact", even when only one function has
                 # the name: `icon()` on a lambda parameter matched PlacesNav.icon.
                 # Except a method call (`store.getState().applyOp()`,
@@ -629,8 +774,19 @@ def _build_edges(project: Project) -> None:
                 # the file imports or shares a package with: that is the one.
                 seen_mods = _scope(project, mod, scope_cache) if mod and not _shadowed(f, c.name) else set()
                 mine = [g for g in cands if g.module in seen_mods]
-                if len(mine) == 1 and q != "":
+                own = [g for g in cands if g.file == f.file and g.recv]
+                if targets:
+                    pass
+                elif len(own) == 1 and q != "" and len(cands) > 1:
+                    # an extension the caller's own file declares (each generated
+                    # parser's private JSONObject.textOrNull): it shadows the others'
+                    targets = [(own[0], True)]
+                elif len(mine) == 1 and q != "":
                     targets = [(mine[0], True)]
+                elif 1 < len(mine) <= 4 and q != "" and len({g.module for g in mine}) == 1:
+                    # overloads in the one module in scope (JSONObject.textOrNull and
+                    # JSONArray.textOrNull side by side): the call is one of them
+                    targets = [(g, True) for g in mine]
                 else:
                     if len(cands) > 8:
                         cands = []  # a very common name (run, get, init...): too vague to be a useful edge

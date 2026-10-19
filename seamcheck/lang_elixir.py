@@ -18,8 +18,9 @@ _TEST_NAME = re.compile(r"""^\s*(?:test|property)\s+(?:"((?:[^"\\]|\\.)*)"|'((?:
 # aliased "" to "A." and every call through B or C resolved to nothing)
 _ALIAS = re.compile(r"^\s*alias\s+([A-Z]\w*(?:\.[A-Z]\w*)*)(?:\.\{([^}]*)\})?(?:\s*,\s*as:\s*([A-Z]\w*))?")
 _IMPORT = re.compile(r"^\s*import\s+([A-Z]\w*(?:\.[A-Z]\w*)*|__MODULE__)")
+_USE = re.compile(r"^\s*use\s+([A-Z]\w*(?:\.[A-Z]\w*)*|__MODULE__)(?:\s*,\s*:(\w+))?")
 _QCALL = re.compile(r"\b([A-Z][\w.]*|__MODULE__)\.([a-z_]\w*[?!]?)\s*\(")
-_LCALL = re.compile(r"(?<![.\w:&])([a-z_]\w*[?!]?)\s*\(")
+_LCALL = re.compile(r"(?<![.\w:&~])([a-z_]\w*[?!]?)\s*\(")  # not `~w(...)`: a sigil
 _PIPE = re.compile(r"\|>\s*(?:([A-Z][\w.]*|__MODULE__)\.)?([a-z_]\w*[?!]?)")
 _CAPTURE = re.compile(r"&(?:([A-Z][\w.]*|__MODULE__)\.)?([a-z_]\w*[?!]?)/\d")
 # `start_supervised!({Mod, opts})` / `start_supervised(Mod)` starts Mod: a call to its start_link
@@ -94,6 +95,10 @@ def parse(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             m = _IMPORT.match(lines[i])
             if m:
                 mod.uses.append(_resolve_qual(m.group(1), mod))
+            u = _USE.match(lines[i])
+            if u and len(lines[i]) - len(lines[i].lstrip()) == ind + 2:
+                # `use X` / `use X, :controller`: X's __using__ may import more (core expands it)
+                mod.using.append(_resolve_qual(u.group(1), mod) + (f":{u.group(2)}" if u.group(2) else ""))
         # functions directly inside (skip nested module bodies)
         nested = [(x, y) for (n2, x, y, i2) in spans if x > a and y <= b and n2 != name]
         i = a + 1
@@ -103,8 +108,11 @@ def parse(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 continue
             m = _DEF.match(lines[i])
             t_m = None if m else _TEST.match(lines[i])
+            head = i  # the head's last line: `test "x",\n  %{conn: conn} do` spans two
             if t_m and not re.search(r"\bdo\s*$", lines[i]):
-                t_m = None  # `setup :fun` / `test "x"` without a block: not a body
+                head = _head_end(lines, i, b)
+                if head is None:
+                    t_m = None  # `setup :fun` / `test "x"` without a block: not a body
             if not m and not t_m:
                 i += 1
                 continue
@@ -121,8 +129,8 @@ def parse(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 dind = len(m.group(1))
                 kind = "private" if m.group(2).endswith("p") and m.group(2) != "defdelegate" else "func"
                 fname = m.group(3)
-            end = i
-            for j in range(i + 1, b):
+            end = head
+            for j in range(head + 1, b):
                 t = lines[j]
                 if t.strip() == "":
                     continue
@@ -148,6 +156,24 @@ def parse(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         mod.funcs.append(top)
         out.append(mod)
     return out
+
+
+def _head_end(lines: list[str], i: int, b: int) -> int | None:
+    """The line ending a test head that goes on past its first line (a
+    trailing `,` or an open `%{`): the first one ending in `do`, within a few
+    lines and before anything at the head's own indent but a closing bracket."""
+    if not re.search(r"[,({\[]\s*$", lines[i]):
+        return None
+    ind = len(lines[i]) - len(lines[i].lstrip())
+    for j in range(i + 1, min(i + 12, b)):
+        t = lines[j]
+        if not t.strip():
+            continue
+        if len(t) - len(t.lstrip()) <= ind and not t.lstrip().startswith((")", "}", "]")):
+            return None
+        if re.search(r"\bdo\s*$", t):
+            return j
+    return None
 
 
 def _resolve_qual(q: str, mod: Module) -> str:

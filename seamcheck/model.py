@@ -64,6 +64,8 @@ class Module:
     # fields): name -> "type:<Name>", for calls in every function of the file
     # that don't declare the name themselves. A name with two types is left out.
     bound: dict[str, str] = field(default_factory=dict)
+    # Elixir `use X` / `use X, :name` (core reads the imports X's __using__ injects)
+    using: list[str] = field(default_factory=list)
 
     def func_at(self, line: int) -> Func | None:
         best = None
