@@ -1,0 +1,4 @@
+[project]
+name = "elixir-pot"
+include = ["lib/**", "test/**", "native/**", "android/**", "desktop/**", "tools/**", "scripts/**", "packages/**", "connectors/**", "config/**"]
+exclude = ["**/node_modules/**", "**/build/**", "**/*.min.js"]

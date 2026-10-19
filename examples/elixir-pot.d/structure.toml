@@ -1,0 +1,235 @@
+# Structural contracts from the bugs of 2026-09-28..10-01 (seamcheck.d/structure.toml).
+# Each rule names the bug it would have caught. Rules that are clean on main are
+# errors (the gate keeps them at zero); rules with old debt are warnings that
+# block only new occurrences (gate = "changed": a finding on a line the commit
+# adds or edits). Fix the debt, then flip them to errors.
+
+# ── The bars: controls that must always be reachable ───────────────────────────
+# Since the 09-24 redesign Minimize and Auto-approve sat in the model chip's menu,
+# and Auto-approve hid (and was disabled) while busy: with an approval waiting
+# mid-turn they could not be reached. A control listed here must render on its
+# bar with no condition or menu between them. Add a control when a bar gains
+# one; `when` names the one condition a control may have (Abort: busy).
+
+[[rule]]
+id = "surface-chat-bar-essentials"
+kind = "essential"
+in = ["desktop/src/components/CommandInput.tsx"]
+bar = 'className="command-row"'
+why = "The chat bar's own controls are reachable in every state, mid-turn included."
+[rule.controls]
+send = 'data-testid="parity-send"'
+auto_approve = { marker = 'data-testid="parity-auto-approve"', disabled = false }
+minimize = 'aria-label="Minimize chat dock"'
+abort = { marker = 'data-testid="parity-abort"', when = '^busy\b' }
+
+[[rule]]
+id = "osa-chat-bar-essentials"
+kind = "essential"
+in = ["android/veridian-osa/app/src/main/java/org/veridian/osa/ui/VoiceChatBar.kt"]
+bar = 'fun VoiceChatComposer\('
+why = "The phone's composer keeps Send and AUTO on the bar, not in the overflow menu."
+[rule.controls]
+send = 'testTag\("chat_send"\)'
+auto_approve = { marker = 'testTag\("chat_auto_approve"\)', disabled = false }
+
+[[rule]]
+id = "osd-chat-bar-essentials"
+kind = "essential"
+in = ["native/veridian-osd/qml/ChatHost.qml"]
+bar = 'id:\s*composerRow'
+why = "The desk composer keeps Send and AUTO on the bar."
+[rule.controls]
+send = 'text:\s*"Send"'
+auto_approve = { marker = 'continuity\.chatAutoApprove = !continuity\.chatAutoApprove', disabled = false }
+
+# ── Rows and controls that do what they look like ──────────────────────────────
+
+[[rule]]
+id = "rows-open-whatever-their-state"
+kind = "lint"
+lint = "disabled-by-data"
+in = ["android/veridian-osa/app/src/main/**/*.kt", "desktop/src/**/*.tsx", "native/veridian-osd/qml/**/*.qml"]
+skip = ["**/*.test.tsx"]
+why = "Read notices and settled sign-ins were drawn Disabled, so they could never be opened again. Only work in flight disables a row."
+
+[[rule]]
+id = "controls-do-something"
+kind = "lint"
+lint = "inert-control"
+in = ["android/veridian-osa/app/src/main/**/*.kt", "desktop/src/**/*.tsx", "native/veridian-osd/qml/**/*.qml"]
+skip = ["**/*.test.tsx", "**/ui/kit/KitGallery.kt"]   # the kit gallery shows controls, it doesn't wire them
+severity = "warn"
+gate = "changed"
+why = "Surface Places had four chips with no handlers and a settings form that saved nothing."
+
+# ── Layers: what opens must be seen ────────────────────────────────────────────
+
+[[rule]]
+id = "surface-popups-not-clipped"
+kind = "lint"
+lint = "css-popup-clipped"
+in = ["desktop/src/**/*.tsx"]
+skip = ["**/*.test.tsx"]
+options = { css = ["desktop/src/**/*.css"] }
+severity = "warn"
+gate = "changed"
+why = "The model and search menus open upward out of the chat bar; the bar's shell clipped its overflow and cut them to a sliver."
+
+[[rule]]
+id = "surface-overlays-above-shell"
+kind = "lint"
+lint = "css-overlay-order"
+in = ["desktop/src/**/*.css"]
+# The z-index ladder an overlay must clear. Add a shell layer here when one is added.
+options = { css = ["desktop/src/**/*.css"], above = ["command-dock", "canvas-hub", "hud-header", "browser-overlay"] }
+why = "A tool approval (.hitl-overlay, z 40) drew under the chat dock (z 50)."
+
+# ── OS-D (Qt Quick) ────────────────────────────────────────────────────────────
+
+[[rule]]
+id = "qml-no-anchors-in-positioners"
+kind = "lint"
+lint = "qml-anchors-in-positioner"
+in = ["native/veridian-osd/qml/**/*.qml"]
+severity = "warn"
+gate = "changed"
+why = "Spotify's Up Next rows: a MouseArea filling its row inside a Column; Qt refused it and stopped laying the column out."
+
+[[rule]]
+id = "osd-node-tests-run"
+kind = "fanout"
+severity = "warn"   # an error once the unregistered tests below are registered (or deleted)
+why = "map_contract, hub_move, desk_hotkeys, stage_search and surface_spec went red for days because nothing ran them."
+source = { run = "ls native/veridian-osd/test", pattern = '(?m)^(\w+)\.test\.mjs$' }
+[rule.views.ctest]
+in = ["native/veridian-osd/CMakeLists.txt"]
+text = "raw"
+pattern = ['test/(\w+)\.test\.mjs', '\b(\w+)\b(?=[^()]*\)\s*\n\s*add_test\(NAME \$\{_osd_node_test\})']
+
+# ── OS-A (Kotlin) ──────────────────────────────────────────────────────────────
+
+[[rule]]
+id = "kotlin-declare-before-init"
+kind = "lint"
+lint = "kotlin-init-order"
+in = ["android/veridian-osa/app/src/main/**/*.kt"]
+severity = "warn"
+gate = "changed"
+why = "A fresh install crashed: the app-index lock was declared below the init block whose collector used it."
+
+# ── Notifications: every destination opens something on every view ─────────────
+
+[[rule]]
+id = "notice-dest-kinds"
+kind = "fanout"
+check = ["missing", "extra"]
+why = "Surface sent share_link to the notification center (it named the kind and still did nothing). A dest kind the hub emits opens its own screen on each view."
+source = { in = ["lib/elixir_pot/notifications/dest.ex"], within = '@kinds ~w\(([^)]*)\)', pattern = '(\w+)', text = "raw" }
+[rule.views.osa]
+in = ["android/veridian-osa/app/src/main/java/org/veridian/osa/notify/NoticeRouter.kt"]
+func = "route"
+pattern = '"(\w+)"\s*->'
+unhandled = 'Target\.Center\b'
+except = { inbox = "inbox is the notification list itself (the default)" }
+[rule.views.surface]
+in = ["desktop/src/lib/noticeDest.ts"]
+func = "routeDest"
+pattern = 'case "(\w+)":'
+unhandled = 'kind:\s*"center"'
+except = { inbox = "inbox is the notification list itself (the default)" }
+[rule.views.osd]
+in = ["native/veridian-osd/qml/Shell.qml"]
+within = '(?s)function onNoticeOpened\(.*?\n    \}'
+pattern = 'k === "(\w+)"'
+except = { inbox = "inbox stays on the drawer" }
+
+[[rule]]
+id = "notice-derive-types"
+kind = "fanout"
+check = ["missing", "extra"]
+why = "A notice without an explicit dest derives one from its type; each client derives the same way as the hub."
+source = { in = ["lib/elixir_pot/notifications/dest.ex"], func = "derive", pattern = 'type == "(\w+)"' }
+[rule.views.osa]
+in = ["android/veridian-osa/app/src/main/java/org/veridian/osa/notify/NoticeRouter.kt"]
+within = '(?s)fun derive\(.*?\n            \}'
+pattern = 'type == "(\w+)"'
+[rule.views.surface]
+in = ["desktop/src/lib/noticeDest.ts"]
+func = "derivedDest"
+pattern = 'type === "(\w+)"'
+
+[[rule]]
+id = "one-id-per-fallback"
+kind = "lint"
+lint = "id-kind-mix"
+in = ["android/veridian-osa/app/src/main/**/*.kt", "desktop/src/**/*.ts", "desktop/src/**/*.tsx", "lib/**/*.ex"]
+skip = ["**/*.test.ts", "**/*.test.tsx"]
+severity = "warn"
+gate = "changed"
+why = "notice.requestId ?: dest.id put a sign-in challenge id where a request id goes: the review said \"Request unavailable\"."
+
+# ── Hub: failures leave a trace; caches have owners ─────────────────────────────
+
+[[rule]]
+id = "channel-join-refusals-logged"
+kind = "together"
+in = ["lib/elixir_pot_web/channels/**"]
+func = "join"
+if = '\{:error,(?![^\n]*(?:->|<-))'
+then = 'Logger\.'
+depth = 1
+severity = "warn"
+gate = "changed"
+why = "A refused join with no log line is a device that silently stops getting events."
+
+[[rule]]
+id = "server-errors-logged"
+kind = "together"
+in = ["lib/elixir_pot_web/controllers/**", "lib/elixir_pot_web/plugs/**"]
+if = 'put_status\(\s*(?:conn,\s*)?(?:5\d\d\b|:internal_server_error|:bad_gateway|:service_unavailable|:gateway_timeout|:insufficient_storage|:not_implemented)|send_resp\(\s*(?:conn,\s*)?5\d\d\b'
+then = 'Logger\.'
+depth = 1
+severity = "warn"
+gate = "changed"
+why = "A 5xx the hub answers without a log line falls through the cracks (Julius: \"no logs on the error is a legitimate issue\")."
+
+[[rule]]
+id = "pending-approvals-logged"
+kind = "together"
+in = ["lib/elixir_pot/agents/approvals.ex", "lib/elixir_pot/surface/external_ask.ex", "lib/elixir_pot/identity/**", "lib/elixir_pot/continuity/axle.ex", "lib/elixir_pot/memory/**"]
+if = '(?:status:\s*|"status"\s*=>\s*)(?:"pending"|:pending\b)(?![^\n]*(?:->|\}\s*=[^=>]|<-))'
+then = 'Logger\.|Audit\.emit'
+text = "nocomment"
+allow = ["lib/elixir_pot/identity/challenges.ex:public_*"]   # serialises a challenge, creates nothing
+severity = "warn"
+gate = "changed"
+why = "A tool approval waited with no log line: something waiting on Julius says so when it starts."
+
+[[rule]]
+id = "ets-tables-have-owners"
+kind = "lint"
+lint = "ets-owner"
+in = ["lib/**/*.ex"]
+severity = "warn"
+gate = "changed"
+why = "PMTiles caches were made by whichever tile request came first and died with it."
+
+[[rule]]
+id = "subscribers-survive-strangers"
+kind = "lint"
+lint = "handle-info-catch-all"
+in = ["lib/**/*.ex"]
+severity = "warn"
+gate = "changed"
+why = "Stocks and Weather crashed on an auto-approve broadcast on settings:updated: a shared topic carries others' messages."
+
+[[rule]]
+id = "lib-reads-no-test-fixtures"
+kind = "forbid"
+pattern = '''["'][./]*test/(?:fixtures|support)/'''
+text = "nocomment"
+in = ["lib/**"]
+severity = "warn"
+gate = "changed"
+why = "ToolDiscovery read the load_tools schema from test/fixtures at runtime; product code doesn't depend on the test tree."

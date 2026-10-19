@@ -1,0 +1,162 @@
+# seamcheck contracts for Battle Dynamo Blitz. Run: `seamcheck check`
+# (also part of scripts/check.sh). Each rule says WHY; a finding means code
+# went around a rule the game depends on. Deliberate exceptions go in
+# `allow` (path glob[:function]) or on the line as `# seamcheck: allow <id>`.
+
+[project]
+name = "Battle Dynamo Blitz"
+include = ["game/**/*.gd", "tools/**/*.gd"]
+
+# --- attack paths: every basic attack fires the hero's on-attack passives ----
+
+[[rule]]
+id = "attack-passives"
+kind = "together"
+in = ["game/entities/Hero.gd"]
+if = 'Abilities\.fire_(bolt|arrow)\(|GearEffects\.fire_(hex|thunder)\('
+then = ['_arcane_echo\(', '_echo_shots\(']
+scope = "near"      # each firing branch on its own (a whole-function check missed one branch once)
+window = [0, 5]
+allow = ["game/entities/Hero.gd:_echo_shot_later"]
+why = "Deja's Echo and Sorceress's Arcane Echo must fire on every ranged weapon path (bolt, arrow, hex, thunder)"
+
+[[rule]]
+id = "melee-passives"
+kind = "together"
+in = ["game/entities/Hero.gd"]
+if = 'func _land\('
+then = ['_arcane_echo\(', '_echo_later\(']
+why = "every melee / windup swing lands in _land: it must fire the same on-attack passives"
+
+# --- damage and knockback go through their pipelines ---------------------------
+
+[[rule]]
+id = "damage-pipeline"
+kind = "forbid"
+pattern = '\.hp\s*-='
+in = ["game/**"]
+allow = ["game/entities/Unit.gd:take_hit"]
+why = "damage outside take_hit skips armor, shields, crits, Phoenix Plate, kill credit and Blitz charge"
+
+[[rule]]
+id = "knock-pipeline"
+kind = "forbid"
+pattern = '\.knock\s*\+?=\s*(?!Vector3\.ZERO)'
+in = ["game/**"]
+allow = [
+  "game/entities/Unit.gd", "game/entities/Hero.gd",
+  "game/entities/TollKeeper.gd",          # the toll gate shoves everyone (a rule of the bridge)
+  "game/events/BoneThrone.gd",            # knocked off the throne is the event's rule
+  "game/events/actors/PumpkinArena.gd",   # minigame physics
+  "game/systems/Ultimates.gd:_arena",     # the fire ring is a wall
+  "game/systems/Abilities.gd:unique",     # Honest Effort: the hero's own lunge
+  "game/systems/GearEffects.gd",          # the wearer's own lunge / reset
+]
+why = "outside pushes go through Unit.shove() so Thick Skull / Ironclad can shrug them off"
+
+[[rule]]
+id = "gold-income"
+kind = "forbid"
+pattern = '\.gold\s*\+='
+in = ["game/**"]
+allow = [
+  "game/entities/Hero.gd",
+  "game/entities/GraveRobber.gd:on_hit_by",  # an exact refund of what he stole
+  "game/systems/GoalLedger.gd",              # fixed goal rewards
+  "game/entities/Structure.gd",              # the Treasury trickle (+1)
+  "game/systems/Vault.gd:heist",             # design call pending: heist gold ignores greed gear
+  "game/entities/Jerry.gd:request_sell",     # Jerry's rip-off price is exact, not income
+]
+severity = "warn"
+why = "income should go through add_gold (Two for One, Crown of Greed, stats, the gold popup)"
+
+# --- split screen, pause and host rules -------------------------------------------
+
+[[rule]]
+id = "seat-one-only"
+kind = "forbid"
+pattern = 'main\.hud\.|\bmain\.hud\b\.'
+in = ["game/entities/**", "game/systems/**", "game/events/**"]
+why = "main.hud is player 1's HUD: in split screen, use the seat that owns the hero (seat.hud)"
+
+[[rule]]
+id = "root-camera"
+kind = "forbid"
+pattern = 'get_viewport\(\)\.get_camera_3d\(\)'
+in = ["game/entities/**", "game/systems/**", "game/events/**"]
+allow = ["game/entities/Hero.gd:_read_local_input", "game/entities/Hero.gd:_shake"]  # fallbacks when a seat has no camera
+severity = "warn"
+why = "split screen has no root camera: use Fx.view_camera / Fx.shake (every seat)"
+
+[[rule]]
+id = "timers-respect-pause"
+kind = "forbid"
+pattern = 'create_timer\([^,()]*(\([^()]*\))?[^,()]*\)'
+in = ["game/entities/**", "game/systems/**", "game/events/**"]
+why = "gameplay timers must pause with the game: create_timer(t, false)"
+
+[[rule]]
+id = "no-time-scale"
+kind = "forbid"
+pattern = 'Engine\.time_scale\s*='
+in = ["game/**"]
+why = "AGENTS.md: never slow the game clock (hit-freeze is per-sprite)"
+
+# --- events clean up after themselves --------------------------------------------
+
+[[rule]]
+id = "event-cleanup"
+kind = "together"
+scope = "file"
+in = ["game/events/*.gd"]
+text = "nocomment"
+if = 'spawn_actor\((?!\s*"res://game/events/actors/Pickup\.gd")'
+then = ['func stop\(']
+why = "an event that spawns actors must free them in stop() (meteors kept falling once)"
+
+# --- ids defined in data vs handled in code -----------------------------------------
+
+[[rule]]
+id = "event-howto"
+kind = "coverage"
+defined = { in = ["game/systems/Events.gd"], pattern = '^\t"(\w+)": "res://game/events/' }
+used = { in = ["game/systems/Events.gd"], pattern = '^\t"(\w+)": \[\[' }
+check = ["unused", "undefined"]
+severity = "error"
+why = "every event needs its how-to-play lines, and every how-to belongs to a real event"
+
+[[rule]]
+id = "passives-implemented"
+kind = "coverage"
+defined = { in = ["game/data/HeroPowers.gd"], pattern = '"passive": \{"id": "(\w+)"' }
+used = { in = ["game/entities/**", "game/systems/**"], pattern = '"(\w+)"' }
+check = ["unused"]
+severity = "error"
+why = "a hero passive that no gameplay code mentions does nothing"
+
+[[rule]]
+id = "ults-implemented"
+kind = "coverage"
+defined = { in = ["game/data/HeroPowers.gd"], pattern = '"ult": \{"id": "(\w+)"' }
+used = { in = ["game/systems/Ultimates.gd"], pattern = '"(\w+)"' }
+check = ["unused"]
+severity = "error"
+why = "an ultimate with no case in Ultimates.gd does nothing"
+
+[[rule]]
+id = "uniques-implemented"
+kind = "coverage"
+defined = { in = ["game/data/Heroes.gd"], pattern = '"unique": \{"id": "(\w+)"' }
+used = { in = ["game/systems/Abilities.gd"], pattern = '"(\w+)"' }
+check = ["unused"]
+severity = "error"
+why = "a hero ability with no case in Abilities.unique does nothing"
+
+[[rule]]
+id = "gear-actives-implemented"
+kind = "coverage"
+defined = { in = ["game/data/Items.gd"], pattern = '"active": "(\w+)"' }
+used = { in = ["game/systems/Abilities.gd", "game/systems/GearEffects.gd", "game/systems/Gauntlet.gd"], pattern = '"(\w+)"' }
+check = ["unused"]
+severity = "error"
+why = "an armor/weapon active with no handler does nothing when pressed"

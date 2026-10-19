@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seamcheck"
+version = "0.2.0"
+description = "See a whole codebase at once and check the contracts between its parts: deterministic, local, built for agents."
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.11"
+dependencies = []
+classifiers = ["Programming Language :: Python :: 3", "Topic :: Software Development :: Quality Assurance"]
+
+[project.urls]
+Source = "https://github.com/LordJulius/seamcheck"
+
+[project.scripts]
+seamcheck = "seamcheck.__main__:main"
+
+[tool.setuptools]
+packages = ["seamcheck"]
+
+[tool.setuptools.package-data]
+seamcheck = ["qt_types.txt"]
