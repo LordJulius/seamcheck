@@ -1001,7 +1001,8 @@ def _essential_braces(code, raw, bm, hm, spec, menus, lang):
         if _KT_BRANCH.search(head):
             if spec.get("when") and re.search(spec["when"], n.name):
                 continue
-            return f"renders only when {re.sub(r'\s+', ' ', n.name.strip())[:60]}"
+            cond = re.sub(r"\s+", " ", n.name.strip())[:60]
+            return f"renders only when {cond}"
         if menus.search(head):
             return f"is inside a menu ({head[:50]})"
         if n.kind == "(" and spec.get("disabled") is False:

@@ -121,7 +121,12 @@ def main(argv=None) -> int:
     ap.add_argument("--apply", action="store_true", help="remove: write the files (default: show what would go)")
     ap.add_argument("--all", action="store_true", help="deps: every dependency, not only the actionable ones")
     ap.add_argument("--strict", action="store_true", help="runtime: also flag rules that never had anything to check")
-    a = ap.parse_args(argv)
+    # `run -- CMD...`: the command after `--` is ours to split off (Python
+    # 3.11's argparse refuses a `--` after a positional that already matched)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    tail = argv[argv.index("--") + 1:] if "--" in argv else []
+    a = ap.parse_args(argv[:len(argv) - len(tail) - 1] if "--" in argv else argv)
+    a.args += tail
     root = _root(a.root) if not a.config else os.path.abspath(a.root)
     t0 = time.time()
     if a.cmd in ("trace", "run", "fuzz"):
