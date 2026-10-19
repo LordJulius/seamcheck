@@ -1,0 +1,1528 @@
+"""Load a project, parse it (in parallel, cached), build the call graph, run
+the rules.
+
+Config: seamcheck.toml at the project root (see README.md). Everything is
+deterministic: same files + same config = same report.
+"""
+from __future__ import annotations
+
+import bisect
+import difflib
+import fnmatch
+import hashlib
+import multiprocessing
+import json
+import os
+import pickle
+import re
+import subprocess
+from collections import defaultdict, deque
+import signal
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, field
+
+from . import config as config_mod
+from . import lang_elixir, lang_gdscript, lang_other
+from .model import Func, Module
+from .scan import blank
+
+CACHE_VERSION = 25
+DEFAULT_EXCLUDE = ["**/.git/**", "**/node_modules/**", "**/deps/**", "**/_build/**", "**/target/**",
+                   "**/.godot/**", "**/.claude/**", "**/dist/**", "**/build/**", "**/.venv/**", "**/__pycache__/**"]
+
+
+def adapter_for(rel: str):
+    ext = os.path.splitext(rel)[1]
+    if ext in lang_gdscript.EXT:
+        return lang_gdscript.parse
+    if ext in lang_elixir.EXT:
+        return lang_elixir.parse
+    if ext == ".py":
+        return lang_other.parse_python
+    if ext in lang_other.LANGS:
+        return lang_other.parse_brace
+    return None
+
+
+def scan_family(rel: str) -> str:
+    ext = os.path.splitext(rel)[1]
+    if ext in lang_gdscript.EXT:
+        return "gdscript"
+    if ext in lang_elixir.EXT:
+        return "elixir"
+    if ext == ".py":
+        return "python"
+    if ext in lang_other.LANGS:
+        return lang_other.LANGS[ext][0]
+    return "python"  # '#' comments are the safest guess
+
+
+# --- globs ------------------------------------------------------------------
+
+_glob_cache: dict[str, re.Pattern] = {}
+
+
+def glob_re(g: str) -> re.Pattern:
+    """fnmatch with ** spanning directories."""
+    if g not in _glob_cache:
+        out, i = "", 0
+        while i < len(g):
+            if g.startswith("**/", i):
+                out += "(?:.*/)?"
+                i += 3
+            elif g.startswith("**", i):
+                out += ".*"
+                i += 2
+            elif g[i] == "*":
+                out += "[^/]*"
+                i += 1
+            elif g[i] == "?":
+                out += "[^/]"
+                i += 1
+            else:
+                out += re.escape(g[i])
+                i += 1
+        _glob_cache[g] = re.compile(out + r"\Z")
+    return _glob_cache[g]
+
+
+def match_any(path: str, globs: list[str]) -> bool:
+    return any(glob_re(g).match(path) for g in globs)
+
+
+# --- the project ----------------------------------------------------------------
+
+def _zero3() -> list[int]:
+    return [0, 0, 0]
+
+
+@dataclass
+class Project:
+    root: str
+    config: dict
+    modules: dict[str, Module] = field(default_factory=dict)  # name -> module
+    by_file: dict[str, list[Module]] = field(default_factory=dict)
+    funcs: dict[str, Func] = field(default_factory=dict)  # id -> func
+    by_name: dict[str, list[Func]] = field(default_factory=lambda: defaultdict(list))
+    edges: dict[str, list[tuple[str, int, bool]]] = field(default_factory=lambda: defaultdict(list))  # caller -> [(callee, line, exact)]
+    redges: dict[str, list[tuple[str, int, bool]]] = field(default_factory=lambda: defaultdict(list))
+    files: list[str] = field(default_factory=list)  # every included file (also ones with no adapter)
+    children: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
+    # short name (file stem, declared type) -> modules, for path-named languages
+    short: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
+    # cross-language edges added by [[bridge]] rules: (src, dst) -> bridge id
+    bridged: dict = field(default_factory=dict)
+    bridge_problems: list = field(default_factory=list)
+    # Kotlin/Java package -> the modules (files) in it
+    packages: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
+    # per file extension: [exact, fuzzy only, unresolved] call sites. A low exact
+    # share is the tool missing imports, not the code having no calls.
+    resolution: dict[str, list[int]] = field(default_factory=lambda: defaultdict(_zero3))
+    text_cache: dict = field(default_factory=dict)
+    parse_ms: int = 0
+    config_problems: list[str] = field(default_factory=list)
+
+    # ---- lookups
+    def module_of_file(self, rel: str) -> Module | None:
+        mods = self.by_file.get(rel)
+        return mods[0] if mods else None
+
+    def text(self, rel: str) -> str:
+        with open(os.path.join(self.root, rel), encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+
+    def find(self, spec: str) -> list[Func]:
+        """'name' (glob ok), 'Module.name', or 'path/glob:funcglob'."""
+        if ":" in spec:
+            pg, _, fg = spec.partition(":")
+            return [f for f in self.funcs.values() if glob_re(pg).match(f.file) and fnmatch.fnmatchcase(f.name, fg or "*")]
+        if "/" in spec:
+            return [f for f in self.funcs.values() if glob_re(spec).match(f.file)]
+        if "." in spec:
+            mod, _, name = spec.rpartition(".")
+            return [f for f in self.funcs.values()
+                    if (f.module == mod or f.module.endswith("." + mod) or f.module.endswith("/" + mod)) and fnmatch.fnmatchcase(f.name, name)]
+        return [f for f in self.funcs.values() if fnmatch.fnmatchcase(f.name, spec) and f.kind != "top"]
+
+
+def _res_map(files: list[str]) -> dict[str, str]:
+    """Godot: res://path -> module name (class_name or file stem)."""
+    out = {}
+    for rel in files:
+        if rel.endswith(".gd"):
+            out["res://" + rel] = os.path.splitext(os.path.basename(rel))[0]
+    return out
+
+
+def _worker_init() -> None:
+    """A parse worker leaves Ctrl-C to the run, and ends when the run does.
+
+    Ctrl-C used to reach the workers mid-task too; the broken pool then left
+    the run waiting forever in its shutdown, and whatever had started it gave
+    up and left the pool behind (17 idle processes, three days old).
+    """
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:  # Linux: SIGTERM this worker when the process that forked it dies.
+        import ctypes
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
+    except (OSError, AttributeError):
+        pass
+
+
+def _parse_parallel(todo: list, ctx) -> dict:
+    """Parse `todo` across worker processes. An interrupted run (Ctrl-C, an
+    error) kills its workers instead of waiting on them."""
+    ex = ProcessPoolExecutor(mp_context=ctx, initializer=_worker_init)
+    try:
+        out = dict(ex.map(_parse_one, todo, chunksize=16))
+    except BaseException:
+        for proc in list((getattr(ex, "_processes", None) or {}).values()):
+            proc.kill()
+        ex.shutdown(wait=False, cancel_futures=True)
+        raise
+    ex.shutdown()
+    return out
+
+
+def _parse_one(args):
+    root, rel, res = args
+    fn = adapter_for(rel)
+    if fn is None:
+        return rel, []
+    try:
+        with open(os.path.join(root, rel), encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return rel, []
+    try:
+        return rel, fn(os.path.join(root, rel), rel, text, lambda p: res.get(p, ""))
+    except Exception as e:  # a file the adapter can't read shouldn't sink the run
+        return rel, [("error", str(e))]
+
+
+def _git_files(root: str) -> list[str] | None:
+    """Tracked plus untracked-but-not-ignored files under root, or None outside a repo."""
+    try:
+        r = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=root,
+                           capture_output=True, text=True, check=False, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    return [p for p in r.stdout.split("\0") if p and os.path.isfile(os.path.join(root, p))]
+
+
+def list_files(root: str, include: list[str], exclude: list[str]) -> list[str]:
+    try:
+        # ripgrep filters up front (and honours .gitignore): listing is most of
+        # the cost on big repos otherwise.
+        args = ["rg", "--files", "--hidden", "-g", "!.git"]
+        for g in include:
+            args += ["-g", g]
+        for g in exclude:
+            args += ["-g", "!" + g]
+        out = subprocess.run(args, cwd=root, capture_output=True, text=True, check=False).stdout.splitlines()
+    except FileNotFoundError:
+        # no ripgrep (Pylon, 2026-10-06: a bare os.walk read node_modules, deps
+        # and _build, 164 s instead of 14): git's own listing honours .gitignore
+        out = _git_files(root)
+        if out is None:
+            out = []
+            for dp, dn, fn in os.walk(root):
+                dn[:] = [d for d in dn if d not in (".git", "node_modules", "_build", "deps", ".gradle", "build")]
+                for f in fn:
+                    out.append(os.path.relpath(os.path.join(dp, f), root))
+    return sorted(p for p in out if match_any(p, include) and not match_any(p, exclude))
+
+
+def _stamp(root: str, rel: str):
+    try:
+        st = os.stat(os.path.join(root, rel))
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def load(root: str, config_path: str | list[str] | None = None, use_cache: bool = True) -> Project:
+    import time
+    t0 = time.time()
+    root = os.path.abspath(root)
+    extra = [config_path] if isinstance(config_path, str) else list(config_path or [])
+    config, problems = config_mod.load(root, extra)
+    proj_cfg = config.get("project", {})
+    include = proj_cfg.get("include", ["**/*"])
+    exclude = DEFAULT_EXCLUDE + proj_cfg.get("exclude", [])
+    files = list_files(root, include, exclude)
+    project = Project(root, config, files=files)
+    project.config_problems = problems
+    res = _res_map(files)
+    # caches are keyed by content and shared by every checkout of the repo (a
+    # lane's worktree reuses the main checkout's parse, graph and command runs)
+    from . import fingerprint as fp
+    repo = fp.repo_key(root)
+    hashes = fp.Hashes(root)
+    parse_name = f"{repo}-parse.pkl"
+    cache = {}
+    if use_cache:
+        c = fp.load(parse_name, {})
+        if isinstance(c, dict) and c.get("v") == CACHE_VERSION:
+            cache = c["files"]
+    todo, parsed = [], {}
+    digests = {}
+    for rel in files:
+        if adapter_for(rel) is None:
+            continue
+        h = hashes.of(rel)
+        if h is None:
+            continue
+        digests[rel] = h
+        hit = cache.get(rel, {}).get(h)
+        if hit is not None:
+            parsed[rel] = hit
+        else:
+            todo.append((root, rel, res))
+    # The whole linked graph, when nothing changed: an agent runs seamcheck
+    # many times in a row, and linking (edges) is most of a warm load.
+    graph_key = hashlib.sha1(json.dumps([CACHE_VERSION, extra, config, sorted(files), sorted(digests.items())],
+                                        sort_keys=True, default=str).encode()).hexdigest()
+    graph_name = f"{repo}-graph-{graph_key[:16]}.pkl"
+    index_name = f"{repo}-graphs.pkl"
+    recent = fp.load(index_name, []) if use_cache else []
+    if not isinstance(recent, list):
+        recent = []
+    previous = None
+    if use_cache:
+        g = fp.load(graph_name, None)
+        if isinstance(g, dict) and g.get("key") == graph_key:
+            cached = g["project"]
+            cached.root = root
+            cached.parse_ms = int((time.time() - t0) * 1000)
+            hashes.save()
+            fp.save(index_name, [graph_name] + [n for n in recent if n != graph_name][:3])
+            return cached
+        for n in recent:  # the newest graph of this repo: its unchanged files' blanked text is still good
+            g = fp.load(n, None)
+            if isinstance(g, dict) and "project" in g:
+                previous = g
+                break
+    if len(todo) > 64:
+        # fork where there is one: a script importing seamcheck as a library
+        # (no `if __name__ == "__main__"`) crashed under 3.14's forkserver
+        ctx = multiprocessing.get_context("fork") if "fork" in multiprocessing.get_all_start_methods() else None
+        parsed.update(_parse_parallel(todo, ctx))
+    else:
+        for t in todo:
+            rel, mods = _parse_one(t)
+            parsed[rel] = mods
+    if use_cache and todo:
+        ok = {r: v for r, v in parsed.items() if not any(isinstance(m, tuple) for m in v)}  # retry crashes next run
+        files_cache = dict(cache)
+        for r in ok:
+            slot = dict(files_cache.get(r, {}))
+            slot[digests[r]] = ok[r]
+            # two versions per file: the main checkout's and a lane's
+            files_cache[r] = dict(list(slot.items())[-2:])
+        fp.save(parse_name, {"v": CACHE_VERSION, "files": files_cache})
+    for rel in files:
+        for m in parsed.get(rel, []):
+            if isinstance(m, tuple):
+                # an adapter crash: say so (it used to leave the file silently empty)
+                project.config_problems.append(f"{rel}: parser error: {m[1]}")
+                continue
+            name = m.name
+            if name in project.modules:  # two files, one name: keep both, disambiguate
+                name = f"{m.name}@{rel}"
+                m.name = name
+                for f in m.funcs:
+                    f.module = name
+                    f.id = f"{name}.{f.name}"
+            project.modules[name] = m
+            project.by_file.setdefault(rel, []).append(m)
+            for f in m.funcs:
+                project.funcs[f.id] = f
+                project.by_name[f.name].append(f)
+    if previous is not None:
+        # blanked text of files that didn't change is still good (blanking is
+        # most of a harvest after a one-file edit)
+        old_digests = previous.get("text_digests", {})
+        for k, v in previous["project"].text_cache.items():
+            if k[0] in old_digests and old_digests[k[0]] == hashes.of(k[0]):
+                project.text_cache[k] = v
+        previous = None
+    _build_edges(project)
+    _apply_bridges(project)
+    project.config_problems += project.bridge_problems
+    if use_cache:
+        text_digests = {rel: hashes.of(rel) for rel in {k[0] for k in project.text_cache}}
+        fp.save(graph_name, {"key": graph_key, "project": project, "text_digests": text_digests})
+        fp.save(index_name, [graph_name] + [n for n in recent if n != graph_name][:3])
+        hashes.save()
+        fp.prune(keep={graph_name, parse_name, index_name, hashes.name})
+    project.parse_ms = int((time.time() - t0) * 1000)
+    return project
+
+
+def _lookup(project: Project, mod_name: str, name: str) -> Func | None:
+    seen = set()
+    while mod_name and mod_name not in seen:
+        seen.add(mod_name)
+        mod = project.modules.get(mod_name)
+        if mod is None:
+            return None
+        f = project.funcs.get(f"{mod_name}.{name}")
+        if f:
+            return f
+        mod_name = mod.parent
+    return None
+
+
+_JS_EXT = ("", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".mts", ".cjs")
+
+
+def _tsconfig_paths(project: Project, d: str, cache: dict) -> list[tuple[str, str]]:
+    """(prefix, target dir) pairs from the nearest tsconfig.json's `paths`."""
+    if d in cache:
+        return cache[d]
+    found: list[tuple[str, str]] = []
+    p = os.path.join(project.root, d, "tsconfig.json")
+    if os.path.isfile(p):
+        try:
+            with open(p, encoding="utf-8") as fh:
+                txt = fh.read()
+            try:
+                cfg = json.loads(txt)
+            except ValueError:  # tsconfig allows comments and trailing commas
+                txt = re.sub(r"(?m)^\s*//.*$", "", txt)
+                cfg = json.loads(re.sub(r",(\s*[}\]])", r"\1", txt))
+            opts = cfg.get("compilerOptions", {})
+            base = os.path.normpath(os.path.join(d, opts.get("baseUrl", ".")))
+            for k, vs in (opts.get("paths") or {}).items():
+                if vs and k.endswith("*") and vs[0].endswith("*"):
+                    found.append((k[:-1], os.path.normpath(os.path.join(base, vs[0][:-1])) + "/"))
+        except (OSError, ValueError, AttributeError):
+            pass
+    elif d:
+        found = _tsconfig_paths(project, d.rsplit("/", 1)[0] if "/" in d else "", cache)
+    cache[d] = found
+    return found
+
+
+def _resolve_where(project: Project, where: str, cache: dict) -> str:
+    """A module name for an adapter's "js:<dir>\\0<spec>" (or anything else, unchanged)."""
+    if not where.startswith("js:"):
+        return where
+    d, _, spec = where[3:].partition("\0")
+    if spec.startswith("."):
+        base = os.path.normpath(os.path.join(d, spec))
+    else:
+        base = next((t + spec[len(pre):] for pre, t in _tsconfig_paths(project, d, cache) if spec.startswith(pre)), "")
+        if not base:
+            return ""  # a package from node_modules
+    base = re.sub(r"\.(?:[mc]?[jt]sx?)$", "", base)
+    for cand in (base, base + "/index"):
+        if cand in project.modules:
+            return cand
+    return ""
+
+
+def _resolve_imports(project: Project) -> None:
+    cache: dict = {}
+    for m in project.modules.values():
+        if m.package:
+            project.packages[m.package].append(m.name)
+        m.aliases = {k: r for k, v in m.aliases.items() if (r := _resolve_where(project, v, cache))}
+        m.imported = {k: (r, n) for k, (v, n) in m.imported.items() if (r := _resolve_where(project, v, cache))}
+
+
+def _in_scope(project: Project, where: str, name: str) -> list[Func]:
+    """`name` in a module, or in any file of a "pkg:" package."""
+    if where.startswith("pkg:"):
+        return [t for t in (_lookup(project, mn, name) for mn in project.packages.get(where[4:], [])) if t]
+    if where.startswith("type:"):
+        return []  # a type is only a scope for method names (see _scope)
+    t = _lookup(project, where, name)
+    return [t] if t else []
+
+
+def _scope(project: Project, mod: Module, cache: dict) -> set[str]:
+    """The modules a file can see: itself, what it imports, its package."""
+    if mod.name in cache:
+        return cache[mod.name]
+    out = {mod.name, *mod.aliases.values(), *(w for w, _ in mod.imported.values())}
+    for w in mod.uses + ([f"pkg:{mod.package}"] if mod.package else []):
+        if w.startswith("pkg:"):
+            out.update(project.packages.get(w[4:], []))
+        elif w.startswith("type:"):
+            out.update(project.short.get(w[5:], []))
+        else:
+            out.add(w)
+    cache[mod.name] = out
+    return out
+
+
+_LOCALS = re.compile(r"\b(?:val|var|let|const)\s+([A-Za-z_$][\w$]*)|[(,]\s*([A-Za-z_$][\w$]*)\s*:(?!:)")
+_locals_cache: dict[str, set[str]] = {}
+
+
+def _shadowed(f: Func, name: str) -> bool:
+    """`name` is a parameter or local of `f` (Kotlin/Java/TS/Rust), so a bare
+    `name()` calls that value, not a function in scope."""
+    loc = _locals_cache.get(f.id)
+    if loc is None:
+        loc = _locals_cache[f.id] = {a or b for a, b in _LOCALS.findall(f.code)}
+    return name in loc
+
+
+def _groups(project: Project) -> dict[str, str]:
+    """[project.groups]: group id -> file, as "group:<id>" -> module name. A
+    file seamcheck doesn't know is a config problem (the binding would quietly
+    fall back to name guesses)."""
+    out = {}
+    for gid, rel in (project.config.get("project", {}).get("groups", {}) or {}).items():
+        mods = project.by_file.get(rel, [])
+        if mods:
+            out["group:" + gid] = mods[0].name
+        else:
+            project.config_problems.append(f"[project.groups] {gid} = {rel!r}: no such file in the project")
+    return out
+
+
+def _typed_targets(project: Project, mod: Module | None, ty: str, name: str, ext_cache: dict) -> tuple[list[Func], bool]:
+    """The functions `x.name()` reaches when x is declared `ty`, and whether ty
+    is a project type at all."""
+    mods = []
+    if mod and ty in mod.aliases:
+        mods.append(mod.aliases[ty])
+    if ty in project.modules:
+        mods.append(ty)
+    mods += project.short.get(ty, [])
+    hits = []
+    for mn in dict.fromkeys(mods):
+        t = _lookup(project, mn, name)
+        if t and t not in hits:
+            hits.append(t)
+    if not hits:
+        if not ext_cache:
+            for g in project.funcs.values():
+                if g.recv:
+                    ext_cache.setdefault((g.recv, g.name), []).append(g)
+            ext_cache.setdefault(("", ""), [])  # (built)
+        hits = list(ext_cache.get((ty, name), []))
+    return hits, bool(mods)
+
+
+# A qualifier that is a module's name: `Enum`, `Foo.Bar`, `Vector3`. Not a
+# value: `main`, `self.x`, `Foo.get()`, and not an ALL_CAPS constant holding
+# an object (`LOG`, `INSTANCE`).
+_MODULE_Q = re.compile(r"(?![A-Z0-9_]+$)[A-Z]\w*(?:\.[A-Z]\w*)*$")
+
+
+def _build_edges(project: Project) -> None:
+    _resolve_imports(project)
+    _locals_cache.clear()
+    groups = _groups(project)
+    scope_cache: dict = {}
+    ext_cache: dict = {}
+    # Short names for qualifiers in languages whose modules are named by path
+    # (Kotlin, Java, TS, Rust, Python): `MapPrefs.set` means the module in
+    # MapPrefs.kt, or the one declaring `object MapPrefs`.
+    for m in project.modules.values():
+        stem = os.path.splitext(os.path.basename(m.file))[0]
+        for nm in {stem, *m.decls}:
+            if m.name not in project.short[nm]:
+                project.short[nm].append(m.name)
+    # C++: a class's members are declared in its header; the .cpp's functions
+    # use them (`m_board->indexOf()`): the header's fields count for the .cpp.
+    for rel, mods in project.by_file.items():
+        stem, ext = os.path.splitext(rel)
+        if ext in (".cpp", ".cc", ".cxx") and mods:
+            for hext in (".h", ".hpp", ".hh"):
+                for hm in project.by_file.get(stem + hext, []):
+                    for k, v in hm.bound.items():
+                        mods[0].bound.setdefault(k, v)
+    # every module's descendants (for overrides)
+    for m in project.modules.values():
+        seen, cur = set(), m.parent
+        while cur and cur not in seen:
+            seen.add(cur)
+            project.children[cur].append(m.name)
+            par = project.modules.get(cur)
+            cur = par.parent if par else ""
+    for f in project.funcs.values():
+        mod = project.modules.get(f.module)
+        for c in f.calls:
+            targets: list[tuple[Func, bool]] = []
+            q = c.qual
+            if q == "super" and mod:
+                t = _lookup(project, mod.parent, c.name)
+                if t:
+                    targets = [(t, True)]
+            elif q:
+                # Each way to name the qualifier, most certain first; a miss falls
+                # through to the next (an elif chain sent a missed alias straight to
+                # the name guess, which drops common names like `set`).
+                # A local the project says what it is ([project.groups]): exact.
+                held = f.bound.get(q) or (mod.bound.get(q, "") if mod else "")
+                bound = groups.get(held, "")
+                if bound:
+                    t = _lookup(project, bound, c.name)
+                    if t:
+                        targets = [(t, True)]
+                elif held.startswith("type:"):
+                    # A declared type: its module's function, or a Kotlin extension
+                    # on it. A type outside the project: nothing (a `String`'s
+                    # `split` is not ours). A project type that misses (inherited
+                    # from a library, an extension we can't see): the usual ways.
+                    hits, in_project = _typed_targets(project, mod, held[5:], c.name, ext_cache)
+                    if hits:
+                        targets = [(t, len(hits) == 1) for t in hits]
+                    elif not in_project:
+                        project.resolution[os.path.splitext(f.file)[1]][2] += 1
+                        continue
+                if not targets and mod and q in mod.aliases:
+                    t = _lookup(project, mod.aliases[q], c.name)
+                    if t:
+                        targets = [(t, True)]
+                if not targets and q in project.modules:
+                    t = _lookup(project, q, c.name)
+                    if t:
+                        targets = [(t, True)]
+                if not targets:
+                    names = [q] + ([mod.aliases[q].rsplit(".", 1)[-1]] if mod and q in mod.aliases else [])
+                    for nm in names:
+                        hits = [t for t in (_lookup(project, mn, c.name) for mn in project.short.get(nm, [])) if t]
+                        if hits:
+                            targets = [(t, len(hits) == 1) for t in hits]
+                            break
+            elif not q and mod and _shadowed(f, c.name):
+                pass  # a parameter or local holding a function: a name guess at most
+            elif not q and mod:
+                # own module, then a name imported by itself, then modules and
+                # packages imported whole, then the rest of its own package
+                hits = _in_scope(project, mod.name, c.name)
+                if not hits and c.name in mod.imported:
+                    w, n = mod.imported[c.name]
+                    hits = _in_scope(project, w, n)
+                for w in ([] if hits else mod.uses):
+                    hits = _in_scope(project, w, c.name)
+                    if hits:
+                        break
+                if not hits and mod.package:
+                    hits = _in_scope(project, "pkg:" + mod.package, c.name)
+                targets = [(t, len(hits) == 1) for t in hits]
+            if not targets and q and _MODULE_Q.match(q) and q != "Self":
+                # A qualifier that names a module (`Enum.reject`, `Repo.rollback`)
+                # and misses: the function lives outside the project (or the alias
+                # is wrong). Nothing, not a guess: `Enum.reject` used to land on
+                # every project function named reject.
+                res = project.resolution[os.path.splitext(f.file)[1]]
+                res[2] += 1
+                continue
+            if not targets:
+                # A method on some object, or an import we can't see: every
+                # function with that name is a candidate (a "fuzzy" edge).
+                cands = [g for g in project.by_name.get(c.name, []) if g.kind != "top"]
+                # A guess by name is never "exact", even when only one function has
+                # the name: `icon()` on a lambda parameter matched PlacesNav.icon.
+                # Except a method call (`store.getState().applyOp()`,
+                # `gestures.onTouch()`) whose name exists in exactly one module
+                # the file imports or shares a package with: that is the one.
+                seen_mods = _scope(project, mod, scope_cache) if mod and not _shadowed(f, c.name) else set()
+                mine = [g for g in cands if g.module in seen_mods]
+                if len(mine) == 1 and q != "":
+                    targets = [(mine[0], True)]
+                else:
+                    if len(cands) > 8:
+                        cands = []  # a very common name (run, get, init...): too vague to be a useful edge
+                    targets = [(g, False) for g in cands]
+            # Virtual dispatch: a call that lands on a parent's function can
+            # run any subclass override of it too.
+            more = []
+            for t, exact in targets:
+                for sub in project.children.get(t.module, ()):
+                    o = project.funcs.get(f"{sub}.{t.name}")
+                    if o:
+                        more.append((o, exact))
+            res = project.resolution[os.path.splitext(f.file)[1]]
+            res[0 if any(e for _, e in targets) else 1 if targets else 2] += 1
+            for t, exact in targets + more:
+                project.edges[f.id].append((t.id, c.line, exact))
+                project.redges[t.id].append((f.id, c.line, exact))
+
+
+# --- queries ----------------------------------------------------------------------
+
+def reach(project: Project, start: str, depth: int, reverse: bool = False, exact_only: bool = False) -> dict[str, int]:
+    graph = project.redges if reverse else project.edges
+    dist = {start: 0}
+    dq = deque([start])
+    while dq:
+        u = dq.popleft()
+        if dist[u] >= depth:
+            continue
+        for v, _, exact in graph.get(u, []):
+            if exact_only and not exact:
+                continue
+            if v not in dist:
+                dist[v] = dist[u] + 1
+                dq.append(v)
+    return dist
+
+
+def path(project: Project, a: str, b: str, max_depth: int = 12, exact_only: bool = False) -> list[str]:
+    prev = {a: None}
+    dq = deque([(a, 0)])
+    while dq:
+        u, d = dq.popleft()
+        if u == b:
+            out = []
+            while u:
+                out.append(u)
+                u = prev[u]
+            return out[::-1]
+        if d >= max_depth:
+            continue
+        for v, _, exact in project.edges.get(u, []):
+            if exact_only and not exact:
+                continue
+            if v not in prev:
+                prev[v] = u
+                dq.append((v, d + 1))
+    return []
+
+
+def edge_split(project: Project, fid: str, reverse: bool = True) -> tuple[int, int]:
+    """(exact, name-guess) distinct callers (or callees) of one function."""
+    graph = project.redges if reverse else project.edges
+    ex, guess = set(), set()
+    for v, _, exact in graph.get(fid, []):
+        (ex if exact else guess).add(v)
+    return len(ex), len(guess - ex)
+
+
+# --- rules --------------------------------------------------------------------------
+
+@dataclass
+class Finding:
+    rule: str
+    severity: str
+    file: str
+    line: int
+    func: str
+    message: str
+    snippet: str = ""
+
+
+def _allowed(project: Project, rel: str, func: Func | None, allow: list[str]) -> bool:
+    for a in allow:
+        pg, _, fg = a.partition(":")
+        if glob_re(pg).match(rel) and (not fg or (func and fnmatch.fnmatchcase(func.name, fg))):
+            return True
+    return False
+
+
+def _suppressed(raw: list[str], line: int, rule: str) -> bool:
+    for ln in (line - 1, line - 2):
+        if 0 <= ln < len(raw):
+            t = raw[ln]
+            m = re.search(r"seamcheck:\s*allow\b\s*([\w\-, ]*)", t)
+            if m and (not m.group(1).strip() or rule in re.split(r"[,\s]+", m.group(1))):
+                return True
+    return False
+
+
+def _text_for(project: Project, rel: str, mode: str) -> list[str]:
+    mods = project.by_file.get(rel)
+    if mode == "code" and mods:
+        return mods[0].code
+    # many rules read the same big files: blank each (file, mode) once per load
+    key = (rel, mode)
+    hit = project.text_cache.get(key)
+    if hit is not None:
+        return hit
+    raw = project.text(rel)
+    if mode == "raw":
+        out = raw.split("\n")
+    else:
+        code, _ = blank(raw, scan_family(rel), keep_strings=(mode == "nocomment"))
+        out = code.split("\n")
+    project.text_cache[key] = out
+    return out
+
+
+def run_rules(project: Project, only: list[str] | None = None, skip: list[str] | None = None) -> list[Finding]:
+    out: list[Finding] = [Finding("config", "error", pr.split(":")[0], 0, "", pr) for pr in project.config_problems]
+    out += [Finding("config", "warn", n.split(":")[0], 0, "", n) for n in getattr(project, "env_notes", [])]
+    # command rules are separate processes (node scripts, a few seconds each):
+    # start them all at once, then collect in rule order
+    from concurrent.futures import ThreadPoolExecutor
+    cmds = [r for r in project.config.get("rule", []) if r.get("kind") == "command"
+            and not (only and r["id"] not in only) and not (skip and r["id"] in skip)]
+    pool = ThreadPoolExecutor(max_workers=max(1, min(8, len(cmds)))) if cmds else None
+    pending = {r["id"]: pool.submit(_command, project, r) for r in cmds} if pool else {}
+    for r in project.config.get("rule", []):
+        rid = r["id"]
+        if (only and rid not in only) or (skip and rid in skip):
+            continue
+        kind = r.get("kind", "forbid")
+        fn = {"forbid": _forbid, "together": _together, "reach": _reach, "coverage": _coverage,
+              "require": _require, "deps": _deps, "fanout": _fanout, "lint": _lint,
+              "essential": _essential, "command": _command}.get(kind)
+        if fn is None:
+            out.append(Finding(rid, "error", r.get("_file", "seamcheck.toml"), 0, "", f"unknown rule kind {kind!r}"))
+            continue
+        try:
+            out.extend(pending[rid].result() if rid in pending else fn(project, r))
+        except re.error as e:  # a rule's regex, not the tool: name the rule, run the rest
+            out.append(Finding(rid, "error", r.get("_file", "seamcheck.toml"), 0, "", f"bad pattern in rule {rid}: {e}"))
+        except EnvMissing as e:
+            out.append(Finding(rid, "warn", r.get("_file", "seamcheck.toml"), 0, "", f"rule {rid} not checked here: {e.args[0] if e.args else e}"))
+        except KeyError as e:
+            out.append(Finding(rid, "error", r.get("_file", "seamcheck.toml"), 0, "", f"rule {rid} needs {e}"))
+    if pool:
+        pool.shutdown()
+    order = {"error": 0, "warn": 1, "info": 2}
+    out.sort(key=lambda f: (order.get(f.severity, 3), f.rule, f.file, f.line))
+    return out
+
+
+_ENV_MISSING = re.compile(r"ERR_MODULE_NOT_FOUND|Cannot find (?:module|package) '[^']+'|command not found|"
+                          r"No such file or directory: '?node_modules|\(Mix\) Could not find|could not compile dependency")
+
+
+def _command(project: Project, r: dict) -> list[Finding]:
+    """[[rule]] kind = "command": a project's own check script, run from the root.
+
+      run    the command (a string, run through the shell)
+      when   globs: in a gate it runs only if the change touches one of them
+             (`check` always runs it)
+      files  regex finding a file in each output line (group 1 if any); a line
+             naming no file is about the whole check
+      prefix prepended to each found file to make it repo-relative
+      fix    one line telling how to fix (shown with each finding)
+
+    Exit 0 is clean. Otherwise each non-empty output line is a finding. With
+    `gate = "touched"` a finding blocks only when its file is part of the change
+    (a line naming no file blocks whenever the check ran): old debt elsewhere
+    doesn't stop an unrelated change, new debt in your files does."""
+    changed = getattr(project, "gate_changed", None)
+    when = r.get("when", [])
+    if changed is not None and when and not any(match_any(f, when) for f in changed):
+        return []
+    try:
+        res = subprocess.run(r["run"], shell=True, cwd=project.root, capture_output=True, text=True,
+                             timeout=float(r.get("timeout", 300)))
+    except subprocess.TimeoutExpired:
+        return [Finding(r["id"], "error", "", 0, "", f"`{r['run']}` took longer than {r.get('timeout', 300)} s")]
+    if res.returncode == 0:
+        return []
+    both = res.stdout + "\n" + res.stderr
+    if res.returncode == 127 or _ENV_MISSING.search(both):
+        # the check couldn't run here (a worktree without node_modules / deps):
+        # it vouches neither way; its stack trace isn't twelve findings
+        raise EnvMissing(f"`{r['run']}` couldn't run: {_ENV_MISSING.search(both).group(0) if _ENV_MISSING.search(both) else 'exit 127'}"
+                         " (install this checkout's deps)")
+    rx = re.compile(r["files"]) if r.get("files") else None
+    prefix = r.get("prefix", "")
+    sev = r.get("severity", "error")
+    out = []
+    for line in (res.stdout + "\n" + res.stderr).splitlines():
+        line = line.strip()
+        if not line or line.endswith(":"):
+            continue  # a heading ("... must match the scan:")
+        m = rx.search(line) if rx else None
+        rel = (prefix + (m.group(1) if m.groups() else m.group(0))) if m else ""
+        out.append(Finding(r["id"], sev, rel, 0, "", line + (f"  (fix: {r['fix']})" if r.get("fix") else "")))
+    if not out:
+        out.append(Finding(r["id"], sev, "", 0, "", f"`{r['run']}` exited {res.returncode} with no output"))
+    return out
+
+
+def _require(project: Project, r: dict) -> list[Finding]:
+    """Each file in `in` must exist and contain every `pattern`: in the whole
+    file, or in each function matching `func` (globs). `ordered = true`: the
+    patterns appear in that order (inject before enqueue). A glob in `in` must
+    match at least one file. Default text is "nocomment" (strings count)."""
+    pats = [re.compile(p, re.M) for p in (r["pattern"] if isinstance(r["pattern"], list) else [r["pattern"]])]
+    mode = r.get("text", "nocomment")
+    funcs = r.get("func")
+    funcs = [funcs] if isinstance(funcs, str) else funcs
+    sev, rid = r.get("severity", "error"), r["id"]
+    out = []
+
+    def miss(rel, line, fname, msg):
+        out.append(Finding(rid, sev, rel, line, fname, r.get("message", msg) if "missing" in msg else msg))
+
+    for spec in r["in"]:
+        if any(c in spec for c in "*?["):
+            files = [p for p in project.files if match_any(p, [spec])]
+            if not files:
+                miss(spec, 0, "", f"no file matches {spec}")
+        else:
+            files = [spec]
+        for rel in files:
+            if not os.path.isfile(os.path.join(project.root, rel)):
+                miss(rel, 0, "", f"required file is gone: {rel}")
+                continue
+            lines = _text_for(project, rel, mode)
+            units = [(None, 1, len(lines))]
+            if funcs:
+                units = [(f, f.start, f.end) for m in project.by_file.get(rel, []) for f in m.funcs
+                         if f.kind != "top" and any(fnmatch.fnmatchcase(f.name, g) for g in funcs)]
+                if not units:
+                    miss(rel, 0, "", f"no function {', '.join(funcs)} in {rel}")
+            for func, a, b in units:
+                body, pos = "\n".join(lines[a - 1:b]), 0
+                for p in pats:
+                    m = p.search(body, pos)
+                    if not m:
+                        miss(rel, a, func.name if func else "",
+                             f"missing{' (in order)' if r.get('ordered') and pos else ''}: {p.pattern}")
+                        break
+                    if r.get("ordered"):
+                        pos = m.end()
+    return out
+
+
+def _deps(project: Project, r: dict) -> list[Finding]:
+    """[[rule]] kind = "deps": dependencies with a status in `report` (default
+    unused / test-only / dead-only), minus `ignore`, one finding each."""
+    from . import deps
+    want = set(r.get("report", deps.ACTIONABLE))
+    skip = set(r.get("ignore", []))
+    out = []
+    found = deps.analyze(project)
+    # packages not installed (here or in the main checkout): one note per
+    # manifest, never a finding per dependency (a fresh tree is not "unused")
+    pending: dict[str, list] = {}
+    for d in found:
+        if d.status == "uninstalled" and d.name not in skip:
+            pending.setdefault(d.manifest, []).append(d)
+    for man, ds in sorted(pending.items()):
+        cmd = {"mix": "mix deps.get", "npm": "npm ci"}.get(ds[0].eco, "install its dependencies")
+        out.append(Finding(r["id"], "warn", man, ds[0].line, "",
+                           f"{len(ds)} {ds[0].eco} dependencies not checked: nothing installed here or in the main "
+                           f"checkout (run `{cmd}` in {os.path.dirname(man) or '.'} for a real answer)", ""))
+    for d in found:
+        if d.status in want and d.name not in skip and not _suppressed(project.text(d.manifest).split("\n"), d.line, r["id"]):
+            why = {"unused": "no reference in code, tests, config or scripts",
+                   "test-only": f"declared {d.scope} but only tests use it",
+                   "dead-only": "used only in functions nothing calls: " + ", ".join(d.dead[:3])}.get(d.status, d.status)
+            out.append(Finding(r["id"], r.get("severity", "warn"), d.manifest, d.line, "",
+                               r.get("message", f"{d.eco} dependency {d.name}: {why}") if "message" not in r else r["message"],
+                               "(name guessed: install deps for a sure answer)" if d.guessed else ""))
+    return out
+
+
+def _scope_files(project: Project, r: dict) -> list[str]:
+    pool = project.files
+    if r.get("repo"):  # scripts and config outside `[project] include`
+        pool = list_files(project.root, r.get("in", ["**/*"]),
+                          DEFAULT_EXCLUDE + project.config.get("project", {}).get("exclude", []))
+    return [p for p in pool if match_any(p, r.get("in", ["**/*"])) and not match_any(p, r.get("skip", []))]
+
+
+def _lint(project: Project, r: dict) -> list[Finding]:
+    """[[rule]] kind = "lint", lint = "<check>": a structural check seamcheck
+    knows (see lint.py), over `in` (default: the check's languages) minus
+    `skip`, with `options` for its knobs. `allow` / waivers as for forbid."""
+    from . import lint
+    name = r.get("lint", "")
+    check = lint.LINTS.get(name)
+    if check is None:
+        near = difflib.get_close_matches(name, lint.LINTS, 1)
+        return [Finding(r["id"], "error", r.get("_file", "seamcheck.toml"), 0, "",
+                        f"unknown lint {name!r}" + (f" (did you mean {near[0]!r}?)" if near else "")
+                        + f"; known: {', '.join(sorted(lint.LINTS))}")]
+    opts = r.get("options", {})
+    bad = [k for k in opts if k not in lint.OPTIONS[name]]
+    if bad:
+        return [Finding(r["id"], "error", r.get("_file", "seamcheck.toml"), 0, "",
+                        f"lint {name}: unknown option(s) {', '.join(bad)} (known: {', '.join(sorted(lint.OPTIONS[name])) or 'none'})")]
+    scope = r.get("in", lint.DEFAULT_IN[name])
+    # a lint over scripts / units / lockfiles reads the repo, not only `[project] include`
+    pool = (list_files(project.root, scope, DEFAULT_EXCLUDE + project.config.get("project", {}).get("exclude", []))
+            if name in lint.REPO_WIDE or r.get("repo") else project.files)
+    files = [p for p in pool if match_any(p, scope) and not match_any(p, r.get("skip", []))]
+    changed = getattr(project, "gate_changed", None)
+    if changed is not None and name in lint.PER_FILE:
+        # a gate: a file-local check can only change its answer where the change touched
+        sib = {os.path.join(os.path.dirname(c), "package-lock.json") for c in changed if c.endswith("package.json")}
+        sib |= {c[:-len(".service")] + ".path" for c in changed if c.endswith(".service")}
+        files = [p for p in files if p in changed or p in sib]
+    out = []
+    for rel in files:
+        raw_text = "\n".join(_text_for(project, rel, "raw"))
+        code = "\n".join(_text_for(project, rel, "code"))
+        try:
+            hits = check(rel, raw_text, code, opts, project=project)
+        except RecursionError:
+            continue
+        raw = raw_text.split("\n")
+        for line, msg in hits:
+            func = _enclosing(project, rel, line)
+            if _allowed(project, rel, func, r.get("allow", [])) or _suppressed(raw, line, r["id"]):
+                continue
+            out.append(Finding(r["id"], r.get("severity", "error"), rel, line, func.name if func else "",
+                               r.get("message", msg), raw[line - 1].strip()[:160] if 0 < line <= len(raw) else ""))
+    return out
+
+
+def _essential(project: Project, r: dict) -> list[Finding]:
+    """[[rule]] kind = "essential": a manifest of controls each bar must show
+    unconditionally (lint.essential)."""
+    from . import lint
+    out = []
+    for rel, line, msg in lint.essential(project, r):
+        raw = project.text(rel).split("\n") if line else []
+        if line and _suppressed(raw, line, r["id"]):
+            continue
+        out.append(Finding(r["id"], r.get("severity", "error"), rel, line, "", msg,
+                           raw[line - 1].strip()[:160] if 0 < line <= len(raw) else ""))
+    return out
+
+
+def _forbid(project: Project, r: dict) -> list[Finding]:
+    pat = re.compile(r["pattern"])
+    mode = r.get("text", "code")
+    out = []
+    files = _scope_files(project, r)
+    changed = getattr(project, "gate_changed", None)
+    if changed is not None:
+        files = [f for f in files if f in changed]  # a pattern in one file: only touched files can gain one
+    for rel in files:
+        lines = _text_for(project, rel, mode)
+        mod = project.module_of_file(rel)
+        raw = mod.raw if mod else project.text(rel).split("\n")
+        if r.get("scope") == "file":
+            # a pattern spanning lines (`setTimeout(...` then `setProvider(`): search
+            # the whole file, report the line each match starts on
+            text = "\n".join(lines)
+            hits = sorted({text.count("\n", 0, m.start()) for m in pat.finditer(text)})
+        else:
+            hits = [i for i, ln in enumerate(lines) if pat.search(ln)]
+        for i in hits:
+            func = None
+            for m in project.by_file.get(rel, []):
+                func = m.func_at(i + 1) or func
+            if _allowed(project, rel, func, r.get("allow", [])) or _suppressed(raw, i + 1, r["id"]):
+                continue
+            out.append(Finding(r["id"], r.get("severity", "error"), rel, i + 1, func.name if func else "",
+                               r.get("message", f"forbidden: {r['pattern']}"), raw[i].strip()[:160] if i < len(raw) else ""))
+    return out
+
+
+def _together(project: Project, r: dict) -> list[Finding]:
+    """In every function (or file, scope="file") where `if` matches, each of
+    `then` must match too (optionally `unless` excuses it). `func`: only
+    functions with these names (globs). `depth = N`: a `then` may also match
+    in what the function calls, N exact calls deep (a helper that logs)."""
+    cond = re.compile(r["if"])
+    thens = [re.compile(t) for t in (r["then"] if isinstance(r["then"], list) else [r["then"]])]
+    unless = re.compile(r["unless"]) if r.get("unless") else None
+    scope = r.get("scope", "func")
+    mode = r.get("text", "code")
+    out = []
+    for rel in _scope_files(project, r):
+        mods = project.by_file.get(rel, [])
+        raw = mods[0].raw if mods else project.text(rel).split("\n")
+        lines = _text_for(project, rel, mode)
+        if scope == "near":
+            # every occurrence of `if` needs each `then` within its window of lines
+            before, after = (r.get("window") or [0, 6])
+            for i, ln in enumerate(lines):
+                if not cond.search(ln):
+                    continue
+                func = None
+                for m in mods:
+                    func = m.func_at(i + 1) or func
+                win = "\n".join(lines[max(0, i - before):i + after + 1])
+                if (unless and unless.search(win)) or _allowed(project, rel, func, r.get("allow", [])) or _suppressed(raw, i + 1, r["id"]):
+                    continue
+                missing = [t.pattern for t in thens if not t.search(win)]
+                if missing:
+                    out.append(Finding(r["id"], r.get("severity", "error"), rel, i + 1, func.name if func else "",
+                                       r.get("message", "missing nearby: " + ", ".join(missing)), raw[i].strip()[:160] if i < len(raw) else ""))
+            continue
+        units = []
+        funcs = r.get("func")
+        funcs = [funcs] if isinstance(funcs, str) else funcs
+        if scope == "file" or not mods:
+            units.append((None, 1, len(lines)))
+        else:
+            for m in mods:
+                for f in m.funcs:
+                    if f.kind != "top" and (not funcs or any(fnmatch.fnmatchcase(f.name, g) for g in funcs)):
+                        units.append((f, f.start, f.end))
+        for func, a, b in units:
+            body = "\n".join(lines[a - 1:b])
+            m = cond.search(body)
+            if not m or (unless and unless.search(body)):
+                continue
+            line = a + body[:m.start()].count("\n")
+            if _allowed(project, rel, func, r.get("allow", [])) or _suppressed(raw, line, r["id"]):
+                continue
+            missing = [t for t in thens if not t.search(body)]
+            if missing and func and r.get("depth"):
+                for cid in reach(project, func.id, int(r["depth"]), exact_only=True):
+                    callee = project.funcs.get(cid)
+                    if callee and cid != func.id:
+                        missing = [t for t in missing if not t.search(callee.code)]
+            missing = [t.pattern for t in missing]
+            if missing:
+                out.append(Finding(r["id"], r.get("severity", "error"), rel, line, func.name if func else "",
+                                   r.get("message", "missing: " + ", ".join(missing)),
+                                   raw[line - 1].strip()[:160] if line - 1 < len(raw) else ""))
+    return out
+
+
+def _reach(project: Project, r: dict) -> list[Finding]:
+    """Every function picked by `from` (specs; optionally only those whose
+    code matches `when`) must reach one of `to` (function names) within
+    `depth` calls ("all" mode: every one of them)."""
+    when = re.compile(r["when"]) if r.get("when") else None
+    targets = r["to"] if isinstance(r["to"], list) else [r["to"]]
+    depth = int(r.get("depth", 4))
+    mode = r.get("mode", "any")
+    out = []
+    picked = []
+    for spec in (r["from"] if isinstance(r["from"], list) else [r["from"]]):
+        picked.extend(project.find(spec))
+    for f in dict.fromkeys(picked):
+        if when and not when.search(f.code):
+            continue
+        if _allowed(project, f.file, f, r.get("allow", [])):
+            continue
+        dist = reach(project, f.id, depth, exact_only=r.get("strict", False))
+        names = {project.funcs[k].name for k in dist if k in project.funcs and k != f.id}
+        hit = [t for t in targets if t in names or t in f.refs]
+        ok = bool(hit) if mode == "any" else len(hit) == len(targets)
+        if not ok:
+            miss = [t for t in targets if t not in hit]
+            out.append(Finding(r["id"], r.get("severity", "error"), f.file, f.start, f.name,
+                               r.get("message", f"doesn't reach {' / '.join(miss)} within {depth} calls")))
+    return out
+
+
+def _coverage(project: Project, r: dict) -> list[Finding]:
+    """Keys `defined` in one place vs keys `used` elsewhere: report defined
+    but never used, and used but never defined (typos, dead ids)."""
+    def harvest(spec: dict) -> dict[str, tuple[str, int]]:
+        pat = re.compile(spec["pattern"])
+        found = {}
+        for rel in [p for p in project.files if match_any(p, spec.get("in", ["**/*"]))]:
+            for i, ln in enumerate(_text_for(project, rel, spec.get("text", "nocomment"))):
+                for m in pat.finditer(ln):
+                    key = next((g for g in m.groups() if g), m.group(0))
+                    found.setdefault(key, (rel, i + 1))
+        return found
+    d, u = harvest(r["defined"]), harvest(r["used"])
+    ignore = set(r.get("ignore", []))
+    out = []
+    checks = r.get("check", ["unused", "undefined"])
+    if "unused" in checks:
+        for k in sorted(set(d) - set(u) - ignore):
+            rel, ln = d[k]
+            out.append(Finding(r["id"], r.get("severity", "warn"), rel, ln, "", f"{k!r} is defined but never used" + (": " + r["message"] if r.get("message") else "")))
+    if "undefined" in checks:
+        for k in sorted(set(u) - set(d) - ignore):
+            rel, ln = u[k]
+            out.append(Finding(r["id"], r.get("severity", "error"), rel, ln, "", f"{k!r} is used but never defined" + (": " + r["message"] if r.get("message") else "")))
+    return out
+
+
+_RUN_CACHE: dict[tuple[str, str], str] = {}
+
+
+class EnvMissing(KeyError):
+    """A rule's helper command couldn't run here (deps not installed, a tool
+    missing): the rule can't vouch either way. Reported as a warning naming
+    the cause, never as a contract break."""
+
+
+def _same_file(a: str, b: str) -> bool:
+    try:
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            return fa.read() == fb.read()
+    except OSError:
+        return False
+
+
+def _run_output(project: Project, cmd: str, spec: dict) -> str:
+    """A command's output. With `inputs` (globs of what the output depends on,
+    e.g. the router for `mix phx.routes`) it is cached on disk until one of
+    those files changes: a 5 s command no longer runs on every check."""
+    inputs = spec.get("inputs")
+    path = None
+    if inputs:
+        # keyed by the inputs' content, not the checkout: a lane's worktree with
+        # the main checkout's router gets the main checkout's `mix phx.routes`
+        from . import fingerprint as fp
+        files = sorted(list_files(project.root, inputs, []))
+        digest = hashlib.sha1(json.dumps([cmd, fp.digest_files(project.root, files)]).encode()).hexdigest()[:20]
+        path = fp.path(f"run-{digest}.txt")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return fh.read()
+        except OSError:
+            pass
+    res = subprocess.run(cmd, shell=True, cwd=project.root, capture_output=True, text=True,
+                         timeout=spec.get("timeout", 300))
+    if res.returncode != 0:
+        # a git worktree (lanes) has no deps/_build: when the command's inputs are
+        # the same as the main checkout's, the main checkout answers for it
+        from .deps import _main_checkout
+        main = _main_checkout(project.root)
+        same = bool(main and inputs) and all(
+            _same_file(os.path.join(project.root, rel), os.path.join(main, rel))
+            for rel in list_files(project.root, inputs, []))
+        if same:
+            res = subprocess.run(cmd, shell=True, cwd=main, capture_output=True, text=True,
+                                 timeout=spec.get("timeout", 300))
+        if res.returncode != 0:
+            raise EnvMissing(f"run {cmd!r} exited {res.returncode}: {res.stderr.strip()[-300:]}"
+                             + ("" if same else " (in a worktree: install its deps, or its inputs differ from the "
+                                                 "main checkout's)" if main else ""))
+    if path:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(res.stdout)
+        except OSError:
+            pass
+    return res.stdout
+HARVEST_KEYS = {"in", "skip", "func", "within", "pattern", "values", "text", "run", "rewrite", "timeout", "join", "token",
+                "inputs"}
+VIEW_KEYS = {"match", "normalize", "fallback", "except", "ignore", "sep", "wildcard", "unhandled"}
+
+
+def _token(spec: dict, m: re.Match) -> str:
+    """A match's token: its first non-empty group (or the whole match); with
+    `join`, all non-empty groups joined (`(client)_op\\("(\\w+)"` -> client.open_url)."""
+    if "token" in spec:
+        return m.group(spec["token"]) or ""
+    groups = [g for g in m.groups() if g]
+    if "join" in spec and groups:
+        return spec["join"].join(groups)
+    return groups[0] if groups else m.group(0)
+
+
+def harvest_all(project: Project, spec: dict) -> list[tuple[str, str, int, "re.Match | None"]]:
+    """Every occurrence a spec names: (token, file, line, match). A spec is:
+      in / skip   file globs
+      func        only inside these functions (globs), e.g. the one `switch`
+      within      only inside this regex's match (group 1 if it has one), e.g.
+                  '(?s)@widget_types ~w\\((.*?)\\)' or an enum body
+      pattern     token regex (group 1, else the match); a list is several
+      values      literal tokens (no file needed)
+      text        code | nocomment (default: string contents count) | raw
+      run         a shell command whose output is harvested instead of files
+      inputs      globs the run's output depends on: cached on disk until they change
+      join        join all non-empty groups with this string (a token built in parts)
+      token       which group is the token (others stay available, e.g. to a bridge's target)
+      rewrite     [[regex, replacement], ...] applied to each token (`:id` ->
+                  `:p`, strip `?query`); a token rewritten to "" is dropped
+    Patterns search whole text (a region can span lines)."""
+    found: list = []
+    rewrite = spec.get("rewrite", [])
+
+    def keep(key: str, where: tuple[str, int], m=None) -> None:
+        for pat, rep in rewrite:
+            key = re.sub(pat, rep, key)
+        if key:
+            found.append((key, where[0], where[1], m))
+
+    for v in spec.get("values", []):
+        keep(v, (spec.get("_file", "seamcheck.toml"), 0))
+    if "pattern" not in spec:
+        return found
+    if spec.get("run"):
+        # the project's own tool knows best (`mix phx.routes`, `cargo metadata`)
+        cmd = spec["run"]
+        key = (cmd, project.root)
+        if key not in _RUN_CACHE:
+            _RUN_CACHE[key] = _run_output(project, cmd, spec)
+        out = _RUN_CACHE[key]
+        for pat in (spec["pattern"] if isinstance(spec["pattern"], list) else [spec["pattern"]]):
+            for m in re.finditer(pat, out):
+                keep(_token(spec, m), (f"$ {cmd}", out.count("\n", 0, m.start()) + 1), m)
+        return found
+    pats = [re.compile(p) for p in (spec["pattern"] if isinstance(spec["pattern"], list) else [spec["pattern"]])]
+    within = re.compile(spec["within"]) if spec.get("within") else None
+    funcs = spec.get("func")
+    funcs = [funcs] if isinstance(funcs, str) else funcs
+    files = [p for p in project.files if match_any(p, spec.get("in", ["**/*"])) and not match_any(p, spec.get("skip", []))]
+    for rel in files:
+        lines = _text_for(project, rel, spec.get("text", "nocomment"))
+        text = "\n".join(lines)
+        starts = [0]
+        for ln in lines[:-1]:
+            starts.append(starts[-1] + len(ln) + 1)
+        regions: list[tuple[int, int]] = [(0, len(text))]
+        if funcs and not project.by_file.get(rel):
+            raise KeyError(f"func = {funcs} on {rel}, which seamcheck can't parse into functions: use within")
+        if funcs:
+            regions = [(starts[f.start - 1], starts[f.end] if f.end < len(starts) else len(text))
+                       for m in project.by_file.get(rel, []) for f in m.funcs
+                       if f.kind != "top" and any(fnmatch.fnmatchcase(f.name, g) for g in funcs)]
+        if within:
+            regions = [(m.start(1), m.end(1)) if m.re.groups and m.group(1) is not None else (m.start(), m.end())
+                       for a, b in regions for m in within.finditer(text, a, b)]
+        for a, b in regions:
+            for pat in pats:
+                for m in pat.finditer(text, a, b):
+                    keep(_token(spec, m), (rel, bisect.bisect_right(starts, m.start())), m)
+    return found
+
+
+def harvest(project: Project, spec: dict) -> dict[str, tuple[str, int]]:
+    """Tokens a spec names, each with where it is first seen (see harvest_all)."""
+    out: dict[str, tuple[str, int]] = {}
+    for tok, rel, line, _ in harvest_all(project, spec):
+        out.setdefault(tok, (rel, line))
+    return out
+
+
+def view_tokens(project: Project, spec: dict) -> dict[str, tuple[str, int]]:
+    """A view's handled tokens. With `unhandled` (a regex), a token whose every
+    branch body matches it is not handled: `case "share_link": return
+    {kind: "center"}` names the token and still sends it to the default. A
+    branch body is the text from the token's match to the next match (a
+    fallthrough `case "a": case "b":` shares the next body)."""
+    if not spec.get("unhandled"):
+        return harvest(project, spec)
+    dead = re.compile(spec["unhandled"])
+    occ = [o for o in harvest_all(project, spec) if o[3] is not None]
+    occ.sort(key=lambda o: (o[1], o[3].start()))
+    bodies: list[str] = []
+    for i, (tok, rel, line, m) in enumerate(occ):
+        nxt = occ[i + 1][3].start() if i + 1 < len(occ) and occ[i + 1][1] == rel else min(len(m.string), m.end() + 400)
+        body = m.string[m.end():nxt]
+        cut = re.search(r"\bdefault\s*:|\belse\s*(?:->|\{|$)|^\s*_\s*->", body, re.M)
+        bodies.append(body[:cut.start()] if cut else body)
+    for i in range(len(bodies) - 2, -1, -1):  # fallthrough: an empty body is the next one's
+        if re.fullmatch(r"[\s,|:]*(?:case\s*)?", bodies[i]) and occ[i + 1][1] == occ[i][1]:
+            bodies[i] = bodies[i + 1]
+    out: dict[str, tuple[str, int]] = {}
+    for (tok, rel, line, m), body in zip(occ, bodies):
+        if not dead.search(body):
+            out.setdefault(tok, (rel, line))
+    return out
+
+
+def _handles(spec: dict, got, token: str) -> bool:
+    """Does a view's harvested set cover `token`? match = exact (default) |
+    contains (the view tests `type.contains("stash")`) | prefix | regex (the
+    view's tokens are regexes)."""
+    # normalize = [[regex, replacement], ...]: what the view does to a token
+    # before looking it up (OS-A drops `_embed` once instead of listing both)
+    for pat, rep in spec.get("normalize", []):
+        token = re.sub(pat, rep, token)
+    how = spec.get("match", "exact")
+    if how == "exact":
+        return token in got
+    if how == "contains":
+        return any(g in token for g in got)
+    if how == "prefix":
+        return any(token.startswith(g) for g in got)
+    if how == "regex":
+        return any(re.fullmatch(g, token) for g in got)
+    if how == "segments":
+        # paths: same number of `sep`-separated segments, each equal or a
+        # `wildcard` on either side (`/a/:p/b` meets `/a/:id/b` and `/a/x/b`)
+        # A trailing `**` on the token is "any rest" (a client appending a sub-path).
+        sep, wild = spec.get("sep", "/"), spec.get("wildcard", ":p")
+        ts = token.split(sep)
+        rest = ts[-1] == "**"
+        if rest:
+            ts = ts[:-1]
+
+        def meets(gs):
+            if rest:
+                gs = gs[:len(ts)] if len(gs) >= len(ts) else None
+            return gs is not None and len(gs) == len(ts) and all(a == b or wild in (a, b) for a, b in zip(ts, gs))
+        return any(meets(g.split(sep)) for g in got)
+    raise KeyError(f"match = {how!r} (exact | contains | prefix | regex | segments)")
+
+
+def _covers_some(spec: dict, g: str, produced) -> bool:
+    """A view token some produced token needs (not a stale handler)."""
+    return any(_handles(spec, {g}, k) for k in produced)
+
+
+def _fanout(project: Project, r: dict) -> list[Finding]:
+    """One producer, many consumers: every token the `source` produces must be
+    handled by each of `views` (missing), and a view shouldn't handle tokens
+    nothing produces (extra: a stale handler, or a producer that lost it).
+    Each view may list `except` (a list, or {token = "why"}) for intentional
+    gaps, and `ignore` for extras it handles on purpose."""
+    out = []
+    for where, spec in [("source", r["source"])] + [(f"views.{v}", sp) for v, sp in r["views"].items()]:
+        allowed = HARVEST_KEYS | (VIEW_KEYS if where != "source" else set())
+        for k in spec:
+            if k not in allowed:
+                near = difflib.get_close_matches(k, allowed, 1)
+                out.append(Finding(r["id"], "error", r.get("_file", "seamcheck.toml"), 0, "",
+                                   f"{where}: unknown key {k!r}" + (f" (did you mean {near[0]!r}?)" if near else "")))
+    src = harvest(project, dict(r["source"], _file=r.get("_file")))
+    checks = r.get("check", ["missing"])
+    if not src:
+        return [Finding(r["id"], "error", r.get("_file", "seamcheck.toml"), 0, "", "source produced no tokens (pattern or path wrong?)")]
+    for view, spec in r["views"].items():
+        got = view_tokens(project, dict(spec, _file=r.get("_file")))
+        if not got and not spec.get("values"):
+            out.append(Finding(r["id"], "error", r.get("_file", "seamcheck.toml"), 0, "", f"view {view} handles nothing (pattern or path wrong?)"))
+            continue
+        exc = spec.get("except", [])
+        exc = set(exc if isinstance(exc, list) else exc.keys())
+        fb = spec.get("fallback")
+        if "missing" in checks:
+            for k in sorted(k for k in src if k not in exc and not _handles(spec, got, k)):
+                rel, ln = src[k]
+                out.append(Finding(r["id"], "warn" if fb else r.get("severity", "error"), rel, ln, "",
+                                   f"{view} does not handle {k!r}" + (f" (falls back to {fb})" if fb else "")
+                                   + (": " + r["message"] if r.get("message") else "")))
+        if "extra" in checks:
+            for k in sorted(g for g in got if g not in spec.get("ignore", []) and not _covers_some(spec, g, src)):
+                rel, ln = got[k]
+                out.append(Finding(r["id"], r.get("extra_severity", "warn"), rel, ln, "",
+                                   f"{view} handles {k!r}, which the source never produces"))
+        for k in sorted(k for k in exc if _handles(spec, got, k)):
+            rel, ln = got[k]
+            out.append(Finding(r["id"], "warn", rel, ln, "", f"{view} lists {k!r} under except but handles it now: drop the exception"))
+    return out
+
+
+def matrix(project: Project, r: dict) -> tuple[list[str], list[str], dict]:
+    """(tokens, views, cell) for a fanout rule: cell[(token, view)] is "ok",
+    "except", "fallback", "missing", "extra" (handled, never produced) or ""."""
+    src = harvest(project, dict(r["source"], _file=r.get("_file")))
+    views = list(r["views"])
+    got, exc = {}, {}
+    for v in views:
+        spec = r["views"][v]
+        got[v] = set(view_tokens(project, dict(spec, _file=r.get("_file")))) - set(spec.get("ignore", []))
+        e = spec.get("except", [])
+        exc[v] = set(e if isinstance(e, list) else e.keys())
+    extra = {g for v in views for g in got[v] if not _covers_some(r["views"][v], g, src)}
+    cell = {}
+    for k in set(src) | extra:
+        for v in views:
+            spec = r["views"][v]
+            if k in src:
+                cell[(k, v)] = ("ok" if _handles(spec, got[v], k) else "except" if k in exc[v]
+                                else "fallback" if spec.get("fallback") else "missing")
+            else:
+                cell[(k, v)] = "extra" if k in got[v] else ""
+    return sorted(set(src) | extra, key=lambda k: (k not in src, k)), views, cell
+
+
+def _enclosing(project: Project, rel: str, line: int) -> Func | None:
+    """The innermost function around a line (the file's <top> if none)."""
+    inside = [f for m in project.by_file.get(rel, []) for f in m.funcs if f.start <= line <= f.end]
+    real = [f for f in inside if f.kind != "top"]
+    if real:
+        return max(real, key=lambda f: (f.start, -f.end))
+    return inside[0] if inside else None
+
+
+def _apply_bridges(project: Project) -> None:
+    """[[bridge]] rules: edges no call graph can see, across languages. Each
+    `from` occurrence (a client's `"/api/osa/inbox"`, a hub `push(socket,
+    "ops")`) links its enclosing function to what the matching `to` names:
+    `target` (a function id built from the match's groups, e.g. a route's
+    "{2}.{3}" -> Controller.action) or the function enclosing each `to`
+    occurrence (a client's `.on("ops")` handler). Matching is `match` (exact,
+    segments...) like a fanout view. Direction is data flow: from -> to."""
+    for b in project.config.get("bridge", []):
+        bid = b.get("id", "bridge")
+        try:
+            froms = harvest_all(project, dict(b["from"], _file=b.get("_file")))
+            tos = harvest_all(project, dict(b["to"], _file=b.get("_file")))
+        except EnvMissing as e:  # couldn't run here (a worktree without deps): not a broken bridge
+            project.env_notes = getattr(project, "env_notes", []) + [f"{b.get('_file', 'seamcheck.toml')}: bridge {bid} not built here: {e.args[0] if e.args else e}"]
+            continue
+        except (KeyError, re.error, subprocess.SubprocessError, OSError) as e:
+            project.bridge_problems.append(f"{b.get('_file', 'seamcheck.toml')}: bridge {bid}: {e}")
+            continue
+        for side in ("from", "to"):
+            bad = [k for k in b[side] if k not in HARVEST_KEYS | {"target"}]
+            if bad:
+                project.bridge_problems.append(f"{b.get('_file', 'seamcheck.toml')}: bridge {bid}: {side}: unknown key {bad[0]!r}")
+        target = b["to"].get("target")
+        dests: dict[str, list[str]] = defaultdict(list)
+        for tok, rel, line, m in tos:
+            if target:
+                try:
+                    fid = target.format(*([m.group(0)] + list(m.groups())) if m else [tok])
+                except (IndexError, KeyError):
+                    continue
+                if fid in project.funcs:
+                    dests[tok].append(fid)
+            else:
+                f = _enclosing(project, rel, line)
+                if f:
+                    dests[tok].append(f.id)
+        if not dests:
+            project.bridge_problems.append(f"{b.get('_file', 'seamcheck.toml')}: bridge {bid}: `to` found nothing")
+            continue
+        spec = {k: v for k, v in b.items() if k in ("match", "sep", "wildcard", "normalize")}
+        exact_hits: dict[str, list[str]] = {}
+        for tok, rel, line, _ in froms:
+            if tok not in exact_hits:
+                exact_hits[tok] = [d for t, ds in dests.items() if _handles(spec, {t}, tok) for d in ds]
+            hits = exact_hits[tok]
+            if not hits:
+                continue
+            src = _enclosing(project, rel, line)
+            if not src:
+                continue
+            for dst in dict.fromkeys(hits):
+                if dst == src.id:
+                    continue
+                project.edges[src.id].append((dst, line, True))
+                project.redges[dst].append((src.id, line, True))
+                project.bridged[(src.id, dst)] = bid
+
+
+def impact(project: Project, start: set[str], depth: int = 4, fuzzy: bool = False) -> dict[str, int]:
+    """Everything a change to `start` can reach: callers (who depends on
+    it), transitively, plus what bridges carry forward (the client handlers
+    of an event it emits). Distance per function."""
+    dist = {s: 0 for s in start}
+    dq = deque(start)
+    while dq:
+        u = dq.popleft()
+        if dist[u] >= depth:
+            continue
+        # certain edges only unless asked: a name guess is not "this breaks"
+        nxt = [c for c, _, ex in project.redges.get(u, []) if ex or fuzzy]
+        nxt += [d for d, _, _ in project.edges.get(u, []) if (u, d) in project.bridged]
+        for v in nxt:
+            if v not in dist and v in project.funcs:
+                dist[v] = dist[u] + 1
+                dq.append(v)
+    return dist
+
+
+# --- built-in reports (no config needed) -----------------------------------------
+
+ENGINE_CALLBACKS = re.compile(r"^(_ready|_process|_physics_process|_input|_unhandled_input|_gui_input|_draw|_init|"
+                              r"_enter_tree|_exit_tree|_notification|_to_string|_get|_set|_on_\w+|handle_\w+|init|"
+                              r"mount|render|main|__\w+__|setup|test_\w+|call|start_link|child_spec|terminate|code_change)$")
+
+
+def dead(project: Project) -> list[Func]:
+    called = set()
+    refs = set()
+    for f in project.funcs.values():
+        refs |= f.refs
+        for tgt, _, _ in project.edges.get(f.id, []):
+            called.add(tgt)
+    out = []
+    for f in project.funcs.values():
+        if f.kind == "top" or f.id in called or f.name in refs or ENGINE_CALLBACKS.match(f.name):
+            continue
+        # anything named in any file's text as a string or @rpc etc.: be conservative
+        out.append(f)
+    return out
