@@ -1660,6 +1660,18 @@ def _build_edges(project: Project) -> None:
                 t = _lookup(project, mod.parent, c.name)
                 if t:
                     targets = [(t, True)]
+            elif q == "super" and mod and f.file.endswith((".rb", ".rake", ".ru")):
+                # Ruby's `super`: the same method in the nearest ancestor (superclass, included modules)
+                own = types.own_class(mod, f)
+                for a in (types.ancestors(own[0])[1:] if own else []):
+                    t = project.funcs.get(f"{a}.{c.name}")
+                    if t is not None and t.id != f.id:
+                        targets = [(t, True)]
+                        break
+                else:
+                    if own and types.external_base(own[0]):
+                        _nothing(project, f, c)  # a library superclass's
+                        continue
             elif q and mod and q in _SELF and (t := _lookup(project, mod.name, c.name)) and (q != "cls" or mod.owner):
                 # `self.x()` / `this.x()` / `Self::x()`: the caller's own class
                 # (a Python class is its own module; elsewhere, the file)
