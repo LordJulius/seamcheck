@@ -41,6 +41,7 @@ class Func:
     kind: str = "func"  # "func", "top" (module-level code), "private"...
     targs: str = ""  # C#: its overloads' type-parameter counts ("0,1"), "" unknown
     ptypes: str = ""  # its overloads' declared parameter types (lambdas.OV / lambdas.PARAM separated)
+    relem: str = ""  # what iterating its declared return type gives (`Vec<Match>`: Match), "" unknown
     id: str = ""  # "Module.name" (set in __post_init__; kept in sync when a module is renamed)
 
     def __post_init__(self) -> None:

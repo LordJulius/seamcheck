@@ -71,6 +71,11 @@ def param_types(tk: str, inner: str) -> list[str]:
             p = _cut_default(p).strip()
             m = re.match(r"^(?:(?:this|params|ref|out|in|final|scoped|readonly)\s+)*(.+?)\s*\b([A-Za-z_]\w*)$", p, re.S)
             out.append(m.group(1).strip() if m else "")
+        elif tk == "rust":  # `name: Type`; a method's `self` takes no argument
+            if re.match(r"^(?:&\s*(?:'\w+\s+)?)?(?:mut\s+)?self\b", p):
+                continue
+            parts = split_top(p, ":")
+            out.append(":".join(parts[1:]).strip() if len(parts) > 1 else "")
         elif tk in ("kotlin", "js", "swift"):  # `name: Type = default` (TS `name?: Type`, Swift `label name: Type`)
             parts = split_top(p, ":")
             out.append(_cut_default(":".join(parts[1:])).strip() if len(parts) > 1 else "")
@@ -93,6 +98,10 @@ def lambda_params(ty: str) -> list[str]:
     t = re.sub(r"^(?:@escaping\s+|@Sendable\s+|suspend\s+|noinline\s+|crossinline\s+)+", "", t)
     while t.endswith("?") or (t.startswith("(") and matching(t, 0) == len(t) - 1 and ("->" in t or "=>" in t)):
         t = t[:-1].strip() if t.endswith("?") else t[1:-1].strip()  # `((A) -> R)?`: the function type inside
+    m = re.match(r"^(?:&\s*(?:'\w+\s+)?(?:mut\s+)?)?(?:Box\s*<\s*)?(?:impl|dyn)?\s*(?:Fn|FnMut|FnOnce)\s*\((.*?)\)(?:\s*->.*)?\s*>?"
+                 r"(?:\s*\+\s*[\w']+)*$", t, re.S)  # Rust `impl FnMut(Match) -> bool`, `&mut dyn Fn(&Path)`
+    if m:
+        return [a.strip() for a in split_top(m.group(1))]
     m = re.match(r"^(?:[\w.]+\.)?Expression\s*<(.*)>$", t, re.S)  # C# `Expression<Func<A, bool>>`
     if m:
         t = m.group(1).strip()
@@ -120,6 +129,7 @@ def lambda_params(ty: str) -> list[str]:
 _ARROW_ONE = re.compile(r"^(?:async\s+|static\s+)*([A-Za-z_$][\w$]*)\s*(?:=>|->)")
 _ARROW_MANY = re.compile(r"^(?:async\s+|static\s+)*\(([^()]*)\)\s*(?::\s*[^=]+)?(?:=>|->)")
 _JS_FUNCTION = re.compile(r"^(?:async\s+)?function\b\s*\*?\s*[\w$]*\s*\(([^()]*)\)")
+_RS_CLOSURE = re.compile(r"^(?:move\s+)?\|([^|]*)\|")
 _BRACE_LAMBDA = re.compile(r"^\{\s*(?:\(([^()]*)\)|([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*))\s*(->|\bin\b)")
 
 
@@ -141,6 +151,16 @@ def lambda_args(fam: str, args: list[str]) -> list[tuple[int, list[str]]]:
     """For each argument that is a lambda: (its index, its parameter names, ""
     for one this can't bind)."""
     out = []
+    if fam == "rust":  # `|a, b| ...` was split at its comma: put each closure back together
+        merged, k = [], 0
+        while k < len(args):
+            a = args[k]
+            while re.match(r"^\s*(?:move\s+)?\|[^|]*$", a) and k + 1 < len(args):
+                k += 1
+                a += "," + args[k]
+            merged.append(a)
+            k += 1
+        args = merged
     for i, a in enumerate(args):
         a = a.strip()
         m = _ARROW_ONE.match(a)
@@ -158,6 +178,11 @@ def lambda_args(fam: str, args: list[str]) -> list[tuple[int, list[str]]]:
                 continue
         if fam in ("kotlin", "swift") and a.startswith("{"):
             out.append((i, brace_lambda(fam, a)))
+        if fam == "rust":
+            m = _RS_CLOSURE.match(a)
+            if m:
+                out.append((i, [re.sub(r"^(?:&\s*)?(?:mut\s+)?", "", n.strip()) if re.match(r"^(?:&\s*)?(?:mut\s+)?[a-z_]\w*$", n.strip())
+                                else "" for n in split_top(m.group(1))] if m.group(1).strip() else []))
     return out
 
 
