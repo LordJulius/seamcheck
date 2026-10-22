@@ -116,7 +116,7 @@ def lambda_params(ty: str) -> list[str]:
         return args[:n] if n else []
     if t.startswith("("):  # `(A, B) -> R`, `(a: A) => R`
         k = matching(t, 0)
-        if k > 0 and re.match(r"\s*[-=]>", t[k + 1:]):
+        if k > 0 and re.match(r"\s*(?:async\s+)?(?:re)?(?:throws\s*(?:\([^)]*\))?\s*)?[-=]>", t[k + 1:]):
             ps = []
             for p in split_top(t[1:k]):
                 parts = split_top(p, ":")

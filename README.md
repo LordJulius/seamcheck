@@ -314,9 +314,9 @@ the code.
 | JavaScript | express 95.3%, hexpm 97.8%, plausible 95.3% |
 | Elixir | plausible 99.9%, hexpm 99.4%, phoenix 99.9% |
 | PHP | Slim 98.1%, guzzle 95.6% |
-| Swift | Alamofire 94.0%, swift-argument-parser 92.9% |
+| Swift | Alamofire 94.2%, swift-argument-parser 93.7% |
 | Ruby | sinatra 94.0%, jekyll 92.9% |
-| GDScript | godot-demo-projects 90.8%, tps-demo 92.9% |
+| GDScript | godot-demo-projects 93.3%, tps-demo 93.3% |
 | QML | neochat 93.7%, cool-retro-term 96.9%, kdeconnect **79.4%** |
 
 What gets a call there, beyond imports and declared types: return types

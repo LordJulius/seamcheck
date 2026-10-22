@@ -1763,7 +1763,13 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     for c in classes:  # every class gets its module, methods or not (fields, an interface)
         if c["name"] and (c["kw"] != "companion"):
             outer = enclosing_classes(c["pos"])
-            class_module(outer + [c])
+            home_ = class_module(outer + [c])
+            gp_ = re.match(r"\s*<([^<>]*(?:<[^<>]*>[^<>]*)*)>", code[c["pos"]:c["pos"] + 300].split(c["name"], 1)[-1]) \
+                if c["kw"] in ("class", "struct", "interface", "record", "protocol", "trait") else None
+            if gp_:  # `final class Protected<Value>`: its type parameters, in order (for what a closure is handed)
+                names_ = [re.split(r"[\s:=]", g.strip())[0] for g in lambdas.split_top(gp_.group(1))]
+                if names_ and all(re.match(r"^[A-Z]\w*$", n) for n in names_):
+                    home_.bound.setdefault("<>", ",".join(names_))
     if ext == ".cs":  # a class with a module of its own is not the file's (`partial class Policy` in WrapExtensions.cs)
         own_ = {d for m_ in mods.values() for d in m_.decls}
         mod.decls = [d for d in mod.decls if d not in own_ or d.split("`")[0] in {c["name"] for c in classes if _stem_key(c["name"]) == stem}]
@@ -1889,6 +1895,8 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 for m in _JV_FIELD.finditer(ln):
                     got_fields.setdefault(m.group(2), set()).add(m.group(1))
             elif swift and not inside[i]:
+                for m in re.finditer(r"\b(?:let|var)\s+([A-Za-z_]\w*)\s*:\s*\(?(?:any\s+)?[A-Z][\w.]*\s*<(.+)>\s*[?!]?\)?\s*(?:[={]|$)", ln):
+                    got_fields.setdefault(m.group(1) + "<>", set()).add("\0gen:" + m.group(2))  # `Protected<MutableState>`
                 for m in _SW_FIELD.finditer(ln):
                     t = type_name(m.group(2) or m.group(3) or "")
                     if t:
