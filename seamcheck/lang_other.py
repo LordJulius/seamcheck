@@ -116,6 +116,8 @@ _CPP_VALUE = re.compile(r"(?:^|[(,])\s*(?:(?:const|final|this|using|await\s+usin
                         r"([A-Z]\w*(?:\.[A-Z]\w*)*(?:<[^;=(){}]*>)?)\s+([a-z_]\w*)\s*(?=[({;=,)]|:(?!:)|in\s)", re.M)
 _CPP_TYPED = re.compile(r"(?<![\w:>])([A-Z]\w*)\s*[\*&]+\s*([a-z_]\w*)\s*(?=[,;=)\[{]|:(?!:)|$)", re.M)
 # a C++ class member in a header: `BoardModel* m_board = nullptr;`, `Hub m_hub;`
+# `Q_PROPERTY(SortFilterRoomTreeModel *model READ model CONSTANT)`: QML's `obj.model`
+_Q_PROPERTY = re.compile(r"^\s*Q_PROPERTY\(\s*(?:const\s+)?((?:[\w:]+)(?:<[^()]*?>)?)\s*[\*&]?\s*([A-Za-z_]\w*)\s+(?:READ|MEMBER|BINDABLE)\b")
 _CPP_FIELD = re.compile(r"^\s*(?:(?:mutable|static|const|inline)\s+)*((?:std::|[A-Z])[\w:]*(?:<[^;()]*>)?)\s*[\*&]?\s*([a-z_]\w*)\s*(?:=[^;]*|\{[^;]*\})?;")
 _KT_RECV = r"\bfun\s+(?:<[^>]*>\s*)?([A-Z]\w*)(?:<[^>]*>)?\??\.%s\s*\("
 _ALLCAPS = re.compile(r"[A-Z0-9_]+$")
@@ -1038,7 +1040,7 @@ def _after_params(sig: str) -> int:
     """Where the parameter list ends (its `)`): a parameter's own function type
     (`handler: () -> Void`) is no return type."""
     k = sig.find("(")
-    if k < 0 or sig[:k].strip(" \t\n<>,:?\w") != "":
+    if k < 0 or not re.fullmatch(r"[\s\w<>,:?]*", sig[:k]):
         return 0
     close = lambdas.matching(sig, k)
     return close if close > 0 else 0
@@ -1946,6 +1948,9 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     if t:
                         got_fields.setdefault(m.group(1), set()).add(("opt:" if _RS_WRAPPED.match(m.group(2)) else "") + t)
             elif cpp and not inside[i]:
+                qm = _Q_PROPERTY.match(ln)
+                if qm and (t := type_name(qm.group(1))) and not _ALLCAPS.match(t):
+                    got_fields.setdefault(qm.group(2), set()).add(t)  # what QML reads as `obj.name`
                 for m in _CPP_FIELD.finditer(ln):
                     t = type_name(m.group(1))  # (`QPointer<CaptureTool>` holds a CaptureTool)
                     if t and not _ALLCAPS.match(t) and t not in ("Q_OBJECT", "Q_PROPERTY"):
