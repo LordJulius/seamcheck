@@ -645,6 +645,9 @@ def _resolve_rs(project: Project, where: str, cache: dict) -> str:
     segs = path.split("::") if path else []
     dirs, names = _rs_crates(project, cache)
     src = next((s for d, s in dirs if rel.startswith(s + "/")), "")
+    bm = re.match(r"(.*?/?src/bin)/([^/]+)/", rel)
+    if bm and src and rel.startswith(src + "/bin/"):
+        src = f"{bm.group(1)}/{bm.group(2)}"  # `src/bin/bat/main.rs`: a binary crate rooted there
     cur: list[str] = []
     if src:
         p = rel[len(src) + 1:-3]  # (.rs)
@@ -1310,6 +1313,9 @@ def _build_edges(project: Project) -> None:
                          and f.start <= g.start <= f.end and g.id != f.id]
                 if len(inner) == 1:
                     targets = [(inner[0], True)]
+                elif not inner and _scoped_language(f.file):
+                    _nothing(project, f, c)  # a closure or a parameter: no project function by that name
+                    continue
             elif not q and mod:
                 # own module, then a name imported by itself, then modules and
                 # packages imported whole, then the rest of its own package.

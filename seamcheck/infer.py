@@ -26,7 +26,7 @@ EXT = ("ext", (), True)  # a library value: every call on it is the library's ((
 
 def is_ext(v) -> bool:
     return v is not None and v[0] == "ext"
-_MAX = 6  # how deep an `x = <expr>` / a return type may lead before we stop
+_MAX = 48  # how deep a chain, an `x = <expr>` or a return type may lead before we stop
 
 
 class Types:
@@ -143,6 +143,11 @@ class Types:
         w = fm.aliases.get(name) or (fm.imported.get(name, ("", ""))[0])
         if w and (w == mn or w == own or (w.startswith("pkg:") and self._pkg_of(mn) == w[4:])):
             return True
+        if w in self.p.modules:  # through the imported module's re-exports (a crate root's `pub use`)
+            from .core import _defining_module
+            dm = _defining_module(self.p, w, name)
+            if dm and (dm == mn or dm == own):
+                return True
         if w:
             return False  # the import names another package's
         for u in fm.uses:
@@ -344,6 +349,10 @@ class Types:
         modules, exact), EXT, or None (unknown)."""
         if not chain or depth > _MAX:
             return None
+        if mod.file.endswith(".rs") and len(chain) > 1:
+            # `grep::printer::StandardBuilder::new()`: a path ending at a type the project declares starts there
+            k = max((i for i, sg in enumerate(chain[:-1]) if sg[:1].isupper() and sg in self.by_type), default=0)
+            chain = chain[k:]
         cur = self.first(mod, f, chain[0], depth, self_mods)
         for seg in chain[1:]:
             if cur is None or is_ext(cur):
@@ -369,6 +378,9 @@ class Types:
             return self.instance(mod, seg[4:-2], self_mods)
         if seg.endswith("()"):
             name = seg[:-2]
+            held = f.bound.get(name, "") if f is not None else ""
+            if held.startswith("call:"):  # a closure: calling it gives its body's value
+                return self.chain(mod, f, tuple(held[5:].split("\x1f")), depth + 1, self_mods)
             g = self.bare(mod, f, name)
             if g is not None:
                 return self.returns(g, None, depth + 1)
@@ -533,6 +545,9 @@ def resolve_bases(project) -> None:
         got, missing = [], False
         fm = project.modules.get(m.owner, m) if m.owner else m
         for b in m.bases:
+            if b in fm.external:  # `use std::fmt::Debug`: the library's, not a project type of that name
+                missing = True
+                continue
             mods, _, declared = t.type_modules(m, b)
             mods = [x for x in mods if x != m.name and project.modules[x].kind != "ext"] or [x for x in mods if x != m.name]
             if mods:
