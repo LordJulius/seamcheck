@@ -488,6 +488,32 @@ class Types:
         gm = self.p.modules.get(gm_name)
         return self.instance(gm, ty) if gm is not None else None
 
+    def _class_params(self, gm) -> list:
+        """The type parameters of the class a module's function belongs to."""
+        return [n for a in self.ancestors(gm.name) for n in self.p.modules[a].bound.get("<>", "").split(",") if n]
+
+    def _generic_arg(self, mod, f, chain: tuple, gm, param: str) -> str:
+        """The type argument a receiver was declared with for the callee's
+        class type parameter `param` (`let s: Protected<MutableState>` and
+        `class Protected<Value>`: Value -> MutableState), or ""."""
+        from . import lambdas
+        names = [n for a in self.ancestors(gm.name) for n in self.p.modules[a].bound.get("<>", "").split(",") if n][:8]
+        if param not in names:
+            return ""
+        last = chain[-1]
+        held = ""
+        if f is not None:
+            held = f.bound.get(last + "<>", "")
+        if not held and (len(chain) == 1 or chain[0] in ("self", "this")):
+            own = self.own_class(mod, f) or []
+            held = next((self.p.modules[a].bound.get(last + "<>", "") for o in own for a in self.ancestors(o)
+                         if self.p.modules[a].bound.get(last + "<>")), "")
+        if not held.startswith("gen:"):
+            return ""
+        args = [a.strip() for a in lambdas.split_top(held[4:])]
+        k = names.index(param)
+        return type_name(args[k]) if k < len(args) else ""
+
     def lambda_param(self, mod, f, spec: str, depth: int):
         """A lambda's parameter: the type the called function's parameter at
         that place hands its callback (`AddPipeline(k, b => ...)` with
@@ -562,8 +588,16 @@ class Types:
             return None
         gm_name, ty = tys.pop()
         gm = self.p.modules.get(gm_name)
-        if gm is None or lambdas.generic_param(ty):
-            return None
+        bare_ty = re.sub(r"^(?:inout|borrowing|consuming)\s+", "", ty).strip()
+        if gm is not None and chain:
+            sub = self._generic_arg(mod, f, chain, gm, bare_ty)
+            if sub:  # `mutableState.write { $0 }` on a Protected<MutableState>: Value is MutableState
+                got = self.instance(mod, sub)
+                self.cache[key] = got
+                return got
+        if gm is None or lambdas.generic_param(bare_ty) or bare_ty in self._class_params(gm):
+            return None  # (a type parameter the receiver didn't say)
+        ty = bare_ty
         ty = generic_name(ty) if gm.file.endswith(".cs") else type_name(ty)
         if not ty:
             return None
