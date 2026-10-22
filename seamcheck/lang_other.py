@@ -1175,7 +1175,7 @@ _ASSIGN = {
 _FIELD_ASSIGN = {
     "kotlin": re.compile(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*=(?!=)"),
     "swift": re.compile(r"\b(?:let|var)\s+([A-Za-z_]\w*)\s*=(?!=)"),
-    "js": re.compile(r"^\s*(?:(?:private|public|protected|readonly|static|declare|override)\s+)*#?([A-Za-z_$][\w$]*)\s*[?!]?\s*(?::[^=;\n]+)?=(?![=>])"),
+    "js": re.compile(r"^\s*(?:(?:private|public|protected|readonly|static|declare|override|export|const|let|var)\s+)*#?([A-Za-z_$][\w$]*)\s*[?!]?\s*(?::[^=;\n]+)?=(?![=>])"),
     "php": re.compile(r"(?:private|public|protected|var)\s+(?:readonly\s+)?(?:\??[\\\w]+\s+)?(\$\w+)\s*=(?!=)"),
     "jvm": re.compile(r"\bvar\s+([A-Za-z_]\w*)\s*=(?!=)"),
 }
@@ -1786,6 +1786,11 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             if fpat and not inside[i]:  # `private val client = rule.newClient()`: a property's value says its type
                 for m in fpat.finditer(ln):
                     ch = expression(code, line_start[i] + m.end())
+                    if ch and fam == "js" and ch[0] in ("require()", "import()"):
+                        continue  # `var express = require('..')`: the import handling knows what that is
+                    if ch and fam == "js" and re.match(r"\s*(?:new\s+)?[\w$.<>]+\s*\((?:[^()]|\([^()]*\))*?(?:=>|\bfunction\b|\{)",
+                                                         code[line_start[i] + m.end():line_start[i] + m.end() + 400]):
+                        continue  # `create((set) => ({ applyOp }))`: a library object holding project callbacks
                     if ch:  # (a PHP property `$x` is read as `->x`)
                         expr_fields.setdefault(home.name, {}).setdefault(m.group(1).lstrip("$"), ch)
             if fam == "js" and not inside[i] and "{" in ln:  # `const { h } = window;` at the top of a file
