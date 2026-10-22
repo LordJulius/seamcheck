@@ -167,7 +167,7 @@ class Types:
         one; a C# partial class's files (and a Swift extension, a Rust impl)
         are one per namespace and name."""
         m = self.p.modules[mn]
-        if m.file.endswith((".h", ".hpp", ".hh", ".cpp", ".cc", ".cxx")):
+        if m.file.endswith((".h", ".hpp", ".hh", ".cpp", ".cc", ".cxx", ".c")):
             return os.path.splitext(m.file)[0] + "\0" + (m.decls[0] if m.owner and m.decls else "")  # Foo.h + Foo.cpp: one class
         if m.kind == "ext" and m.decls:
             # a Swift extension / Rust impl of the project's one type of that name is part of it
@@ -244,7 +244,7 @@ class Types:
             return hit
         name = m.decls[0] if m.owner or m.kind == "ext" else m.decls[-1]
         cands = [x for x in self.by_type.get(name, ()) if x != m.name]
-        if m.file.endswith((".h", ".hpp", ".hh", ".cpp", ".cc", ".cxx")):
+        if m.file.endswith((".h", ".hpp", ".hh", ".cpp", ".cc", ".cxx", ".c")):
             own = self._primary(m.name)
             out = [x for x in cands if self._primary(x) == own]
         elif m.kind == "ext":
