@@ -384,6 +384,8 @@ class Types:
             if len(hits) == 1:
                 return self.returns(hits[0], list(mods) if kind == "inst" else None, depth + 1)
             if not hits:
+                if kind == "static" and seg == "new()":
+                    return ("inst", mods, exact)  # Ruby `Foo.new`: a Foo (no `new` of its own)
                 if seg in UNWRAP:
                     return cur  # `.unwrap()` / `.get()` on an Option: the value inside
                 if any(self.external_base(mn) for mn in mods):
@@ -418,7 +420,7 @@ def resolve_bases(project) -> None:
     inherited method may be the library's)."""
     t = Types(project)
     for m in list(project.modules.values()):
-        if not m.bases:
+        if not m.bases or m.file.endswith((".rb", ".rake", ".ru")):  # Ruby: lang_ruby.link resolved them
             continue
         got, missing = [], False
         fm = project.modules.get(m.owner, m) if m.owner else m
