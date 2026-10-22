@@ -18,6 +18,8 @@ _JS = [
     # `exports.foo = function (`, `app.use = function (`, `Foo.prototype.bar = async function (`:
     # an anonymous function stored as a property is called by that property's name
     re.compile(rf"^[ \t]*(?:{_ID}\.)+({_ID})[ \t]*=[ \t]*(?:async[ \t]+)?function[ \t]*\*?[ \t]*\(", re.M),
+    # `res.set = res.header = function header(`: each name in the chain is the function
+    re.compile(rf"^[ \t]*(?:{_ID}\.)+({_ID})[ \t]*=\s*(?:(?:{_ID}\.)+{_ID}[ \t]*=\s*)+(?:async[ \t]+)?function\b[^(\n]*\(", re.M),
     # `this.use = (arg, ...handlers) => {` in a constructor: a member of the class
     re.compile(rf"^[ \t]*this\.({_ID})[ \t]*=[ \t]*(?:async[ \t]+)?(?:\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=\n]+?)?=>|{_ID}[ \t]*=>)", re.M),
     re.compile(rf"\b(?:const|let|var)\s+({_ID})\s*(?::[^=]+)?=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::\s*[^=]+)?=>|{_ID}\s*=>)"),
