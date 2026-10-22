@@ -115,6 +115,7 @@ Options
   -C DIR          project root (default: the nearest parent with seamcheck.toml)
   --config PATH   more config: a .toml or a folder of them (repeatable)
   --fuzzy         callers / callees / path / impact: also walk name-guess edges
+  --precise       ask language servers where the guessed calls go (see "Precise mode")
   --no-cache      parse everything again
   --strict        runtime: also flag rules that had nothing to check in this run
   --format F      check / gate: text (default), json (= --json), sarif, github
@@ -235,6 +236,78 @@ binds `NAME` to that script for the rest of the function, and `NAME.foo()` is
 exact. A helper (`var main := _main()`) does not bind, a group not in the table
 stays a guess, and a file that isn't in the project is a config problem. List
 only groups exactly one script joins.
+
+### Precise mode: a language server settles the guesses
+
+The static resolver reads names; it can't know what `shapes["c"].area()` or
+`make().run()` is. With `--precise` (any command that loads the graph) or
+`[precise] enabled = true`, each call it guessed, and each call that reached
+nothing though a project function has the name, goes to the language's server
+as a definition request:
+
+- an answer in the project makes the call one exact edge (the function there,
+  a class's constructor, and like any exact edge its subclasses' overrides);
+- an answer outside it (the standard library, a dependency, `node_modules`)
+  makes the guesses nothing: a library call;
+- no answer, or one that isn't a function seamcheck knows (a parameter holding
+  a callback, an interface's signature, a derive), leaves the call as it was.
+
+Static resolution is the default and doesn't change. Precise mode only replaces
+a guess with what a server says, and `seamcheck stats --precise` counts it:
+
+```
+precise: 631 calls asked (0 answered from cache): 244 guesses and 9 nothings made exact, 177 guesses
+were library calls, 86 nothings confirmed, 115 unsettled  (10347 ms; pyright-langserver: 613 asked, ...)
+```
+
+Servers, used when installed: pyright (`.py`), rust-analyzer (`.rs`), gopls
+(`.go`, also found in `$GOPATH/bin`) and TypeScript's tsserver (`.ts .tsx .js
+.jsx .mts .cts .mjs .cjs`, its own protocol). Any other LSP server over stdio
+works per extension:
+
+```toml
+[precise]
+enabled = true                                   # default: only with --precise
+servers = { ".java" = ["jdtls"], ".js" = [] }    # add or replace one; [] keeps a language static
+wait = 300                                       # s a server may take to load the workspace
+timeout = 60                                     # s without an answer before giving up on it
+```
+
+The built-in servers never fetch or build: gopls runs with `GOPROXY=off`,
+rust-analyzer offline without build scripts or proc macros, and when cargo
+can't resolve the workspace offline (dependencies never fetched) seamcheck
+describes the workspace's own crates to it from `cargo metadata --no-deps`, so
+calls between them and into std still resolve (std needs rustup's `rust-src`).
+A server that is missing, crashes or stops answering is one warning on stderr;
+the run goes on with the static graph.
+
+Speed: requests are pipelined (256 in flight per server), servers run side by
+side, and rust-analyzer is asked again until its workspace has loaded. Answers
+are cached by the asking file's content, line, column and server, so a warm run
+asks nothing, and an edit re-asks only the edited files.
+
+Measured (`stats`, project calls exact; 4 cores, October 2026, no project
+dependencies installed: no venv, no `node_modules`, no fetched crates):
+
+| repo | language | static | precise | static run | precise cold | answers cached, graph rebuilt |
+|---|---|---|---|---|---|---|
+| pallets/flask | Python | 62% | 72% | 0.5 s | 10.1 s | 0.5 s |
+| encode/httpx | Python | 67% | 94% | 0.7 s | 10.5 s | 0.5 s |
+| psf/requests | Python | 86% | 95% | 0.6 s | 6.7 s | 0.4 s |
+| honojs/hono | TypeScript (.ts / .tsx) | 66% / 65% | 83% / 77% | 3.3 s | 22.5 s | 2.4 s |
+| excalidraw/excalidraw | TypeScript (.tsx / .ts) | 82% / 80% | 89% / 92% | 7.3 s | 38.3 s | 3.9 s |
+| BurntSushi/ripgrep | Rust | 80% | 94% | 1.4 s | 20.3 s | 1.5 s |
+| sharkdp/bat | Rust | 83% | 93% | 1.7 s | 45.8 s | 0.9 s |
+| spf13/cobra | Go | 97% | 100% | 1.1 s | 1.9 s | 0.5 s |
+| junegunn/fzf | Go | 84% | 90% | 1.1 s | 8.2 s | 1.6 s |
+
+An unchanged repo loads its cached graph (0.2 to 1.0 s). A cold run is mostly
+the servers' own analysis: pyright answers ~75 questions a second once warm,
+tsserver ~200, and bat's 44 s is pyright on one 8,500-line numpy benchmark
+fixture (its Rust took 14 s). Splitting a server's files over several processes
+was slower (each re-analyses the same imports). What stays unsettled is mostly
+callbacks held in parameters, interface signatures, and calls into dependencies
+that aren't installed.
 
 ## Config: the project's files, never the tool's
 
