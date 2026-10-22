@@ -27,6 +27,25 @@ from .model import Func, Module
 from .scan import blank
 
 CACHE_VERSION = 34
+
+
+def _code_version() -> str:
+    """CACHE_VERSION plus a digest of seamcheck's own source: a changed adapter
+    or resolver never reuses a parse or graph the old code made (forgetting
+    to bump CACHE_VERSION used to leave warm runs on the old graph)."""
+    global _CODE
+    if _CODE is None:
+        h = hashlib.sha1(str(CACHE_VERSION).encode())
+        here = os.path.dirname(os.path.abspath(__file__))
+        for name in sorted(os.listdir(here)):
+            if name.endswith((".py", ".txt")):
+                with open(os.path.join(here, name), "rb") as fh:
+                    h.update(name.encode() + b"\0" + fh.read())
+        _CODE = f"{CACHE_VERSION}-{h.hexdigest()[:12]}"
+    return _CODE
+
+
+_CODE: str | None = None
 DEFAULT_EXCLUDE = ["**/.git/**", "**/node_modules/**", "**/deps/**", "**/_build/**", "**/target/**",
                    "**/.godot/**", "**/.claude/**", "**/dist/**", "**/build/**", "**/.venv/**", "**/__pycache__/**"]
 
@@ -265,7 +284,7 @@ def load(root: str, config_path: str | list[str] | None = None, use_cache: bool 
     cache = {}
     if use_cache:
         c = fp.load(parse_name, {})
-        if isinstance(c, dict) and c.get("v") == CACHE_VERSION:
+        if isinstance(c, dict) and c.get("v") == _code_version():
             cache = c["files"]
     todo, parsed = [], {}
     digests = {}
@@ -283,7 +302,7 @@ def load(root: str, config_path: str | list[str] | None = None, use_cache: bool 
             todo.append((root, rel, res))
     # The whole linked graph, when nothing changed: an agent runs seamcheck
     # many times in a row, and linking (edges) is most of a warm load.
-    graph_key = hashlib.sha1(json.dumps([CACHE_VERSION, extra, config, sorted(files), sorted(digests.items())],
+    graph_key = hashlib.sha1(json.dumps([_code_version(), extra, config, sorted(files), sorted(digests.items())],
                                         sort_keys=True, default=str).encode()).hexdigest()
     graph_name = f"{repo}-graph-{graph_key[:16]}.pkl"
     index_name = f"{repo}-graphs.pkl"
@@ -322,7 +341,7 @@ def load(root: str, config_path: str | list[str] | None = None, use_cache: bool 
             slot[digests[r]] = ok[r]
             # two versions per file: the main checkout's and a lane's
             files_cache[r] = dict(list(slot.items())[-2:])
-        fp.save(parse_name, {"v": CACHE_VERSION, "files": files_cache})
+        fp.save(parse_name, {"v": _code_version(), "files": files_cache})
     for rel in files:
         for m in parsed.get(rel, []):
             if isinstance(m, tuple):
@@ -1230,6 +1249,10 @@ def _build_edges(project: Project) -> None:
                 # the file imports or shares a package with: that is the one.
                 seen_mods = _scope(project, mod, scope_cache) if mod and not _shadowed(f, c.name) else set()
                 mine = [g for g in cands if g.module in seen_mods]
+                if f.file.endswith(".py"):
+                    # x.f() reaches a module-level Python function only through
+                    # the module's own name (resolved above), never `session.get()`
+                    mine = [g for g in mine if project.modules[g.module].owner]
                 own = [g for g in cands if g.file == f.file and g.recv]
                 if targets:
                     pass

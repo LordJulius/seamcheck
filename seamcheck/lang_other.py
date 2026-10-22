@@ -309,8 +309,8 @@ def parse_python(path: str, rel: str, text: str, res_of=None) -> list[Module]:
 def _py_collect(f: Func, lines: list[str], a: int, b: int, first: bool) -> None:
     for i in range(a, b + 1):
         t = lines[i]
-        if first and i == a:
-            t = t.split("(", 1)[1] if "(" in t else ""
+        if (first and i == a) or _PY_BLOCK.match(t):
+            t = t.split("(", 1)[1] if "(" in t else ""  # a (nested) def's own name is no call
         for m in _PY_CALL.finditer(t):
             name, q = m.group(2), m.group(1) or ""
             if not q:
