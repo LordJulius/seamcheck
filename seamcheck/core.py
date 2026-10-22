@@ -926,6 +926,8 @@ def _defining_module(project: Project, where: str, name: str, depth: int = 0) ->
     m = project.modules.get(where)
     if m is None or depth > 4:
         return ""
+    if f"{where}.{name}" in project.modules:  # a class with a module of its own
+        return f"{where}.{name}"
     if name in m.decls or f"{where}.{name}" in project.funcs:
         return where
     if name in m.imported:
@@ -942,14 +944,17 @@ def _scope(project: Project, mod: Module, cache: dict) -> set[str]:
     """The modules a file can see: itself, what it imports, its package."""
     if mod.name in cache:
         return cache[mod.name]
-    out = {mod.name, *mod.aliases.values(), *(w for w, _ in mod.imported.values())}
-    for w in mod.uses + ([f"pkg:{mod.package}"] if mod.package else []):
+    fm = project.modules.get(mod.owner, mod) if mod.owner else mod
+    out = {mod.name, fm.name, *fm.aliases.values(), *(w for w, _ in fm.imported.values())}
+    for w in fm.uses + ([f"pkg:{fm.package}"] if fm.package else []):
         if w.startswith("pkg:"):
             out.update(project.packages.get(w[4:], []))
         elif w.startswith("type:"):
             out.update(project.short.get(w[5:], []))
         else:
             out.add(w)
+    # a file seen is all of it: its classes' modules too
+    out |= {m.name for w in list(out) if w in project.modules for m in project.by_file.get(project.modules[w].file, ())}
     cache[mod.name] = out
     return out
 
@@ -1084,8 +1089,15 @@ def _nothing(project: Project, f: Func, c) -> None:
     res = project.resolution[os.path.splitext(f.file)[1]]
     res[2] += 1
     fam = _family(f.file)
-    if any(g.kind != "top" and fam & _family(g.file) for g in project.by_name.get(c.name, ())):
+    named = any(g.kind != "top" and fam & _family(g.file) for g in project.by_name.get(c.name, ()))
+    if named:
         res[3] += 1
+    if _TRACE is not None:
+        _TRACE.append((f.file, c.line, c.name, c.chain, "named" if named else "nothing", ()))
+
+
+# SEAMCHECK_TRACE=1: every call's outcome, for tuning a resolver (bench/trace.py)
+_TRACE: list | None = [] if os.environ.get("SEAMCHECK_TRACE") else None
 
 
 def _build_edges(project: Project) -> None:
@@ -1111,20 +1123,59 @@ def _build_edges(project: Project) -> None:
                 for hm in project.by_file.get(stem + hext, []):
                     for k, v in hm.bound.items():
                         mods[0].bound.setdefault(k, v)
-    # every module's descendants (for overrides)
+    # supertypes as modules, then every module's descendants (for overrides
+    # and for an interface's implementations)
+    from . import infer
+    infer.resolve_bases(project)
+    types = infer.Types(project)
     for m in project.modules.values():
-        seen, cur = set(), m.parent
-        while cur and cur not in seen:
-            seen.add(cur)
-            project.children[cur].append(m.name)
-            par = project.modules.get(cur)
-            cur = par.parent if par else ""
+        for a in types.ancestors(m.name)[1:]:
+            project.children[a].append(m.name)
     for f in project.funcs.values():
         mod = project.modules.get(f.module)
         for c in f.calls:
             targets: list[tuple[Func, bool]] = []
             q = c.qual
-            if q == "super" and mod and mod.parent:
+            if c.chain and mod:
+                # the receiver's type, step by step (see infer.py)
+                v = types.chain(mod, f, c.chain)
+                if infer.is_ext(v):
+                    # a library value; a Kotlin / C# / Swift extension the project
+                    # declares on that library type is the one exception
+                    exts = types.ext_fns.get((v[1][0], c.name), []) if v[1] else []
+                    own = [g for g in exts if g.file == f.file]
+                    exts = own if len(own) == 1 else exts
+                    if not exts:
+                        _nothing(project, f, c)
+                        continue
+                    targets = [(g, len(exts) == 1) for g in exts]
+                    v = None
+                if v is not None:
+                    kind, mods_, ex = v
+                    if kind == "pkg":
+                        hits, on_type = _in_scope(project, "pkg:" + mods_[0], c.name), True
+                    elif kind == "static":
+                        hits = [h for mn in mods_ for h in _in_scope(project, mn, c.name)]
+                        on_type = True
+                        if not hits:
+                            hits, on_type = types.method(list(mods_), c.name)
+                    else:
+                        hits, on_type = types.method(list(mods_), c.name)
+                    if hits:
+                        # on the type: one definition; through an interface: each implementation runs
+                        targets = [(h, ex and (len(hits) == 1 or not on_type)) for h in hits]
+                    elif kind != "pkg" and any(types.external_base(mn) for mn in mods_):
+                        _nothing(project, f, c)  # inherited from a library supertype
+                        continue
+            if not q and mod and (mod.owner or mod.kind) and not f.file.endswith(".py") and not targets:
+                # a bare call in a class: its own (or an inherited) method first
+                own = types.own_class(mod, f)
+                hits, on_type = types.method(own, c.name) if own else ([], False)
+                if hits and on_type and len(hits) == 1:
+                    targets = [(hits[0], True)]
+            if targets:
+                pass
+            elif q == "super" and mod and mod.parent:
                 t = _lookup(project, mod.parent, c.name)
                 if t:
                     targets = [(t, True)]
@@ -1292,6 +1343,9 @@ def _build_edges(project: Project) -> None:
                 _nothing(project, f, c)
             else:
                 project.resolution[os.path.splitext(f.file)[1]][0 if any(e for _, e in targets) else 1] += 1
+                if _TRACE is not None:
+                    _TRACE.append((f.file, c.line, c.name, c.chain, "exact" if any(e for _, e in targets) else "guess",
+                                   tuple(t.id for t, _ in targets[:4])))
             for t, exact in targets + more:
                 project.edges[f.id].append((t.id, c.line, exact))
                 project.redges[t.id].append((f.id, c.line, exact))

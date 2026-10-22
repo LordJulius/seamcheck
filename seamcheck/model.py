@@ -15,6 +15,9 @@ class Call:
     name: str  # the called function's name
     qual: str  # what it was called on ("" = unqualified, "super", a module alias, a variable)
     line: int  # 1-based line in the file
+    # what it is called on, step by step: `self.store.get().save()` is
+    # ("self", "store", "get()"); () for a bare call (see chains.receiver)
+    chain: tuple = ()
 
 
 @dataclass
@@ -32,6 +35,7 @@ class Func:
     # "type:<Name>" (a declared type: Kotlin / TS `name: Type`, C++ `Type* name`)
     bound: dict[str, str] = field(default_factory=dict)
     recv: str = ""  # Kotlin extension function: the receiver type (`fun JSONObject.opt(`)
+    returns: str = ""  # the declared return type's class ("Self": the class it is called on), "" unknown
     kind: str = "func"  # "func", "top" (module-level code), "private"...
     id: str = ""  # "Module.name" (set in __post_init__; kept in sync when a module is renamed)
 
@@ -69,6 +73,15 @@ class Module:
     # A class that is its own module inside a file (Python): the file's module.
     # Bare names inside it resolve through the file, not the class.
     owner: str = ""
+    # A class's declared supertypes as written (`extends A implements B`,
+    # `: A, B`, `impl Trait for`); core resolves them to modules. `parent`
+    # is the first one that resolves.
+    bases: list[str] = field(default_factory=list)
+    # "class" for a type that is its own module; "ext" for one that adds to a
+    # type declared elsewhere (Swift `extension`, a Rust `impl` in another
+    # file, a C# `partial`, C++ `Foo::bar` bodies in a .cpp)
+    kind: str = ""
+    unresolved: bool = False  # a supertype the project doesn't declare (core sets it)
     # Modules whose names this one re-exports whole (JS `export * from`,
     # Python `from x import *`): a lookup that misses here follows them.
     reexports: list[str] = field(default_factory=list)
