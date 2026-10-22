@@ -12,8 +12,8 @@ the project writes down about how its parts fit together.
 - **Deterministic and local.** No network, no model, no dependencies beyond
   Python 3.11+ (ripgrep is used when present).
 - **Built for agents and CI.** Plain text, JSON, SARIF (code scanning) or
-  GitHub annotations; exit code 1 on errors; a pre-commit gate; and queries (`callers`, `impact`, `refs`) that replace grep
-  loops and say how sure they are.
+  GitHub annotations; exit code 1 on errors; a pre-commit gate; queries (`callers`, `impact`, `refs`) that replace grep
+  loops and say how sure they are; and an MCP server that keeps the graph loaded.
 - **Many languages, one graph.** Elixir, Kotlin, Java, TypeScript/JavaScript
   (JSX), C++, QML, Python, GDScript, Rust, Go and C#. Rules work on any text
   file.
@@ -74,7 +74,8 @@ seamcheck gate --staged         # in a pre-commit hook: may this change land?
 
 ```
 Starting
-  seamcheck init [--hook] [--force] a first seamcheck.toml for this repo (+ the pre-commit gate)
+  seamcheck init [--hook] [--force] a first seamcheck.toml for this repo (+ packs, + the pre-commit gate)
+  seamcheck serve                   an MCP server (stdio): the queries below from one loaded graph
 
 Checks
   seamcheck check [--format F] [--only id,id] [--skip id,id] [--errors-only]
@@ -538,6 +539,33 @@ seamcheck callers AppWeb.InboxController.index   -> the phone / web code calling
 receives what it emits), certain edges only. It stops where data moves through
 app state rather than calls (a fetched JSON rendered later by a screen):
 contract tests (golden payloads the clients parse) cover that part.
+
+## An MCP server for agents
+
+`seamcheck serve` speaks MCP (2025-06-18, JSON-RPC over stdio, no
+dependencies) and keeps the loaded graph between calls, so an agent's loop of
+small questions skips the load each one paid. Before each call it stats the
+project's files and config (mtime + size) and reloads only when one changed,
+appeared or went: an edit between two calls is seen by the second.
+
+```sh
+claude mcp add seamcheck -- seamcheck serve -C /path/to/repo
+```
+
+| tool | arguments | returns (JSON text) |
+|---|---|---|
+| `check` | `only`, `skip` (rule ids), `errors_only` | the findings, as `check --json` |
+| `gate` | `since` (default `HEAD`), `staged` | `{blocked, changed_files, findings}`, as `gate --json` |
+| `callers` / `callees` | `name`, `depth` (2), `fuzzy` | per match: exact and guess counts, what it reaches with depth |
+| `path` | `from`, `to`, `fuzzy` | the chain, or `through_guesses_only` |
+| `find` | `name` | id, file, lines, callers exact / guessed |
+| `refs` | `name` | defined, callers, mentions |
+| `impact` | `targets` (specs or files), `since`, `staged`, `depth` (4), `fuzzy` | reached functions by area |
+| `stats` | | sizes, timing, per language how calls resolve |
+| `unused` / `tests` | `since` | the rows `--json` prints |
+
+A query that finds nothing is an error result saying why (`no function
+matches 'x'`), not an empty answer.
 
 ## Keeping a big repo tidy
 

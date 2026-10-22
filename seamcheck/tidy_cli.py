@@ -63,6 +63,11 @@ def gate_findings(p, rep: dict, ref: str = "HEAD") -> list[dict]:
     return flat
 
 
+def gate_summary(p, rep: dict, ref: str = "HEAD") -> dict:
+    """`gate --json`: may it land, what changed, and the flat findings."""
+    return {"blocked": tidy.gate_failed(rep), "changed_files": rep["changed_files"], "findings": gate_findings(p, rep, ref)}
+
+
 def main(a, p, t0) -> int:
     lim = a.limit
     only = tidy.changed_files(p, a.since) if a.since else None
@@ -73,10 +78,10 @@ def main(a, p, t0) -> int:
         rep = tidy.gate(p, ref, a.staged, a.config)
         whys = {r["id"]: r.get("why", "") for r in p.config.get("rule", [])}
         if a.format != "text":
-            flat = gate_findings(p, rep, ref)
+            out = gate_summary(p, rep, ref)
+            flat = out["findings"]
             if a.format == "json":
-                print(json.dumps({"blocked": tidy.gate_failed(rep), "changed_files": rep["changed_files"], "findings": flat,
-                                  "ms": int((time.time() - t0) * 1000)}, indent=1, default=list))
+                print(json.dumps(dict(out, ms=int((time.time() - t0) * 1000)), indent=1, default=list))
             else:
                 from . import output
                 print(output.sarif(flat) if a.format == "sarif" else output.github(flat))
