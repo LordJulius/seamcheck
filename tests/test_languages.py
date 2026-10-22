@@ -582,5 +582,23 @@ class PHP(Base):
         self.assertEqual(self.exact("src/Dispatcher.dispatch"), {"src/Logs.log"})
 
 
+class PythonPackages(Base):
+    # httpx: `httpx.Client()` through the package's `from ._client import *`
+    FILES = {
+        "pkg/__init__.py": "from ._client import *\n",
+        "pkg/_client.py": "__all__ = ['Client']\n\nclass Base:\n    def send(self):\n        pass\n\n"
+                          "class Client(Base):\n    def get(self, **kwargs):\n        kwargs.get('x')\n"
+                          "        super().send()\n        return vars(self).items()\n",
+        "tests/test_c.py": "import pkg\n\ndef test_get():\n    with pkg.Client() as client:\n        client.get()\n",
+    }
+
+    def test_a_package_exported_class(self):
+        self.assertEqual(self.exact("tests/test_c.test_get"), {"pkg/_client.Client.get"})
+
+    def test_b_super_kwargs_and_builtins(self):
+        self.assertEqual(self.exact("pkg/_client.Client.get"), {"pkg/_client.Base.send"})
+        self.assertFalse(self.guessed("pkg/_client.Client.get"))  # kwargs.get / vars().items: Python's own
+
+
 if __name__ == "__main__":
     unittest.main()

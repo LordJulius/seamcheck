@@ -286,6 +286,7 @@ def parse_python(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             bases = [x for x in bases if x not in ("object", "ABC", "Protocol", "Generic") and not x.startswith("Generic[")]
             if bases:
                 cm.parent = "py:" + bases[0].split("[")[0]
+                cm.bases = ["py:" + x.split("[")[0].strip() for x in bases]
         mods[mname] = cm
     inside = [False] * len(lines)
     funcs: dict[tuple[str, str], Func] = {}
@@ -363,6 +364,8 @@ def _py_types(f: Func, lines: list[str], a: int, b: int, test_file: bool, fixtur
     rm = re.search(r"\)\s*->\s*([^:]+?)\s*:\s*$", head)
     if rm and type_name(rm.group(1)):
         f.returns = type_name(rm.group(1))
+    for m in re.finditer(r"[(,]\s*(\*\*?)([A-Za-z_]\w*)", head):
+        f.bound[m.group(2)] = "type:dict" if m.group(1) == "**" else "type:tuple"  # `**kwargs`, `*args`
     body = "\n".join(lines[a:b + 1])
     if not f.returns:
         rets = re.findall(r"^[ \t]*(?:return|yield)[ \t]+(.+)$", body, re.M) if fixture else \
