@@ -158,7 +158,7 @@ class Types:
         if key not in self.cache:
             mods = self.p.by_file.get(rel) or []
             raw = "\n".join(mods[0].raw) if mods else ""
-            self.cache[key] = rel.endswith(_ES_MODULE) and not rel.endswith(".d.ts") and \
+            self.cache[key] = rel.endswith(_ES_MODULE) and \
                 bool(re.search(r"^[ \t]*(?:import|export)\b", raw, re.M)) and "declare global" not in raw
         return self.cache[key]
 

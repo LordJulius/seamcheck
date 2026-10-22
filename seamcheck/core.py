@@ -939,8 +939,20 @@ def _resolve_imports(project: Project) -> None:
                 imported[k] = (r, n)
         m.aliases, m.imported = aliases, imported
         m.uses = [r for r in (res(u) for u in m.uses) if r and r != EXTERNAL]
-        m.reexports = [r for r in (res(u) for u in m.reexports) if r and r != EXTERNAL]
+        rx = [res(u) for u in m.reexports]
+        if EXTERNAL in rx:
+            m.__dict__["_ext_star"] = True  # `export * from "@testing-library/react"`
+        m.reexports = [r for r in rx if r and r != EXTERNAL]
         m.external = ext - set(aliases) - set(imported)
+    for m in project.modules.values():
+        # a name imported from a module that re-exports a library wholesale, and that no
+        # project module defines (`fireEvent` through test-utils): the library's
+        for k, (w, n) in list(m.imported.items()):
+            src = project.modules.get(w)
+            if src is not None and src.__dict__.get("_ext_star") and not _in_scope(project, w, n) \
+                    and not _defining_module(project, w, n) and not any(f"{w}.{n}" == mn for mn in project.modules):
+                m.external.add(k)
+                del m.imported[k]
     _python_names(project)
     _qml_context(project)
     for m in project.modules.values():
@@ -1556,6 +1568,11 @@ def _build_edges(project: Project) -> None:
                         targets = [(h, sure) for h in hits]
                     elif kind != "pkg" and any(types.external_base(mn) for mn in mods_):
                         _nothing(project, f, c)  # inherited from a library supertype
+                        continue
+                    elif kind == "inst" and mods_ and all(project.modules[mn].file.endswith(".d.ts") and
+                                                          not types._es_module(project.modules[mn].file)
+                                                          and project.modules[mn].kind == "interface" for mn in mods_):
+                        _nothing(project, f, c)  # `interface CanvasRenderingContext2D {...}` in global.d.ts adds to the DOM's
                         continue
                     elif kind == "inst" and mods_ and all(project.modules[mn].kind == "ext" for mn in mods_) and \
                             f.file.endswith((".swift", ".kt", ".kts", ".cs")):
