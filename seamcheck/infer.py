@@ -349,6 +349,13 @@ class Types:
             return self.returns(g, None, depth + 1) if g is not None else None
         return None
 
+    def _lib_results(self) -> set:
+        got = self.cache.get("\0libres")
+        if got is None:
+            got = self.cache["\0libres"] = {fn for e in self.p.params.values() if e.get("kind") == "returns"
+                                            for fn in e.get("functions", [])}
+        return got
+
     def pack_param(self, spec: str):
         """A framework-given parameter ("express/handler:res"): the module its
         pack names ("express:lib/response"), project code when the project is
@@ -590,6 +597,8 @@ class Types:
             held = f.bound.get(name, "") if f is not None else ""
             if held.startswith("call:"):  # a closure: calling it gives its body's value
                 return self.chain(mod, f, tuple(held[5:].split("\x1f")), depth + 1, self_mods)
+            if name in self._lib_results():
+                return EXT  # `hc<App>(url)`: a runtime proxy (packs' [[returns]])
             g = self.bare(mod, f, name)
             if g is not None:
                 got = self.returns(g, None, depth + 1)

@@ -129,6 +129,8 @@ def pack_params(names) -> dict[str, dict]:
             pack = tomllib.load(fh)
         for entry in pack.get("param", []):
             out[f"{name}/{entry.get('id', '')}"] = entry
+        for entry in pack.get("returns", []):  # functions whose result is the library's (a runtime proxy)
+            out[f"{name}/{entry.get('id', '')}"] = dict(entry, kind="returns")
     return out
 
 

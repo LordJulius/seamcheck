@@ -182,6 +182,13 @@ class HonoParams(ExpressParams):
                                         "  return [1].map((c) => c.json)\n}\n"})
         self.assertEqual(p.edges.get("src/routes.routes", []), [])  # c.json is hono's, not util.json
 
+    def test_the_rpc_clients_responses_are_the_platforms(self):
+        p = self.load({"package.json": '{"name": "api", "dependencies": {"hono": "^4"}}',
+                       "src/util.ts": "export function json(x: unknown) { return x }\n",
+                       "src/use.ts": "import { hc } from 'hono/client'\nexport async function go() {\n"
+                                     "  const client = hc('/')\n  const res = await client.posts.$get()\n  res.json()\n}\n"})
+        self.assertEqual(p.edges.get("src/use.go", []), [])  # not a guess at util.json
+
     def test_in_hono_itself_c_is_src_context(self):
         p = self.load({"package.json": '{"name": "hono"}',
                        "src/context.ts": "export class Context {\n  json(o: object) { return o }\n}\n",

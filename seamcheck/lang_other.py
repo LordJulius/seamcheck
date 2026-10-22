@@ -746,6 +746,8 @@ def _pack_signatures() -> list[tuple[str, list[str], re.Pattern, re.Pattern | No
     from .config import available_packs, pack_params
     out = []
     for pid, entry in pack_params(available_packs()).items():
+        if entry.get("kind") == "returns":
+            continue
         names = list(entry.get("names", []))
         if not names:
             continue
