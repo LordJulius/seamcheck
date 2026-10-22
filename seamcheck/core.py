@@ -369,6 +369,7 @@ def load(root: str, config_path: str | list[str] | None = None, use_cache: bool 
                 project.text_cache[k] = v
         previous = None
     _build_edges(project)
+    project.__dict__.pop("_counted", None)  # (only for counting while linking)
     _apply_bridges(project)
     project.config_problems += project.bridge_problems
     if use_cache:
@@ -1133,6 +1134,8 @@ def _nothing(project: Project, f: Func, c) -> None:
     """A call that reaches no project function. Counted apart when a project
     function in the caller's language has that name: the share stats shows
     so a resolver can't look better by turning guesses into nothing."""
+    if not _first_count(project, f, c):
+        return
     res = project.resolution[os.path.splitext(f.file)[1]]
     res[2] += 1
     fam = _family(f.file)
@@ -1141,6 +1144,18 @@ def _nothing(project: Project, f: Func, c) -> None:
         res[3] += 1
     if _TRACE is not None:
         _TRACE.append((f.file, c.line, c.name, c.chain, "named" if named else "nothing", ()))
+
+
+def _first_count(project: Project, f: Func, c) -> bool:
+    """Whether this call site is counted now: a call inside a nested function
+    (a callback, a lambda) belongs to every enclosing function's calls, but
+    the resolution counters count each site once."""
+    seen = project.__dict__.setdefault("_counted", set())
+    key = (f.file, c.line, c.col, c.name)
+    if key in seen:
+        return False
+    seen.add(key)
+    return True
 
 
 # SEAMCHECK_TRACE=1: every call's outcome, for tuning a resolver (bench/trace.py)
@@ -1421,7 +1436,7 @@ def _build_edges(project: Project) -> None:
                         more.append((o, exact))
             if not targets:
                 _nothing(project, f, c)
-            else:
+            elif _first_count(project, f, c):
                 project.resolution[os.path.splitext(f.file)[1]][0 if any(e for _, e in targets) else 1] += 1
                 if _TRACE is not None:
                     _TRACE.append((f.file, c.line, c.name, c.chain, "exact" if any(e for _, e in targets) else "guess",

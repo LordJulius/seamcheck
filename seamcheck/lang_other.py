@@ -21,7 +21,8 @@ _JS = [
     re.compile(rf"\b(?:const|let|var)\s+({_ID})\s*(?::[^=]+)?=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::\s*[^=]+)?=>|{_ID}\s*=>)"),
     # object-literal members (`applyOp: (op) => {`): a zustand store, a handler table
     re.compile(rf"^[ \t]*({_ID})[ \t]*:[ \t]*(?:async[ \t]+)?(?:function\b|\([^()\n]*\)[ \t]*(?::[^=\n]+)?=>|{_ID}[ \t]*=>)", re.M),
-    re.compile(rf"^\s*(?:(?:public|private|protected|static|async|get|set|override|readonly|export|default)\s+)*({_ID})\s*(?:<[^>\n]*>)?\s*\([^;\n]*\)\s*(?::\s*[^{{;\n]+)?\{{", re.M),
+    # a method `name(params) {`; its parameters hold no string (`describe('x', function () {` is a call)
+    re.compile(rf"^\s*(?:(?:public|private|protected|static|async|get|set|override|readonly|export|default)\s+)*({_ID})\s*(?:<[^>\n]*>)?\s*\((?:[^;\n()'\"`]|\([^;\n()'\"`]*\))*\)\s*(?::\s*[^{{;\n]+)?\{{", re.M),
     # class fields holding an arrow function (`private onPointerDown = (e) => {`,
     # `static create = <T,>(\n  {a, b}: Opts,\n) => {`): a React class
     # component's handlers, none of which were functions
