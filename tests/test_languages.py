@@ -20,7 +20,14 @@ Each case was a wrong answer running seamcheck on open-source repos:
   on a typed receiver and `doc.Gen()` across packages were name guesses,
   `fmt.Println` guessed at the project's Println, two types' String() were
   one function, and `func TestX(t *testing.T)` was dead code (cobra: project
-  calls exact 36%).
+  calls exact 36%);
+- TypeScript: a class field holding an arrow function (`private onDown =
+  (e) => {`, a React class component's every handler) was no function;
+  `API.createElement()` on a named import was a guess; a barrel's
+  `export * from` / `export { a } from` led nowhere; a tsconfig `paths` entry
+  naming one file (`"@app/common": ["packages/common/src/index.ts"]`), a
+  base tsconfig's paths and a workspace package's name went unresolved; and
+  `import _ from "lodash"` made `_.map()` a guess at the project's `map`.
 """
 import os
 import sys
@@ -331,6 +338,57 @@ func TestExecute(t *testing.T) {
         self.assertEqual(t.kind, "test")
         self.assertEqual(self.exact(t.id), {"command.Command.Execute"})
         self.assertNotIn(t, core.dead(self.p))
+
+
+class TypeScript(Base):
+    FILES = {
+        "tsconfig.base.json": '{"compilerOptions": {"baseUrl": ".", "paths": {"@app/common": ["packages/common/src/index.ts"]}}}',
+        "tsconfig.json": '{"extends": "./tsconfig.base.json", "compilerOptions": {"strict": true}}',
+        "packages/common/src/index.ts": 'export * from "./math";\nexport { fmt as format } from "./fmt";\n',
+        "packages/common/src/math.ts": "export function clamp(x: number) {\n  return x;\n}\n",
+        "packages/common/src/fmt.ts": "export function fmt(x: number) {\n  return String(x);\n}\n",
+        "packages/ui/package.json": '{"name": "@app/ui", "main": "dist/index.js"}',
+        "packages/ui/src/index.ts": "export function paint() {\n  return 1;\n}\n",
+        "packages/app/helpers.ts": """export class API {
+  static createElement = <T,>(
+    { kind }: { kind: T },
+  ): T => {
+    return kind;
+  };
+}
+export function map(xs: number[]) {
+  return xs;
+}
+""",
+        "packages/app/App.tsx": """import _ from "lodash";
+import { clamp, format } from "@app/common";
+import { paint } from "@app/ui";
+import { API } from "./helpers";
+
+export class App {
+  private onPointerDown = (event: PointerEvent) => {
+    clamp(1);
+    format(2);
+    paint();
+    API.createElement({ kind: 1 });
+    _.map([1], (x) => x);
+  };
+}
+""",
+    }
+
+    def test_class_field_arrow_functions(self):
+        f = self.p.funcs["packages/app/App.onPointerDown"]
+        self.assertEqual((f.start, f.end), (7, 13))
+        self.assertIn("packages/app/helpers.createElement", self.p.funcs)
+
+    def test_barrels_paths_workspaces_and_named_import_objects(self):
+        self.assertEqual(self.exact("packages/app/App.onPointerDown"),
+                         {"packages/common/src/math.clamp", "packages/common/src/fmt.fmt",
+                          "packages/ui/src/index.paint", "packages/app/helpers.createElement"})
+
+    def test_package_import_is_a_library(self):
+        self.assertEqual(self.guessed("packages/app/App.onPointerDown"), set())
 
 
 if __name__ == "__main__":
