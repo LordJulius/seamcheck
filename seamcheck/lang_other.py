@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import re
 
+from . import lambdas
 from .chains import _top_commas, expression, generic_name, receiver, type_name
 from .model import Call, Func, Module
 from .scan import blank
@@ -1212,6 +1213,34 @@ def _go_imports(mod: Module, rel: str, text: str, code: str) -> None:
         mod.aliases[name] = f"go:{path}" if alias else f"go?:{path}"
 
 
+def _bind_lambdas(f: Func, fam: str, body: str, open_: int, name: str, chain: tuple, targs: int) -> None:
+    """`run(x, b => b.go())`: `b` is whatever run's parameter at that place
+    hands its callback ("lam:<arg>/<param>/<params>/<type args>\x1e<name>\x1e<chain>")."""
+    if open_ >= len(body) or body[open_] != "(" or "\x1e" in name:
+        return
+    close = lambdas.matching(body, open_)
+    if close < 0:
+        return
+    args = lambdas.split_top(body[open_ + 1:close])
+    found = lambdas.lambda_args(fam, args)
+    if fam in ("kotlin", "swift"):  # a trailing lambda: `run(x) { b -> ... }`
+        k = close + 1
+        while k < len(body) and body[k] in " \t":
+            k += 1
+        if body[k:k + 1] == "{":
+            found.append((len(args), lambdas.brace_lambda(fam, body[k:k + 200])))
+    for argi, names in found:
+        for pi, nm_ in enumerate(names):
+            if not nm_ or nm_ == "_":
+                continue
+            spec = f"lam:{argi}/{pi}/{len(names)}/{targs}\x1e{name}\x1e" + "\x1f".join(chain)
+            held = f.bound.get(nm_)
+            if held is None:
+                f.bound[nm_] = spec
+            elif held.startswith("lam:") and held != spec:
+                f.bound[nm_] = "lam:?"  # (one name, two lambdas: neither says)
+
+
 def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     from . import chains
     chains.CALL_TARGS = rel.endswith(".cs")
@@ -1650,6 +1679,17 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             f.targs = ",".join(map(str, sorted(targs)))
             if recvs:
                 f.recv = "|".join(recvs)
+        if tk in ("jvm", "kotlin", "js", "swift"):  # each overload's parameter types (a callback's type for its lambda)
+            ovs = []
+            for _sa, _sb, np_, _bp in ss:
+                k = code.find("(", np_ + len(name), np_ + len(name) + 300)
+                e = lambdas.matching(code, k) if k >= 0 else -1
+                gm_ = re.match(r"\s*<([^<>()]*(?:<[^<>()]*>[^<>()]*)*)>\s*\(", code[np_ + len(name):k + 1]) if k >= 0 else None
+                ov = (f"{1 + gm_.group(1).count(',') if gm_ else 0}{lambdas.TARGS}"  # (its type-parameter count first)
+                      + lambdas.PARAM.join(lambdas.param_types(tk, code[k + 1:e]))) if e > 0 else ""
+                if e > 0 and ov not in ovs:
+                    ovs.append(ov)
+            f.ptypes = lambdas.OV.join(ovs)
         # the declared return type
         line_start_pos = line_start[a_]
         cls_name = (cls["name"] if cls else "") or (home.decls[-1] if home is not mod or recv else "")
@@ -1708,6 +1748,10 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     if nm in _CALL_SKIP and (not q or (nm in _NOT_FUNC and nm != "new")):
                         continue  # (a keyword, or `String(`; `c.String()` and `Foo::new()` are calls)
                     f.calls.append(Call(nm, q, i + 1, chain if q else (), m.start(2)))
+                    if tk in ("jvm", "kotlin", "js", "swift"):
+                        ta_ = m.group(0)[m.end(2) - m.start(0):].strip()
+                        _bind_lambdas(f, fam, body, off + m.end() - 1, nm, chain if q else (),
+                                      1 + _top_commas(ta_[1:ta_.rindex(">")]) if ta_.startswith("<") and ">" in ta_ else -1)
                     if ext == ".cs":
                         ta = m.group(0)[m.end(2) - m.start(0):].strip()
                         f.calls[-1].targs = 1 + _top_commas(ta[1:ta.rindex(">")]) if ta.startswith("<") else 0
