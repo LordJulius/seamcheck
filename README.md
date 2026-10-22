@@ -418,17 +418,17 @@ asks nothing, and an edit re-asks only the edited files.
 Measured (`stats`, project calls exact; 4 cores, October 2026, no project
 dependencies installed: no venv, no `node_modules`, no fetched crates):
 
-| repo | language | static | precise | static run | precise cold | answers cached, graph rebuilt |
-|---|---|---|---|---|---|---|
-| pallets/flask | Python | 62% | 72% | 0.5 s | 10.1 s | 0.5 s |
-| encode/httpx | Python | 67% | 94% | 0.7 s | 10.5 s | 0.5 s |
-| psf/requests | Python | 86% | 95% | 0.6 s | 6.7 s | 0.4 s |
-| honojs/hono | TypeScript (.ts / .tsx) | 66% / 65% | 83% / 77% | 3.3 s | 22.5 s | 2.4 s |
-| excalidraw/excalidraw | TypeScript (.tsx / .ts) | 82% / 80% | 89% / 92% | 7.3 s | 38.3 s | 3.9 s |
-| BurntSushi/ripgrep | Rust | 80% | 94% | 1.4 s | 20.3 s | 1.5 s |
-| sharkdp/bat | Rust | 83% | 93% | 1.7 s | 45.8 s | 0.9 s |
-| spf13/cobra | Go | 97% | 100% | 1.1 s | 1.9 s | 0.5 s |
-| junegunn/fzf | Go | 84% | 90% | 1.1 s | 8.2 s | 1.6 s |
+| repo | language | static | precise | static run | precise cold |
+|---|---|---|---|---|---|
+| pallets/flask | Python | 90% | 96% | 1.1 s | 9.0 s |
+| encode/httpx | Python | 92% | 98% | 1.2 s | 9.3 s |
+| psf/requests | Python | 91% | 97% | 0.8 s | 6.3 s |
+| honojs/hono | TypeScript (.ts / .tsx) | 92% / 83% | 95% / 98% | 3.8 s | 21.9 s |
+| excalidraw/excalidraw | TypeScript (.tsx / .ts) | 91% / 89% | 95% / 96% | 8.1 s | 41.0 s |
+| BurntSushi/ripgrep | Rust | 91% | 98% | 1.9 s | 19.5 s |
+| sharkdp/bat | Rust | 91% | 98% | 2.4 s | 44.0 s |
+| spf13/cobra | Go | 91% | 100% | 1.4 s | 2.1 s |
+| junegunn/fzf | Go | 94% | 99% | 2.5 s | 7.7 s |
 
 An unchanged repo loads its cached graph (0.2 to 1.0 s). A cold run is mostly
 the servers' own analysis: pyright answers ~75 questions a second once warm,
