@@ -50,6 +50,41 @@ declare global {
   }
 }
 """,
+    "src/flow.ts": """export function waitFor() {
+  return 1;
+}
+
+export function retry(checkFn: (o: { timeout: boolean }) => number, times: number) {
+  return again(checkFn, times);
+}
+
+function again(checkFn: (o: { timeout: boolean }) => number, times: number) {
+  if (times > 0) {
+    return again(checkFn, times - 1);
+  }
+  return checkFn({ timeout: true });
+}
+
+export function run() {
+  return retry(waitFor, 3);
+}
+""",
+    "src/hooks.ts": """import { useState } from "react";
+
+export const handlers = {
+  setValue: (v: number) => save(v),
+};
+
+function save(v: number) {
+  return v;
+}
+
+export function Input(props: { onChange: (value: number) => void }) {
+  const [value, setValue] = useState(0);
+  setValue(1);
+  props.onChange(value);
+}
+""",
     "src/use.ts": """import { Scene } from "./scene";
 import type { ElementsMap } from "./types";
 
@@ -103,6 +138,17 @@ class TypeScript(unittest.TestCase):
 
     def test_window_augmentation_and_destructuring(self):
         self.assertEqual(_to(self.p, "src/use.hook", "mutateElement"), {("src/scene.mutateElement", True)})
+
+    def test_argument_flow_through_parameters(self):
+        # every caller hands `waitFor` on (one through its own parameter, one recursively)
+        self.assertEqual(_to(self.p, "src/flow.again", "checkFn"), set())
+        self.assertIn(("src/flow.waitFor", True), {(d, e) for d, _l, e in self.p.edges["src/flow.again"]})
+
+    def test_a_parameter_function_type_is_no_function(self):
+        self.assertNotIn("src/hooks.onChange", self.p.funcs)
+
+    def test_a_destructured_local_shadows_a_same_named_member(self):
+        self.assertEqual({d for d, _l, _e in self.p.edges.get("src/hooks.Input", [])} & {"src/hooks.setValue"}, set())
 
 
 if __name__ == "__main__":
