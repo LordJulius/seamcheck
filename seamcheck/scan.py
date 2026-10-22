@@ -92,6 +92,25 @@ def blank(text: str, lang: str, keep_strings: bool = False) -> tuple[str, list[t
         if lang == "c" and c == "'" and 0 < i < n - 1 and text[i - 1].isalnum() and text[i + 1].isalnum():
             i += 1  # a C++14 digit separator (25'000), not a char literal
             continue
+        if lang == "js" and c == "/" and _regex_start(text, i):
+            # a regex literal (`/^(?:W\/)?"[^"]+"$/`): its quotes open no string
+            j, in_class = i + 1, False
+            while j < n and text[j] != "\n":
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == "[":
+                    in_class = True
+                elif text[j] == "]":
+                    in_class = False
+                elif text[j] == "/" and not in_class:
+                    break
+                j += 1
+            if j < n and text[j] == "/":
+                if not keep_strings:
+                    wipe(i + 1, j)
+                i = j + 1
+                continue
         if c in "\"'" or (lang == "js" and c == "`"):
             triple = text[i:i + 3] == c * 3
             q = c * 3 if triple else c
@@ -102,8 +121,8 @@ def blank(text: str, lang: str, keep_strings: bool = False) -> tuple[str, list[t
                     continue
                 if text.startswith(q, j):
                     break
-                if not triple and text[j] == "\n" and lang in ("gdscript", "python") and c != "`":
-                    break  # unterminated: stop at end of line
+                if not triple and text[j] == "\n" and lang in ("gdscript", "python", "js", "kotlin") and c != "`":
+                    break  # unterminated (or not a string at all): stop at end of line
                 j += 1
             end = min(n, j + len(q))
             strings.append((line, text[i + len(q):j]))
@@ -114,3 +133,23 @@ def blank(text: str, lang: str, keep_strings: bool = False) -> tuple[str, list[t
             continue
         i += 1
     return "".join(out), strings
+
+
+_REGEX_AFTER = set("(,=:[!&|?{};+-*%<>~^")
+_REGEX_WORDS = ("return", "typeof", "case", "in", "of", "delete", "void", "throw", "new", "yield", "await", "else", "do")
+
+
+def _regex_start(text: str, i: int) -> bool:
+    """A `/` that starts a JS regex literal, not a division: what comes before
+    it is an operator, an opening bracket, a keyword or nothing."""
+    if text[i + 1:i + 2] in ("/", "*", ""):
+        return False
+    k = i - 1
+    while k >= 0 and text[k] in " \t\r\n":
+        k -= 1
+    if k < 0 or text[k] in _REGEX_AFTER:
+        return True
+    w = k
+    while w >= 0 and (text[w].isalnum() or text[w] in "_$"):
+        w -= 1
+    return text[w + 1:k + 1] in _REGEX_WORDS
