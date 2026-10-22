@@ -105,7 +105,12 @@ class Types:
                 break
         prims = {self._primary(mn) for mn in prim}
         mods = list(dict.fromkeys(prim + [mn for mn in exts if mn not in prim]))
-        return mods, len(prims) == 1, True
+        # one type built per platform (battery-macos.cpp / battery-win.cpp, one
+        # directory, one name): a call reaches whichever is compiled, like an
+        # interface reaches each implementation
+        variants = len({os.path.dirname(p.modules[mn].file) for mn in prim}) == 1 and len(prims) > 1 and \
+            len({p.modules[mn].decls[0] if p.modules[mn].owner and p.modules[mn].decls else name for mn in prim}) == 1
+        return mods, len(prims) == 1 or variants, True
 
     def _primary(self, mn: str) -> str:
         m = self.p.modules[mn]
@@ -142,6 +147,12 @@ class Types:
     # --- methods ------------------------------------------------------------------
 
     def ancestors(self, mn: str) -> list[str]:
+        """The module, the other parts of its type (a C++ class's header and
+        .cpp, a Swift extension, a Rust impl in another file), then its
+        supertypes, nearest first."""
+        hit = self.cache.get(("\0anc", mn))
+        if hit is not None:
+            return hit
         out, todo, seen = [], [mn], set()
         while todo:
             cur = todo.pop(0)
@@ -150,7 +161,31 @@ class Types:
             seen.add(cur)
             out.append(cur)
             m = self.p.modules[cur]
+            todo[:0] = [x for x in self.parts(m) if x not in seen]
             todo += [b for b in m.bases if b in self.p.modules] + ([m.parent] if m.parent else [])
+        self.cache[("\0anc", mn)] = out
+        return out
+
+    def parts(self, m) -> list[str]:
+        """The other modules of the same type: a C++ class's header and source
+        are one class; an `ext` module (a Swift extension, a Rust impl in
+        another file) joins the type it extends, and that type gains it."""
+        if not m.decls:
+            return []
+        key = ("\0parts", m.name)
+        hit = self.cache.get(key)
+        if hit is not None:
+            return hit
+        name = m.decls[0] if m.owner or m.kind == "ext" else m.decls[-1]
+        cands = [x for x in self.by_type.get(name, ()) if x != m.name]
+        if m.file.endswith((".h", ".hpp", ".hh", ".cpp", ".cc", ".cxx")):
+            own = self._primary(m.name)
+            out = [x for x in cands if self._primary(x) == own]
+        elif m.kind == "ext":
+            out = [x for x in self.type_modules(m, name)[0] if x != m.name]
+        else:
+            out = [x for x in cands if self.p.modules[x].kind == "ext" and m.name in self.type_modules(self.p.modules[x], name)[0]]
+        self.cache[key] = out
         return out
 
     def external_base(self, mn: str) -> bool:
@@ -179,9 +214,10 @@ class Types:
         impls = []
         for mn in mods:
             for sub in self.p.children.get(mn, ()):
-                g = self.p.funcs.get(f"{sub}.{name}")
-                if g and g not in impls:
-                    impls.append(g)
+                for part in [sub] + self.parts(self.p.modules[sub]):  # (a C++ subclass's .cpp half)
+                    g = self.p.funcs.get(f"{part}.{name}")
+                    if g and g not in impls:
+                        impls.append(g)
         for mn in mods:  # Kotlin / C# / Swift extensions on the type
             m = self.p.modules[mn]
             for d in m.decls[:1]:
@@ -292,6 +328,10 @@ class Types:
                 return self.returns(g, None, depth + 1)
             if name in fm.external:
                 return EXT
+            own = self.own_class(mod, f)
+            if own and not fm.file.endswith(".py") and any(self.external_base(o) for o in own) \
+                    and not self.method(own, name)[0]:
+                return EXT  # inherited from a library supertype (Qt's `sourceModel()`)
             if name[:1].isupper():
                 got = self.instance(mod, name, self_mods)  # `Foo(...)`: a constructor
                 return got

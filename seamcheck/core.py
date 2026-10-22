@@ -471,6 +471,8 @@ def _resolve_where(project: Project, where: str, cache: dict) -> str:
         return _resolve_py(project, where, cache)
     if where.startswith("rs:"):
         return _resolve_rs(project, where, cache)
+    if where.startswith("inc:"):
+        return _resolve_include(project, where, cache)
     if where.startswith(("go:", "go?:")):
         return _resolve_go(project, where.split(":", 1)[1], cache)
     if not where.startswith("js:"):
@@ -567,6 +569,27 @@ def _resolve_go(project: Project, path: str, cache: dict) -> str:
             keys = [k for k in cache["\0godirs"].get(d, []) if not k.endswith("_test")]
             return f"pkg:{keys[0]}" if len(keys) == 1 else ""
     return EXTERNAL
+
+
+def _resolve_include(project: Project, where: str, cache: dict) -> str:
+    """A C/C++ `#include "x.h"`: beside the file, else the one project file
+    whose path ends with it (an include directory)."""
+    d, _, spec = where[4:].partition("\0")
+    base = os.path.normpath(os.path.join(d, spec))
+    if base in project.by_file:
+        return project.by_file[base][0].name
+    idx = cache.get("\0inc")
+    if idx is None:
+        idx = cache["\0inc"] = defaultdict(list)
+        for rel in project.by_file:
+            if rel.endswith((".h", ".hpp", ".hh", ".hxx")):
+                parts = rel.split("/")
+                for k in range(len(parts)):
+                    idx["/".join(parts[k:])].append(rel)
+    hits = idx.get(spec.lstrip("./"), [])
+    if len(hits) == 1:
+        return project.by_file[hits[0]][0].name
+    return "" if hits else EXTERNAL  # a system / library header
 
 
 def _rs_crates(project: Project, cache: dict) -> tuple[list[tuple[str, str]], dict[str, str]]:
@@ -1167,12 +1190,31 @@ def _build_edges(project: Project) -> None:
                     elif kind != "pkg" and any(types.external_base(mn) for mn in mods_):
                         _nothing(project, f, c)  # inherited from a library supertype
                         continue
-            if not q and mod and (mod.owner or mod.kind) and not f.file.endswith(".py") and not targets:
-                # a bare call in a class: its own (or an inherited) method first
-                own = types.own_class(mod, f)
+            if not q and mod and not f.file.endswith((".py", ".ex", ".exs", ".gd")) and not targets:
+                # a bare call in a class: its own (or an inherited) method first;
+                # `Foo(...)` / `new Foo(...)` / `: Base(args)`: Foo's constructor
+                own = types.own_class(mod, f) if (mod.owner or mod.kind) else None
                 hits, on_type = types.method(own, c.name) if own else ([], False)
                 if hits and on_type and len(hits) == 1:
                     targets = [(hits[0], True)]
+                elif c.name[:1].isupper() and not _in_scope(project, (project.modules.get(mod.owner, mod) if mod.owner else mod).name, c.name):
+                    tmods, ex, declared = types.type_modules(mod, c.name)
+                    if declared:
+                        ctor, _ = types.method([m for m in tmods if types.searchable(m) or project.modules[m].kind],
+                                               c.name) if tmods else ([], False)
+                        ctor = [g for g in ctor if g.name == c.name] or [
+                            g for m in tmods for n in ("constructor", "init", "__construct", "new")
+                            if (g := project.funcs.get(f"{m}.{n}"))][:1]
+                        if ctor:
+                            targets = [(g, ex and len(ctor) == 1) for g in ctor]
+                        else:
+                            _nothing(project, f, c)  # a project type with no constructor of its own: no function runs
+                            continue
+                if not targets and own and not hits and any(types.external_base(m) for m in own) and \
+                        not _in_scope(project, (project.modules.get(mod.owner, mod) if mod.owner else mod).name, c.name):
+                    # inherited from a library supertype (Qt's `disconnect`, `data`)
+                    _nothing(project, f, c)
+                    continue
             if targets:
                 pass
             elif q == "super" and mod and mod.parent:
@@ -1263,7 +1305,7 @@ def _build_edges(project: Project) -> None:
                     if t:
                         hits = [t]
                     elif cls:
-                        project.resolution[".py"][0] += 1  # a project class with no __init__ of its own
+                        _nothing(project, f, c)  # a project class with no __init__ of its own: no function runs
                         continue
                 targets = [(t, len(hits) == 1) for t in hits]
                 if not targets and c.name in mod.external:

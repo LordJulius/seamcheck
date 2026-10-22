@@ -75,8 +75,8 @@ _TS_TYPED = re.compile(r"(?:\b(?:const|let|var)\s+|[(,]\s*|^\s*)([A-Za-z_$][\w$]
 _TS_FIELD = re.compile(r"^\s*(?:(?:private|public|protected|readonly|static|declare)\s+)*([a-z_$][\w$]*)\s*[?!]?\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])\s*[;=]", re.M)
 _TS_PARAM_FIELD = re.compile(r"\b(?:private|public|protected|readonly)\s+([a-z_$][\w$]*)\s*\??\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])")
 # `Client client(...);` at a statement start, `QString name` as a parameter
-_CPP_VALUE = re.compile(r"(?:^|[(,])\s*(?:const\s+)?([A-Z]\w*)\s+([a-z_]\w*)\s*(?=[({;=,)])", re.M)
-_CPP_TYPED = re.compile(r"(?<![\w:>])([A-Z]\w*)\s*[\*&]+\s*([a-z_]\w*)\s*(?=[,;=)\[{]|$)", re.M)
+_CPP_VALUE = re.compile(r"(?:^|[(,])\s*(?:const\s+|final\s+)?([A-Z]\w*)\s+([a-z_]\w*)\s*(?=[({;=,)]|:(?!:))", re.M)
+_CPP_TYPED = re.compile(r"(?<![\w:>])([A-Z]\w*)\s*[\*&]+\s*([a-z_]\w*)\s*(?=[,;=)\[{]|:(?!:)|$)", re.M)
 # a C++ class member in a header: `BoardModel* m_board = nullptr;`, `Hub m_hub;`
 _CPP_FIELD = re.compile(r"^\s*(?:(?:mutable|static|const|inline)\s+)*((?:std::|[A-Z])[\w:]*(?:<[^;()]*>)?)\s*[\*&]?\s*([a-z_]\w*)\s*(?:=[^;]*|\{[^;]*\})?;")
 _KT_RECV = r"\bfun\s+(?:<[^>]*>\s*)?([A-Z]\w*)(?:<[^>]*>)?\??\.%s\s*\("
@@ -593,6 +593,13 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
             name, bases, kw = "", [], "companion"
         else:
             kw, name = m.group(1), m.group(2)
+            qn = re.match(r"(?:\s*::\s*[A-Za-z_]\w*)+", code[m.end():m.end() + 200])
+            if qn:  # `struct Device::DevicePrivate {`: the nested type's own name
+                name = qn.group(0).rsplit("::", 1)[-1].strip()
+            if _ALLCAPS.match(name):  # `class KDECONNECTCORE_EXPORT NetworkPacket`: an export macro, then the name
+                nm2 = re.match(r"\s+([A-Za-z_]\w*)", code[m.end():m.end() + 200])
+                if nm2 and not _ALLCAPS.match(nm2.group(1)):
+                    name = nm2.group(1)
             if kw == "object" and fam not in ("kotlin",):
                 continue
             if kw == "protocol" and ext not in (".swift",):
@@ -779,7 +786,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 hi = mid - 1
         return lo
 
-    mod.decls = sorted({d.group(1) for d in (_GO_DECL if ext == ".go" else _DECL).finditer(code)})
+    # (C++: only definitions declare a type; `class QMouseEvent;` names one defined elsewhere)
+    mod.decls = [] if ext in _CPP_EXTS else sorted({d.group(1) for d in (_GO_DECL if ext == ".go" else _DECL).finditer(code)})
     if fam == "js":
         _js_imports(mod, rel, text, lines)
         _js_reexports(mod, rel, text, lines)
@@ -791,6 +799,11 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         _go_imports(mod, rel, text, code)
     elif ext == ".rs":
         _rs_imports(mod, rel, code)
+    elif ext in _CPP_EXTS:
+        # `#include "x.h"` (core resolves it): its free functions are in scope
+        d = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        for im in re.finditer(r'^[ \t]*#[ \t]*include[ \t]*"([^"]+)"', text, re.M):
+            mod.uses.append(f"inc:{d}\0{im.group(1)}")
     seen: set[tuple[int, str]] = set()
     found = []
     kotlin = fam == "kotlin"
