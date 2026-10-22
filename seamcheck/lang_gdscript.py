@@ -40,6 +40,7 @@ _INDIRECT = {"rpc", "rpc_id", "call", "call_deferred", "callv", "bind"}
 _TYPED_VAR = re.compile(r"\bvar\s+([A-Za-z_]\w*)\s*:\s*([A-Z][\w.]*(?:\[[^\]]*\])?)")
 _INFER_VAR = re.compile(r"\bvar\s+([A-Za-z_]\w*)\s*:?=(?!=)")
 _PARAM = re.compile(r"[(,]\s*([A-Za-z_]\w*)\s*:\s*([A-Z][\w.]*)")
+_CAST = re.compile(r"[^\n#]*?\sas\s+([A-Z]\w*)[ \t]*(?:#[^\n]*)?$", re.M)
 _RETURNS = re.compile(r"\)\s*->\s*([A-Z][\w.]*)\s*:")
 
 
@@ -49,6 +50,10 @@ def _types(held: dict, text: str) -> None:
         if t and not held.get(m.group(1), "").startswith("group:"):  # (a group binding says more than `Node`)
             held[m.group(1)] = "type:" + t
     for m in _INFER_VAR.finditer(text):
+        cast = _CAST.match(text, m.end())  # `var x := $Path/To as Type`
+        if cast and m.group(1) not in held:
+            held[m.group(1)] = "type:" + cast.group(1)
+            continue
         ch = expression(text, m.end())
         if ch and m.group(1) not in held:
             held[m.group(1)] = "expr:" + "\x1f".join(ch)

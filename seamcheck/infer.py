@@ -109,6 +109,7 @@ class Types:
                        lambda mn: self._imported(fm, name, mn),
                        lambda mn: fm.package and self._pkg_of(mn) == fm.package,
                        lambda mn: self._in_uses(fm, mn),
+                       lambda mn: mod.file.endswith(".gd") and self._godot(p.modules[mn].file) == self._godot(mod.file),
                        lambda mn: os.path.dirname(p.modules[mn].file) == os.path.dirname(mod.file)):
             got = [mn for mn in prim if narrow(mn)]
             if got:
@@ -122,6 +123,18 @@ class Types:
         variants = len({os.path.dirname(p.modules[mn].file) for mn in prim}) == 1 and len(prims) > 1 and \
             len({p.modules[mn].decls[0] if p.modules[mn].owner and p.modules[mn].decls else name for mn in prim}) == 1
         return mods, len(prims) == 1 or variants, True
+
+    def _godot(self, rel: str) -> str:
+        """The Godot project a file is in (the nearest folder with a
+        project.godot): a `class_name` is global to its project only."""
+        d = os.path.dirname(rel)
+        cache = self.__dict__.setdefault("_godot_roots", {})
+        if d not in cache:
+            up = d
+            while up and not os.path.exists(os.path.join(self.p.root, up, "project.godot")):
+                up = os.path.dirname(up)
+            cache[d] = up
+        return cache[d]
 
     def _primary(self, mn: str) -> str:
         """Which type a module is part of: a C++ class's header and source are
@@ -295,6 +308,8 @@ class Types:
             return None
         if held.startswith("type:"):
             return self.instance(mod, held[5:], self_mods)
+        if held.startswith("mod:"):  # a component whose file names no type (`mousepad.qml`'s root id)
+            return ("inst", (held[4:],), True) if held[4:] in self.p.modules else None
         if held.startswith("expr:"):
             return self.chain(mod, f, tuple(held[5:].split("\x1f")), depth + 1, self_mods=self_mods)
         if held.startswith("fixture:"):

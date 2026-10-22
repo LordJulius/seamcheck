@@ -805,6 +805,16 @@ def _qml_context(project: Project) -> None:
     is then a call on ContinuityClient, not a guess."""
     names: dict[str, set[str]] = {}
     for rel, mods in project.by_file.items():
+        if rel.endswith((".h", ".hpp", ".hh", ".cpp", ".cc", ".cxx")) and mods and "QML_NAMED_ELEMENT" in "\n".join(mods[0].raw):
+            # `class FooForeign { QML_NAMED_ELEMENT(Foo) QML_FOREIGN(FooImpl) }`: QML's `Foo` is FooImpl
+            raw = "\n".join(mods[0].raw)
+            for body in re.split(r"\b(?:class|struct)\s+(?=\w+[^;]*\{)", raw)[1:]:
+                cls = re.match(r"(?:\w+\s+)*?(\w+)\s*(?::|\{)", body)
+                named = re.search(r"\bQML_NAMED_ELEMENT\s*\(\s*(\w+)\s*\)", body)
+                if cls and named:
+                    foreign = re.search(r"\bQML_FOREIGN\s*\(\s*([\w:]+)\s*\)", body)
+                    project.__dict__.setdefault("_qml_names", {})[named.group(1)] = \
+                        (foreign.group(1) if foreign else cls.group(1)).split("::")[-1]
         if not rel.endswith((".cpp", ".cc", ".cxx")) or not mods:
             continue
         raw = "\n".join(mods[0].raw)
@@ -830,11 +840,18 @@ def _qml_context(project: Project) -> None:
     ids: dict[str, set[str]] = {}
     for rel, mods in project.by_file.items():
         if rel.endswith(".qml") and mods:
-            for m in _QML_ID.finditer("\n".join(mods[0].code)):
+            code = "\n".join(mods[0].code)
+            for m in _QML_ID.finditer(code):
                 held = mods[0].bound.get(m.group(1), "")
-                ids.setdefault(m.group(1), set()).add(held if held.startswith("type:") else "?" + rel)
+                ids.setdefault(m.group(1), set()).add(held if held.startswith(("type:", "mod:")) else "?" + rel)
+            # the root object's own properties: what a child component sees by
+            # QML's dynamic scope (`appSettings` of main.qml, in TerminalWindow.qml)
+            for m in re.finditer(r"\bproperty[ \t]+[\w.<>]+[ \t]+([a-z_]\w*)", code):
+                if code.count("{", 0, m.start()) - code.count("}", 0, m.start()) == 1:
+                    held = mods[0].bound.get(m.group(1), "")
+                    ids.setdefault(m.group(1), set()).add(held if held.startswith(("type:", "mod:")) else "?" + rel)
     for n, held in ids.items():
-        if len(held) == 1 and next(iter(held)).startswith("type:"):
+        if len(held) == 1 and next(iter(held)).startswith(("type:", "mod:")):
             bound.setdefault(n, next(iter(held)))
     if not bound:
         return

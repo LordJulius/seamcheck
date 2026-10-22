@@ -864,8 +864,11 @@ def _stem_key(s: str) -> str:
 
 
 _QML_ID = re.compile(r"(?:^|[;{])[ \t]*id[ \t]*:[ \t]*([A-Za-z_]\w*)", re.M)
+_QML_BASIC_TYPES = {"url": "QUrl", "string": "QString", "date": "QDate", "color": "QColor", "point": "QPointF",
+                    "rect": "QRectF", "size": "QSizeF", "font": "QFont", "real": "double", "int": "int", "bool": "bool"}
+_QML_BASIC = re.compile(r"\bproperty[ \t]+(" + "|".join(_QML_BASIC_TYPES) + r")[ \t]+([a-z_]\w*)")
 _QML_PROP = re.compile(r"\b(?:required[ \t]+|readonly[ \t]+|default[ \t]+)*property[ \t]+([A-Z][\w.]*)[ \t]+([a-z_]\w*)")
-_QML_ROOT = re.compile(r"^[ \t]*([A-Z][\w.]*)[ \t]*\{", re.M)
+_QML_ROOT = re.compile(r"^[ \t]*([A-Z][\w.]*)\s*\{", re.M)
 
 
 def _qml_types(mod: Module, code: str, stem: str) -> None:
@@ -880,7 +883,7 @@ def _qml_types(mod: Module, code: str, stem: str) -> None:
     if root:
         mod.bases = [root.group(1)]
     for m in _QML_ID.finditer(code):
-        depth, k = 0, m.start()
+        depth, k = 0, m.start(1)
         while k > 0:  # back to the `{` of the object this id names
             k -= 1
             if code[k] == "}":
@@ -893,7 +896,7 @@ def _qml_types(mod: Module, code: str, stem: str) -> None:
         if not tm:
             continue
         if root and k == code.find("{", root.start()):
-            mod.bound[m.group(1)] = "type:" + (name or tm.group(1))  # the root: this component
+            mod.bound[m.group(1)] = (("type:" + name) if name else "mod:" + mod.name)  # the root: this component
         else:
             mod.bound.setdefault(m.group(1), "type:" + tm.group(1))
     generic = set()
@@ -902,6 +905,8 @@ def _qml_types(mod: Module, code: str, stem: str) -> None:
             mod.bound.setdefault(m.group(2), "type:" + m.group(1))
         else:
             generic.add(m.group(2))
+    for m in _QML_BASIC.finditer(code):  # `property url source`: a value type, its methods QML's own
+        mod.bound.setdefault(m.group(2), "type:" + _QML_BASIC_TYPES[m.group(1)])
     for m in re.finditer(r"\b(?:property[ \t]+[\w.<>]+|signal)[ \t]+([a-z_]\w*)", code):
         mod.bound.setdefault(m.group(1), "qmlvar:")  # declared here, of a type QML doesn't say
     generic |= {m.group(1) for m in re.finditer(r"\bproperty[ \t]+(?:var|variant)[ \t]+([a-z_]\w*)", code)}
