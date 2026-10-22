@@ -109,6 +109,37 @@ def impact(p: core.Project, start: set[str], depth: int = 4, fuzzy: bool = False
     return {k: sorted(v) for k, v in by.items()}, {area(p.funcs[s].file) for s in start if s in p.funcs}
 
 
+def context(p: core.Project, spec: str, lines: int = 80, depth: int = 4) -> list[dict]:
+    """What an agent wants before editing a function, in one answer: where
+    it is, its source, who calls it (each call site; exact first, then name
+    guesses), what it calls (project functions, or the library), and which
+    tests reach it (the ones to run after the change)."""
+    out = []
+    for f in p.find(spec):
+        mod = next((m for m in p.by_file.get(f.file, []) if m.name == f.module), None)
+        src = mod.raw[f.start - 1:f.end] if mod else []
+        callers = sorted(({"id": src_id, "file": p.funcs[src_id].file, "line": ln, "exact": e}
+                          for src_id, ln, e in p.redges.get(f.id, []) if src_id in p.funcs),
+                         key=lambda c: (not c["exact"], c["file"], c["line"]))
+        by_line: dict = collections.defaultdict(list)
+        for dst, ln, e in p.edges.get(f.id, []):
+            by_line[(ln, dst.rsplit(".", 1)[-1])].append((dst, e))
+        callees = []
+        for c in f.calls:
+            hits = by_line.get((c.line, c.name), [])
+            callees.append({"name": ((".".join(c.chain) + ".") if c.chain else "") + c.name, "line": c.line,
+                            "targets": [d for d, _ in hits][:6], "exact": any(e for _, e in hits)})
+        reach = core.impact(p, {f.id}, depth)
+        tests = sorted({t for t, d in reach.items() if d and t in p.funcs and
+                        (p.funcs[t].kind == "test" or core._is_test_file(p, p.funcs[t].file))},
+                       key=lambda t: (p.funcs[t].file, p.funcs[t].start))
+        out.append({"id": f.id, "file": f.file, "start": f.start, "end": f.end,
+                    "source": "\n".join(src[:lines]) + (f"\n... ({len(src) - lines} more lines)" if len(src) > lines else ""),
+                    "callers": callers, "callees": callees,
+                    "tests": [{"id": t, "file": p.funcs[t].file, "line": p.funcs[t].start} for t in tests]})
+    return out
+
+
 def stats(p: core.Project) -> dict:
     """Size, timing and, per language, how calls resolve. `project_exact`:
     of the calls that reach project code, the share that is exact."""

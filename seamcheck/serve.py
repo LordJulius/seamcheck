@@ -103,6 +103,10 @@ TOOLS = {
     "find": ("Where functions are defined: id, file, lines, calls made, exact and name-guess callers.",
              _schema({"name": {"type": "string", "description": "`name` (glob ok), `Module.name` or `path/glob:func`"}},
                      ("name",)), lambda p, a: queries.find(p, a["name"])),
+    "context": ("Everything to know before editing a function, in one call: where it is, its source, each caller "
+                "(exact first, then name guesses), what each of its calls reaches, and the tests that reach it.",
+                _schema({"name": {"type": "string", "description": "`name` (glob ok), `Module.name` or `path/glob:func`"}},
+                        ("name",)), lambda p, a: queries.context(p, a["name"])),
     "refs": ("Where a name is defined, called and mentioned anywhere (scripts and config too).",
              _schema({"name": {"type": "string"}}, ("name",)), lambda p, a: tidy.refs(p, a["name"], tidy.Corpus(p))),
     "impact": ("What a change could break: the callers and bridged views of the targets (or of the functions "

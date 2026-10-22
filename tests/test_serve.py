@@ -25,7 +25,7 @@ FILES = {
     "src/app/view.py": "from .store import save\n\n\ndef show(x):\n    return save(x)\n",
     "tests/test_view.py": "from app.view import show\n\n\ndef test_show():\n    show(1)\n",
 }
-TOOLS = {"check", "gate", "callers", "callees", "path", "find", "refs", "impact", "stats", "unused", "tests"}
+TOOLS = {"check", "gate", "callers", "callees", "path", "find", "context", "refs", "impact", "stats", "unused", "tests"}
 
 
 def git(root, *args):
@@ -134,6 +134,10 @@ class ServeTest(unittest.TestCase):
         self.assertEqual([r["reach"] > 0 for r in s.tool("tests")[0]], [True])
         self.assertTrue(s.tool("refs", name="save")[0]["callers"])
         self.assertEqual(s.tool("unused", since="HEAD")[0], [])
+        ctx = s.tool("context", name="save")[0][0]  # before editing save: who calls it, which tests to run
+        self.assertIn("db.execute(x)", ctx["source"])
+        self.assertEqual([(c["id"], c["exact"]) for c in ctx["callers"]], [("src/app/view.show", True)])
+        self.assertEqual([t["id"] for t in ctx["tests"]], ["tests/test_view.test_show"])
 
     def test_errors(self):
         s = self.session()
