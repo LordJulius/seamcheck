@@ -78,7 +78,7 @@ _TS_PARAM_FIELD = re.compile(r"\b(?:private|public|protected|readonly)\s+([a-z_$
 _CPP_VALUE = re.compile(r"(?:^|[(,])\s*(?:const\s+)?([A-Z]\w*)\s+([a-z_]\w*)\s*(?=[({;=,)])", re.M)
 _CPP_TYPED = re.compile(r"(?<![\w:>])([A-Z]\w*)\s*[\*&]+\s*([a-z_]\w*)\s*(?=[,;=)\[{]|$)", re.M)
 # a C++ class member in a header: `BoardModel* m_board = nullptr;`, `Hub m_hub;`
-_CPP_FIELD = re.compile(r"^\s*(?:(?:mutable|static|const|inline)\s+)*([A-Z]\w*)\s*[\*&]?\s*([a-z_]\w*)\s*(?:=[^;]*|\{[^;]*\})?;")
+_CPP_FIELD = re.compile(r"^\s*(?:(?:mutable|static|const|inline)\s+)*((?:std::|[A-Z])[\w:]*(?:<[^;()]*>)?)\s*[\*&]?\s*([a-z_]\w*)\s*(?:=[^;]*|\{[^;]*\})?;")
 _KT_RECV = r"\bfun\s+(?:<[^>]*>\s*)?([A-Z]\w*)(?:<[^>]*>)?\??\.%s\s*\("
 _ALLCAPS = re.compile(r"[A-Z0-9_]+$")
 
@@ -638,6 +638,8 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
                         break
                 j += 1
             span = (body, j)
+        elif ext in _CPP_EXTS:
+            continue  # `class QMouseEvent;`: a forward declaration names a type defined elsewhere
         kind = "ext" if kw in ("extension", "impl") or (kw == "class" and "partial" in code[max(0, m.start() - 40):m.start()]) else "class"
         if kw in ("interface", "protocol", "trait"):
             kind = "interface"
@@ -1045,8 +1047,9 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                         got_fields.setdefault(m.group(1), set()).add(t)
             elif cpp and not inside[i]:
                 for m in _CPP_FIELD.finditer(ln):
-                    if not _ALLCAPS.match(m.group(1)) and m.group(1) not in ("Q_OBJECT", "Q_PROPERTY"):
-                        got_fields.setdefault(m.group(2), set()).add(m.group(1))
+                    t = type_name(m.group(1))  # (`QPointer<CaptureTool>` holds a CaptureTool)
+                    if t and not _ALLCAPS.match(t) and t not in ("Q_OBJECT", "Q_PROPERTY"):
+                        got_fields.setdefault(m.group(2), set()).add(t)
             for pat_ in pats_:
                 for m in pat_.finditer(ln):
                     got_fields.setdefault(m.group(1), set()).add(m.group(2))
