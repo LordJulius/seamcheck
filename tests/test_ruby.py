@@ -691,5 +691,140 @@ class RubyResolutionTest(unittest.TestCase):
         d.cleanup()
 
 
+class RubyCollectionsTest(unittest.TestCase):
+    """What a collection holds (`docs << doc`, `hsh[name] = Collection.new`),
+    read back by an index, `first` / `detect`, or an iterator's block."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.d, cls.p = load({
+            "lib/site.rb": """\
+                class Site
+                  def collections
+                    @collections ||= names.each_with_object({}) do |name, hsh|
+                      hsh[name] = Collection.new(self, name)
+                    end
+                  end
+
+                  def names
+                    []
+                  end
+                end
+                """,
+            "lib/collection.rb": """\
+                class Collection
+                  def initialize(site, label)
+                    @site = site
+                  end
+
+                  def docs
+                    @docs ||= []
+                  end
+
+                  def read(path)
+                    doc = Document.new(path)
+                    docs << doc
+                  end
+
+                  def paths
+                    docs.sort.each do |doc|
+                      doc.relative_path
+                    end
+                  end
+                end
+                """,
+            "lib/document.rb": """\
+                class Document
+                  def initialize(path)
+                    @path = path
+                  end
+
+                  def relative_path
+                    @path
+                  end
+                end
+                """,
+            "lib/page.rb": """\
+                class Page
+                  def relative_path
+                    "x"
+                  end
+                end
+                """,
+            "lib/use.rb": """\
+                class Use
+                  def first_doc(site)
+                    doc = Site.new.collections["posts"].docs.detect { |d| d }
+                    doc.relative_path
+                  end
+                end
+                """,
+        })
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.d.cleanup()
+
+    def test_an_iterator_block_param_is_an_element(self):
+        self.assertEqual(edges(self.p, "Collection.paths").get("lib/document.Document.relative_path"), True)
+
+    def test_a_hash_of_built_values_and_a_pushed_array(self):
+        self.assertEqual(edges(self.p, "Use.first_doc").get("lib/document.Document.relative_path"), True)
+
+
+class RubyBlocksAndSpecsTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.d, cls.p = load({
+            "lib/base.rb": """\
+                class Base
+                  def initialize(app)
+                    @app = app
+                  end
+
+                  def referrer(env)
+                    env
+                  end
+                end
+                """,
+            "lib/io.rb": """\
+                class Writer
+                  def write(x)
+                    x
+                  end
+                end
+                """,
+            "spec/base_spec.rb": """\
+                RSpec.describe Base do
+                  subject { described_class.new(-> {}) }
+
+                  def update_file(path, &block)
+                    File.open(path, "w", &block)
+                  end
+
+                  it "reads the referrer" do
+                    expect(subject.referrer({})).to eq({})
+                  end
+
+                  it "writes" do
+                    update_file("a") do |f|
+                      f.write "x"
+                    end
+                  end
+                end
+                """,
+        })
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.d.cleanup()
+
+    def test_described_class(self):
+        self.assertEqual(edges(self.p, "reads the referrer").get("lib/base.Base.referrer"), True)
+
+    def test_a_block_handed_on_to_file_open_is_files(self):
+        self.assertNotIn("lib/io.Writer.write", edges(self.p, "writes"))
+
+
 if __name__ == "__main__":
     unittest.main()
