@@ -1800,8 +1800,14 @@ def _build_edges(project: Project) -> None:
                     # `@app.call` not Logger#call); the receiver's type is what settles it
                     mine = []
                 own = [g for g in cands if g.file == f.file and g.recv] if not f.file.endswith(".cs") else []
+                fm_ = project.modules.get(mod.owner, mod) if mod and mod.owner else mod
                 if targets:
                     pass
+                elif q and f.file.endswith((".kt", ".kts")) and len(cands) == 1 and cands[0].recv and fm_ is not None and \
+                        (cands[0].file == f.file or fm_.imported.get(c.name, ("", ""))[1] == c.name):
+                    # Kotlin: the project's one function of that name is an extension this file
+                    # declares or imports by name (`import ...alias`): nothing else is in scope
+                    targets = [(cands[0], True)]
                 elif len(own) == 1 and q != "" and len(cands) > 1:
                     # an extension the caller's own file declares (each generated
                     # parser's private JSONObject.textOrNull): it shadows the others'
