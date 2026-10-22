@@ -1000,7 +1000,9 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         if len(names) == 1 and _stem_key(names[0]) == stem:
             home = mod
         else:
-            mname = f"{mod.name}.{'.'.join(names)}"
+            # (a class nested in the file's own class: `OkHttpClient.Builder` is `<file>.Builder`)
+            path = names[1:] if _stem_key(names[0]) == stem else names
+            mname = f"{mod.name}.{'.'.join(path)}"
             home = mods.get(mname)
             if home is None:
                 home = mods[mname] = Module(mname, rel, len(raw), raw, lines, owner=mod.name, decls=[names[-1]],
@@ -1101,7 +1103,7 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             got_fields = fields.setdefault(home.name, {})
             if fpat and not inside[i]:  # `private val client = rule.newClient()`: a property's value says its type
                 for m in fpat.finditer(ln):
-                    ch = expression(ln, m.end())
+                    ch = expression(code, line_start[i] + m.end())
                     if ch:
                         expr_fields.setdefault(home.name, {}).setdefault(m.group(1), ch)
             pats_ = []
@@ -1184,9 +1186,12 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 f.returns = "Self"  # a builder step: `return this`
             if not f.returns and tk == "kotlin" and bpos < 0:
                 em = re.search(r"\)\s*=\s*", sig)
-                ch = expression(sig, em.end()) if em else ()
-                if ch:
-                    f.returns = "expr:" + "\x1f".join(ch)
+                if em and re.match(r"\s*(?:apply|also)\s*\{|\s*this\b(?!\s*\.)", sig[em.end():]):
+                    f.returns = "Self"  # `fun header(...) = apply { ... }`: a builder step returns its receiver
+                else:
+                    ch = expression(sig, em.end()) if em else ()
+                    if ch:
+                        f.returns = "expr:" + "\x1f".join(ch)
         done: set[int] = set()
         for sa, sb, _, _ in ss:
             name_col = max(0, lines[sa].find(name))  # the return type before it is no call (`Task<int> Run(`)
