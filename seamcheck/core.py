@@ -795,14 +795,34 @@ def _qml_context(project: Project) -> None:
         if not rel.endswith((".cpp", ".cc", ".cxx")) or not mods:
             continue
         raw = "\n".join(mods[0].raw)
+        # `qmlRegisterType<ConversationModel>("uri", 1, 0, "ConversationModel")`: a C++ class under a QML name
+        for cls, qname in re.findall(r"qmlRegister\w*Type<\s*([A-Za-z_][\w:]*)\s*>\s*\([^;]*?\"(\w+)\"\s*[,)]", raw):
+            project.__dict__.setdefault("_qml_names", {})[qname] = cls.split("::")[-1]
         if "setContextProperty" not in raw:
             continue
         for name, var in _CONTEXT_PROP.findall(raw):
+            if var == "new":  # `setContextProperty("X", new Foo(...))`
+                nm = re.search(rf'"{name}"\s*\)?\s*,\s*new\s+([A-Z]\w*)', raw)
+                if nm:
+                    names.setdefault(name, set()).add(nm.group(1))
+                continue
             decl = re.search(rf"(?:^|[;{{}}(\s])([A-Z]\w*)\s*[\*&]?\s*\b{var}\b\s*[;({{=]", raw, re.M) or \
                 re.search(rf"\b{var}\s*=\s*(?:new\s+|std::make_unique<|std::make_shared<)([A-Z]\w*)", raw)
             if decl:
                 names.setdefault(name, set()).add(decl.group(1))
     bound = {n: "type:" + next(iter(t)) for n, t in names.items() if len(t) == 1}
+    # an id declared in one QML file only: a child component's `conversationModel`
+    # (QML looks ids up through the components that instantiate it) is that one
+    from .lang_other import _QML_ID
+    ids: dict[str, set[str]] = {}
+    for rel, mods in project.by_file.items():
+        if rel.endswith(".qml") and mods:
+            for m in _QML_ID.finditer("\n".join(mods[0].code)):
+                held = mods[0].bound.get(m.group(1), "")
+                ids.setdefault(m.group(1), set()).add(held if held.startswith("type:") else "?" + rel)
+    for n, held in ids.items():
+        if len(held) == 1 and next(iter(held)).startswith("type:"):
+            bound.setdefault(n, next(iter(held)))
     if not bound:
         return
     for rel, mods in project.by_file.items():
@@ -1175,7 +1195,9 @@ def _build_edges(project: Project) -> None:
                     v = None
                 if v is not None:
                     kind, mods_, ex = v
-                    if kind == "pkg":
+                    if kind == "ns":
+                        hits, on_type = [], True
+                    elif kind == "pkg":
                         hits, on_type = _in_scope(project, "pkg:" + mods_[0], c.name), True
                     elif kind == "static":
                         hits = [h for mn in mods_ for h in _in_scope(project, mn, c.name)]
