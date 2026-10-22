@@ -34,6 +34,32 @@ def _tests_summary(rows: list[dict], limit: int) -> list[str]:
     return out
 
 
+_FIX = {"forbidden": "retire the old path instead of naming a second one",
+        "unused": "delete it, or call it from product code", "test_only": "delete it with its tests, or wire it up",
+        "dups": "keep one copy and call it", "tests": "make the test call product code (or delete it)",
+        "moved_refs": "point it at where the code went (or a glob), or `seamcheck: allow moved-ref`"}
+
+
+def gate_findings(p, rep: dict) -> list[dict]:
+    """One flat list an agent (or a CI annotator) can act on: where, what, why
+    it matters, how to fix."""
+    whys = {r["id"]: r.get("why", "") for r in p.config.get("rule", [])}
+    flat = [{"kind": "rule", "rule": f.rule, "severity": f.severity, "file": f.file, "line": f.line,
+             "message": f.message, "why": whys.get(f.rule, ""), "fix": ""} for f in rep["rules"]]
+    for k in ("forbidden", "unused", "test_only", "tests"):
+        for r in rep[k]:
+            flat.append({"kind": k, "rule": k, "severity": "error", "file": r["file"], "line": r["line"],
+                         "message": r.get("id") or r.get("word", ""), "why": "", "fix": _FIX[k]})
+    for r in rep.get("moved_refs", []):
+        flat.append({"kind": "moved_refs", "rule": "moved-ref", "severity": "error", "file": r["file"],
+                     "line": r["line"], "message": f"names {r['moved_from']}, which this change split up",
+                     "why": "a check pinned to one file checks less after a split", "fix": _FIX["moved_refs"]})
+    for d in rep["dups"]:
+        flat.append({"kind": "dups", "rule": "dups", "severity": "error", "file": d["a"], "line": 0,
+                     "message": f"copy of {d['b']} ({d['similarity']})", "why": "", "fix": _FIX["dups"]})
+    return flat
+
+
 def main(a, p, t0) -> int:
     lim = a.limit
     only = tidy.changed_files(p, a.since) if a.since else None
@@ -42,27 +68,14 @@ def main(a, p, t0) -> int:
     if a.cmd == "gate":
         rep = tidy.gate(p, a.since or "HEAD", a.staged)
         whys = {r["id"]: r.get("why", "") for r in p.config.get("rule", [])}
-        if a.json:
-            # one flat list an agent can act on: where, what, why it matters, how to fix
-            fix = {"forbidden": "retire the old path instead of naming a second one",
-                   "unused": "delete it, or call it from product code", "test_only": "delete it with its tests, or wire it up",
-                   "dups": "keep one copy and call it", "tests": "make the test call product code (or delete it)",
-                   "moved_refs": "point it at where the code went (or a glob), or `seamcheck: allow moved-ref`"}
-            flat = [{"kind": "rule", "rule": f.rule, "severity": f.severity, "file": f.file, "line": f.line,
-                     "message": f.message, "why": whys.get(f.rule, ""), "fix": ""} for f in rep["rules"]]
-            for k in ("forbidden", "unused", "test_only", "tests"):
-                for r in rep[k]:
-                    flat.append({"kind": k, "rule": k, "severity": "error", "file": r["file"], "line": r["line"],
-                                 "message": r.get("id") or r.get("word", ""), "why": "", "fix": fix[k]})
-            for r in rep.get("moved_refs", []):
-                flat.append({"kind": "moved_refs", "rule": "moved-ref", "severity": "error", "file": r["file"],
-                             "line": r["line"], "message": f"names {r['moved_from']}, which this change split up",
-                             "why": "a check pinned to one file checks less after a split", "fix": fix["moved_refs"]})
-            for d in rep["dups"]:
-                flat.append({"kind": "dups", "rule": "dups", "severity": "error", "file": d["a"], "line": 0,
-                             "message": f"copy of {d['b']} ({d['similarity']})", "why": "", "fix": fix["dups"]})
-            print(json.dumps({"blocked": tidy.gate_failed(rep), "changed_files": rep["changed_files"], "findings": flat,
-                              "ms": int((time.time() - t0) * 1000)}, indent=1, default=list))
+        if a.format != "text":
+            flat = gate_findings(p, rep)
+            if a.format == "json":
+                print(json.dumps({"blocked": tidy.gate_failed(rep), "changed_files": rep["changed_files"], "findings": flat,
+                                  "ms": int((time.time() - t0) * 1000)}, indent=1, default=list))
+            else:
+                from . import output
+                print(output.sarif(flat) if a.format == "sarif" else output.github(flat))
             return 1 if tidy.gate_failed(rep) else 0
         shown = set()
         for f in rep["rules"]:

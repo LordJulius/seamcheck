@@ -473,13 +473,23 @@ def _resolve_where(project: Project, where: str, cache: dict) -> str:
     return ""
 
 
+def _manifests(project: Project, name: str) -> list[str]:
+    """Every `name` (package.json, go.mod, Cargo.toml) in the repo, whether or
+    not `[project] include` takes it in: they say how imports resolve."""
+    found = project.__dict__.setdefault("_manifests", {})
+    if name not in found:
+        exclude = DEFAULT_EXCLUDE + project.config.get("project", {}).get("exclude", [])
+        found[name] = list_files(project.root, [name, f"**/{name}"], exclude)
+    return found[name]
+
+
 def _workspace_entry(project: Project, spec: str, cache: dict) -> str:
     """`@scope/pkg` or `@scope/pkg/sub` -> a path in the project, for monorepo
     packages named in their package.json (npm / yarn / pnpm workspaces)."""
     ws = cache.get("\0workspaces")
     if ws is None:
         ws = {}
-        for rel in project.files:
+        for rel in _manifests(project, "package.json"):
             if rel.endswith("package.json") and rel.rsplit("/", 1)[-1] == "package.json" and "/node_modules/" not in "/" + rel:
                 try:
                     with open(os.path.join(project.root, rel), encoding="utf-8") as fh:
@@ -514,7 +524,7 @@ def _resolve_go(project: Project, path: str, cache: dict) -> str:
     mods = cache.get("\0gomod")
     if mods is None:
         mods = []
-        for rel in project.files:
+        for rel in _manifests(project, "go.mod"):
             if rel == "go.mod" or rel.endswith("/go.mod"):
                 try:
                     with open(os.path.join(project.root, rel), encoding="utf-8") as fh:
@@ -545,7 +555,7 @@ def _rs_crates(project: Project, cache: dict) -> tuple[list[tuple[str, str]], di
     got = cache.get("\0rs")
     if got is None:
         dirs, names = [], {}
-        for rel in project.files:
+        for rel in _manifests(project, "Cargo.toml"):
             if rel != "Cargo.toml" and not rel.endswith("/Cargo.toml"):
                 continue
             d = rel.rsplit("/", 1)[0] if "/" in rel else ""
