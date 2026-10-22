@@ -2,6 +2,7 @@
 parts. Deterministic, local, language-agnostic.
 
   seamcheck init [--hook]                a first seamcheck.toml for this repo (+ the pre-commit gate)
+  seamcheck serve                        an MCP server (stdio) answering these queries from one loaded graph
   seamcheck check [--format text|json|sarif|github] [--html out.html] [--only id,id] [--errors-only]
   seamcheck map --html out.html          interactive map of modules + calls + findings
   seamcheck callers NAME [--depth N]     who calls it (transitively; exact edges, --fuzzy adds guesses)
@@ -46,13 +47,12 @@ SPEC is `name`, `Module.name`, or `path/glob:funcglob`.
 from __future__ import annotations
 
 import argparse
-import collections
 import json
 import os
 import sys
 import time
 
-from . import __version__, core
+from . import __version__, core, queries
 
 
 def _root(start: str) -> str:
@@ -67,9 +67,8 @@ def _root(start: str) -> str:
 
 
 def _fmt(p: core.Project, fid: str) -> str:
-    f = p.funcs.get(fid)
-    via = sorted({b for (a, d), b in p.bridged.items() if fid in (a, d)})
-    return (f"{fid}  ({f.file}:{f.start})" if f else fid) + (f"  [via {', '.join(via)}]" if via else "")
+    w = queries.where(p, fid)
+    return (f"{fid}  ({w['file']}:{w['line']})" if w["file"] else fid) + (f"  [via {', '.join(w['via'])}]" if w["via"] else "")
 
 
 def _tighten(root: str, extra: list[str]) -> int:
@@ -111,7 +110,7 @@ def main(argv=None) -> int:
 def _main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="seamcheck", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"seamcheck {__version__}")
-    ap.add_argument("cmd", choices=["init", "check", "map", "callers", "callees", "path", "find", "dead", "stats", "deps", "matrix", "tidy", "tests", "test-only", "unused", "dups", "split", "hotspots", "remove", "refs", "impact", "gate",
+    ap.add_argument("cmd", choices=["init", "serve", "check", "map", "callers", "callees", "path", "find", "dead", "stats", "deps", "matrix", "tidy", "tests", "test-only", "unused", "dups", "split", "hotspots", "remove", "refs", "impact", "gate",
                                     "trace", "run", "fuzz", "tighten"])
     ap.add_argument("args", nargs="*")
     ap.add_argument("-C", dest="root", default=".")
@@ -160,17 +159,15 @@ def _main(argv=None) -> int:
         return runcmd.main(a, root)
     if a.cmd == "tighten":
         return _tighten(root, a.config)
+    if a.cmd == "serve":
+        from . import serve
+        return serve.main(root, a.config, use_cache=not a.no_cache)
     p = core.load(root, a.config, use_cache=not a.no_cache)
-    if a.cmd in ("check", "stats"):
-        # the gate's exactness guard compares a change against these (exactness.py)
-        from . import exactness
-        exactness.record(p)
 
     if a.cmd in ("check", "map"):
-        findings = (core.run_rules(p, a.only.split(",") if a.only else None, a.skip.split(",") if a.skip else None)
-                    if a.cmd == "check" or a.html else [])
-        if a.errors_only:
-            findings = [f for f in findings if f.severity == "error"]
+        only, skip = (a.only.split(",") if a.only else None), (a.skip.split(",") if a.skip else None)
+        findings = (queries.check(p, only, skip, a.errors_only) if a.cmd == "check"
+                    else core.run_rules(p, only, skip) if a.html else [])
         if a.html:
             from .report import write_html
             write_html(p, findings, a.html)
@@ -179,8 +176,7 @@ def _main(argv=None) -> int:
             return 0
         if a.format != "text":
             rules = {r["id"]: r for r in p.config.get("rule", [])}
-            flat = [dict(f.__dict__, why=rules.get(f.rule, {}).get("why", ""), fix=rules.get(f.rule, {}).get("fix", ""))
-                     for f in findings]
+            flat = queries.flat(p, findings)
             if a.format == "json":
                 print(json.dumps(flat, indent=1))
             else:
@@ -209,38 +205,19 @@ def _main(argv=None) -> int:
             ap.error("impact needs a function spec, a file, or --since REF")
         start = set()
         if a.since:
-            # the functions the diff touched (committed since REF, staged, unstaged, untracked)
-            from . import tidy
-            for rel, lines in tidy.changed_lines(p, a.since, a.staged, deletions=True).items():
-                for m in p.by_file.get(rel, []):
-                    for ln in lines:
-                        f = m.func_at(ln)
-                        if f and f.kind != "top":
-                            start.add(f.id)
+            start = queries.changed_functions(p, a.since, a.staged)
             if not start:
                 print(f"no functions changed since {a.since}")
                 return 0
             if not a.json:
                 print(f"since {a.since}: {len(start)} functions changed")
-        for t in a.args:
-            if t in p.by_file or os.path.exists(os.path.join(p.root, t)):
-                start |= {f.id for m in p.by_file.get(t, []) for f in m.funcs}
-            else:
-                start |= {f.id for f in p.find(t)}
+        start |= queries.target_functions(p, a.args)
         if not start:
             print(f"nothing matches {' '.join(a.args)}")
             return 1
-        dist = core.impact(p, start, max(a.depth, 4) if a.depth == 2 else a.depth, fuzzy=a.fuzzy)
-        areas = p.config.get("project", {}).get("areas") or {}
-        def area(rel):
-            return next((k for k, g in areas.items() if core.match_any(rel, g)), rel.split("/")[0])
-        by = collections.defaultdict(list)
-        for fid, d in dist.items():
-            if d and fid in p.funcs:
-                by[area(p.funcs[fid].file)].append((d, fid))
-        own = {area(p.funcs[s].file) for s in start if s in p.funcs}
+        by, own = queries.impact(p, start, max(a.depth, 4) if a.depth == 2 else a.depth, fuzzy=a.fuzzy)
         if a.json:
-            print(json.dumps({k: sorted(v) for k, v in by.items()}, indent=1))
+            print(json.dumps(by, indent=1))
             return 0
         print(f"change to {len(start)} functions in {', '.join(sorted(own))} reaches:")
         for k, v in sorted(by.items(), key=lambda kv: (kv[0] in own, -len(kv[1]))):
@@ -254,19 +231,17 @@ def _main(argv=None) -> int:
     if a.cmd in ("callers", "callees"):
         if not a.args:
             ap.error(f"{a.cmd} needs a function")
-        starts = p.find(a.args[0])
+        rev = a.cmd == "callers"
+        starts = queries.walk(p, a.args[0], a.depth, rev, a.fuzzy)
         if not starts:
             print(f"no function matches {a.args[0]!r}")
             return 1
-        rev = a.cmd == "callers"
         word = "callers" if rev else "callees"
         for s in starts:
-            ex, guess = core.edge_split(p, s.id, reverse=rev)
-            print(f"{_fmt(p, s.id)}  [{ex} exact, {guess} name-guess {word}{'' if a.fuzzy else ', walking exact'}]")
-            dist = core.reach(p, s.id, a.depth, reverse=rev, exact_only=not a.fuzzy)
-            for k, d in sorted(dist.items(), key=lambda kv: (kv[1], kv[0])):
-                if d:
-                    print(f"  {'  ' * (d - 1)}{'<-' if rev else '->'} {_fmt(p, k)}")
+            ex, guess = s["exact"], s["guess"]
+            print(f"{_fmt(p, s['id'])}  [{ex} exact, {guess} name-guess {word}{'' if a.fuzzy else ', walking exact'}]")
+            for r in s["reach"]:
+                print(f"  {'  ' * (r['depth'] - 1)}{'<-' if rev else '->'} {_fmt(p, r['id'])}")
             if ex == 0 and not a.fuzzy:
                 # (a miss must not read as "nothing calls it")
                 print(f"  0 exact {word}" + (f"; {guess} by name guess only (--fuzzy shows them)" if guess else "; none by name guess either"))
@@ -275,18 +250,9 @@ def _main(argv=None) -> int:
     if a.cmd == "path":
         if len(a.args) < 2:
             ap.error("path needs FROM and TO")
-        froms, tos = p.find(a.args[0]), {f.id for f in p.find(a.args[1])}
-        def shortest(exact_only):
-            best = []
-            for f in froms:
-                for t in tos:
-                    c = core.path(p, f.id, t, exact_only=exact_only)
-                    if c and (not best or len(c) < len(best)):
-                        best = c
-            return best
-        best = shortest(not a.fuzzy)
+        best, through_guesses = queries.shortest(p, a.args[0], a.args[1], a.fuzzy)
         if not best:
-            if not a.fuzzy and shortest(False):
+            if through_guesses:
                 print("no exact call chain; one exists through name guesses (--fuzzy shows it)")
             else:
                 print("no call chain found")
@@ -296,9 +262,9 @@ def _main(argv=None) -> int:
         return 0
 
     if a.cmd == "find":
-        for f in p.find(a.args[0] if a.args else "*"):
-            ex, guess = core.edge_split(p, f.id)
-            print(f"{f.id}  {f.file}:{f.start}-{f.end}  calls={len(f.calls)} callers: {ex} exact, {guess} name-guess")
+        for f in queries.find(p, a.args[0] if a.args else "*"):
+            print(f"{f['id']}  {f['file']}:{f['start']}-{f['end']}  calls={f['calls']} "
+                  f"callers: {f['exact_callers']} exact, {f['guess_callers']} name-guess")
         return 0
 
     if a.cmd == "dead":
@@ -346,22 +312,18 @@ def _main(argv=None) -> int:
         return 1 if any(d.status in deps.ACTIONABLE for d in found) and not a.args else 0
 
     if a.cmd == "stats":
-        edges = sum(len(v) for v in p.edges.values())
-        exact = sum(1 for v in p.edges.values() for e in v if e[2])
-        langs = {}
-        for rel in p.by_file:
-            ext = os.path.splitext(rel)[1]
-            langs[ext] = langs.get(ext, 0) + 1
-        print(f"root {p.root}\nfiles {len(p.files)} (parsed {len(p.by_file)}: {langs})\nmodules {len(p.modules)}  "
-              f"functions {len(p.funcs)}\ncall edges {edges} (exact {exact}, fuzzy {edges - exact})\n"
-              f"load {p.parse_ms} ms, total {int((time.time() - t0) * 1000)} ms")
+        st = queries.stats(p)
+        edges, exact = st["edges"], st["exact_edges"]
+        print(f"root {st['root']}\nfiles {st['files']} (parsed {st['parsed']}: {st['languages']})\nmodules {st['modules']}  "
+              f"functions {st['functions']}\ncall edges {edges} (exact {exact}, fuzzy {edges - exact})\n"
+              f"load {st['load_ms']} ms, total {int((time.time() - t0) * 1000)} ms")
         print("call sites resolved (exact / name guess only / nothing), and of the calls that reach project")
         print("code (exact + guess) how many are certain; \"nothing\" is mostly the language's own library:")
-        for ext, (ex, fz, no) in sorted(p.resolution.items(), key=lambda kv: -sum(kv[1])):
-            n = ex + fz + no
-            own = f"project calls exact {100 * ex // (ex + fz):>3}%" if ex + fz else ""
-            print(f"  {ext or '(none)':<6} {n:>7}  exact {100 * ex // n:>3}%  guess {100 * fz // n:>3}%  "
-                  f"nothing {100 * no // n:>3}%   {own}")
+        for ext, r in st["resolution"].items():
+            n = r["calls"]
+            own = f"project calls exact {r['project_exact']:>3}%" if r["project_exact"] is not None else ""
+            print(f"  {ext or '(none)':<6} {n:>7}  exact {100 * r['exact'] // n:>3}%  guess {100 * r['guess'] // n:>3}%  "
+                  f"nothing {100 * r['nothing'] // n:>3}%   {own}")
         return 0
     return 0
 
