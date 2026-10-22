@@ -91,7 +91,8 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                     j = _skip_back_ws(code, g)
             s = _ident_back(code, j)
             if s == j:  # `(expr).x`: a parenthesized expression
-                segs.append("(...)")
+                cast = re.search(r"\bas[!?]?\s+([A-Z][\w.]*)\s*[?]?\s*$", code[k + 1:i - 1])
+                segs.append(f"<as:{cast.group(1)}>" if cast else "(...)")  # `($Timer as Timer).start()`: a Timer
                 i = s
                 break
             name = code[s:j]

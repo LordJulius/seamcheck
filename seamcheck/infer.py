@@ -390,6 +390,74 @@ class Types:
             self.cache["\0rsext"] = got
         return got
 
+    def _scene_node(self, gd: str, name: str):
+        """GDScript `$Name` in `gd`: the node of that name in the scenes whose
+        root runs `gd` (their .tscn files): a scripted node is its script's
+        class, an engine node the engine's; unknown when the scenes disagree."""
+        scenes = self.cache.get("\0scenes")
+        if scenes is None:
+            scenes = self.cache["\0scenes"] = self._read_scenes()
+        roots, nodes = scenes
+        got = {nodes[sc].get(name) for sc in roots.get(gd, ())}
+        got.discard(None)
+        if len(got) != 1:
+            return None
+        kind, what = got.pop()
+        if kind == "script":
+            mods = self.p.by_file.get(what)
+            return ("inst", (mods[0].name,), True) if mods else None
+        mods, ex, declared = self.type_modules(self.p.by_file[gd][0], what)
+        return ("inst", tuple(mods), ex) if declared else EXT
+
+    def _read_scenes(self):
+        """(script -> scenes whose root runs it, scene -> {node path: ("script", rel) | ("type", T)})."""
+        raw: dict[str, tuple] = {}
+        for rel in self.p.files:
+            if not rel.endswith(".tscn"):
+                continue
+            try:
+                with open(os.path.join(self.p.root, rel), encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            base = self._godot(rel)
+            res = {m.group(2): os.path.normpath(os.path.join(base, m.group(1)[6:])).replace(os.sep, "/")
+                   for m in re.finditer(r'\[ext_resource[^\]]*?path="(res://[^"]+)"[^\]]*?id="([^"]+)"', text)}
+            nodes = []
+            for m in re.finditer(r'^\[node ([^\]]*)\]\n((?:(?!\[)[^\n]*\n)*)', text, re.M):
+                attrs = dict(re.findall(r'(\w+)=(?:"([^"]*)"|ExtResource\("([^"]+)"\))', m.group(1)) and
+                             [(k, a or b) for k, a, b in re.findall(r'(\w+)=(?:"([^"]*)"|ExtResource\("([^"]+)"\))', m.group(1))])
+                sm = re.search(r'^script = ExtResource\("([^"]+)"\)', m.group(2), re.M)
+                nodes.append((attrs, res.get(sm.group(1)) if sm else None, res.get(attrs.get("instance", ""))))
+            raw[rel] = nodes
+        roots: dict[str, set] = {}
+        table: dict[str, dict] = {}
+
+        def value(scene, depth=0):
+            nodes = raw.get(scene) or []
+            if not nodes or depth > 8:
+                return None
+            attrs, script, inst = nodes[0]
+            if script:
+                return ("script", script)
+            if inst:
+                return value(inst, depth + 1)
+            return ("type", attrs["type"]) if attrs.get("type") else None
+        for scene, nodes in raw.items():
+            if not nodes:
+                continue
+            table[scene] = {}
+            if nodes[0][1]:
+                roots.setdefault(nodes[0][1], set()).add(scene)
+            for attrs, script, inst in nodes[1:]:
+                parent = attrs.get("parent", "")
+                path = attrs.get("name", "") if parent in (".", "") else f"{parent}/{attrs.get('name', '')}"
+                v = ("script", script) if script else value(inst) if inst else \
+                    (("type", attrs["type"]) if attrs.get("type") else None)
+                if v:
+                    table[scene][path] = v
+        return roots, table
+
     def _package_name(self) -> str:
         if "\0pkgname" not in self.cache:
             import json
@@ -513,6 +581,10 @@ class Types:
             return ("inst", tuple(sup), True) if sup else (EXT if self.external_base(own[0]) else None)
         if seg.startswith("new "):
             return self.instance(mod, seg[4:-2], self_mods)
+        if seg.startswith(("$", "%")) and fm.file.endswith(".gd"):
+            return self._scene_node(fm.file, seg[1:])  # `$HUD`: the node the script's scene names so
+        if seg.startswith("<as:"):
+            return self.instance(mod, seg[4:-1], self_mods)  # `(x as Foo)`: a Foo
         if seg.endswith("()"):
             name = seg[:-2]
             held = f.bound.get(name, "") if f is not None else ""

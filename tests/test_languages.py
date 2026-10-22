@@ -636,5 +636,26 @@ class RustFields(Base):
         self.assertFalse(self.guessed("src/printer.header"))
 
 
+class GodotScenes(Base):
+    FILES = {
+        "project.godot": "",
+        "hud.gd": "extends CanvasLayer\n\nfunc update_score(s):\n\tpass\n",
+        "conductor.gd": "extends Node\n\nfunc start():\n\tpass\n",
+        "hud.tscn": '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://hud.gd" id="1"]\n\n'
+                    '[node name="HUD" type="CanvasLayer"]\nscript = ExtResource("1")\n',
+        "main.gd": "extends Node\n\nfunc _ready():\n\t$HUD.update_score(1)\n\t$Timer.start()\n"
+                   "\t($Timer as Timer).start()\n",
+        "main.tscn": '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n'
+                     '[ext_resource type="PackedScene" path="res://hud.tscn" id="2"]\n\n'
+                     '[node name="Main" type="Node"]\nscript = ExtResource("1")\n\n'
+                     '[node name="HUD" parent="." instance=ExtResource("2")]\n\n'
+                     '[node name="Timer" type="Timer" parent="."]\n',
+    }
+
+    def test_a_a_scene_names_what_dollar_nodes_are(self):
+        self.assertEqual(self.exact("main._ready"), {"hud.update_score"})
+        self.assertFalse(self.guessed("main._ready"))  # $Timer is the engine's Timer, not conductor.start
+
+
 if __name__ == "__main__":
     unittest.main()
