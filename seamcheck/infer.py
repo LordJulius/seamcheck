@@ -349,6 +349,8 @@ class Types:
             return ("inst", (held[4:],), True) if held[4:] in self.p.modules else None
         if held.startswith("expr:"):
             return self.chain(mod, f, tuple(held[5:].split("\x1f")), depth + 1, self_mods=self_mods)
+        if held.startswith("reexport:"):  # `exports.Router = Router`: that name's value in the module
+            return EXT if held[9:] in mod.external else None
         if held.startswith("pack:"):
             return self.pack_param(held[5:])
         if held.startswith("lam:"):
@@ -789,8 +791,8 @@ class Types:
                 return ("static", tuple(mods), exact)
         if seg in p.modules:
             return ("static", (seg,), True)
-        short = p.short.get(seg) if not (seg[:1].islower() and fm.file.endswith((".rb", ".rake", ".ru", ".py"))) else None
-        if short:  # (a lowercase Ruby name is a value, never the file `site.rb`)
+        short = p.short.get(seg) if not (seg[:1].islower() and fm.file.endswith((".rb", ".rake", ".ru", ".py") + _JS_EXTS[:-1])) else None
+        if short:  # (a lowercase Ruby / JS name is a value, never the file `site.rb` / `app.js`: those come by import)
             return ("static", tuple(short), len(short) == 1)
         if seg[:1].isupper() and not fm.file.endswith((".ex", ".exs", ".gd")):
             return EXT  # a type or module the project doesn't declare
@@ -919,6 +921,18 @@ class Types:
         return [c for mn in mods if mn in self.p.modules and self.p.modules[mn].file.endswith(".py")
                 and not self.p.modules[mn].owner and (c := _py_class(self.p, self.p.modules[mn], name))]
 
+    def _js_default_reexport(self, mods) -> list:
+        """The modules whose exports these JS modules hand on whole
+        (`module.exports = require('./lib/express')`)."""
+        from .core import _defining_module
+        alt = []
+        for mn in mods:
+            w, n = self.p.modules[mn].imported.get("default", ("", ""))
+            dm = _defining_module(self.p, w, n) if w else None
+            if dm and dm not in mods and dm not in alt:
+                alt.append(dm)
+        return alt
+
     def _nested(self, mn: str) -> bool:
         """`<mod>.<name>` is a class nested in mod, not a file named with a
         dot beside it (`ResilienceContextPool.Shared.cs`)."""
@@ -960,12 +974,22 @@ class Types:
             if mod.file.endswith(".cs") and len(hits) > 1:
                 want = targs or "0"
                 hits = [g for g in hits if not g.targs or want in g.targs.split(",")] or hits
+            if hits and kind == "static" and all(g.returns == "Self" for g in hits) and mod.file.endswith(_JS_EXTS):
+                return cur  # `res.status(404)` on the module object `res`: `return this` gives that object back
             if len(hits) == 1:
                 return self.returns(hits[0], list(mods) if kind == "inst" else None, depth + 1, targs)
             if hits and len({g.returns for g in hits}) == 1 and hits[0].returns:
                 # overloads that all return the same type: whichever runs, that is the value
                 return self.returns(hits[0], list(mods) if kind == "inst" else None, depth + 1, targs)
+            if not hits and kind == "static" and mod.file.endswith(_JS_EXTS) and depth < _MAX:
+                alt = self._js_default_reexport(mods)
+                if alt:  # `require('express')` is index.js, `module.exports = require('./lib/express')`
+                    return self.step(mod, ("static", tuple(alt), exact), seg, depth + 1)
             if not hits:
+                if kind == "static" and mod.file.endswith(_JS_EXTS) and any(
+                        is_ext(self.held(self.p.modules[mn], None, self.p.modules[mn].bound[name], depth + 1))
+                        for mn in mods if self.p.modules[mn].bound.get(name, "").startswith("reexport:")):
+                    return EXT  # `express.Router()`: the `router` package's, re-exported
                 if kind == "static" and seg == "new()" and mod.file.endswith((".gd", ".rb", ".rake", ".ru")):
                     return ("inst", mods, exact)  # `Foo.new()` (GDScript, Ruby): a Foo (no `new` of its own)
                 if seg in UNWRAP:

@@ -1103,6 +1103,29 @@ def _assignments(tk: str, text: str) -> list[tuple[str, str]]:
         ch = expression(text, m.end())
         if ch:
             out.append((m.group(1), "expr:" + "\x1f".join(ch)))
+    if tk == "js":  # `var blog = express(), app = express()`: the names after the first
+        for m in re.finditer(r"\b(?:var|let|const)\s+", text):
+            k, d, n = m.end(), 0, len(text)
+            while k < n and k - m.end() < 3000:  # the statement's end: `;`, or a line break at depth 0 not continued
+                ch = text[k]
+                if ch in "([{":
+                    d += 1
+                elif ch in ")]}":
+                    d -= 1
+                    if d < 0:
+                        break
+                elif d == 0 and ch == ";":
+                    break
+                elif d == 0 and ch == ",":
+                    am = re.match(r"\s*([A-Za-z_$][\w$]*)\s*=(?![=>])", text[k + 1:k + 200])
+                    if am:
+                        ch_ = expression(text, k + 1 + am.end())
+                        if ch_:
+                            out.append((am.group(1), "expr:" + "\x1f".join(ch_)))
+                elif d == 0 and ch == "\n" and not text[k + 1:k + 200].lstrip().startswith(",") \
+                        and not text[:k].rstrip().endswith((",", "=")):
+                    break
+                k += 1
     if tk == "js":  # `const { h, app: a } = window`: each name is that member of the value
         for m in _JS_DESTRUCTURE.finditer(text):
             ch = expression(text, m.end())
@@ -1311,6 +1334,10 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         others = {m.group(1) for m in re.finditer(r"\b(?:class|interface|enum)\s+([A-Z]\w*)", code)}
         mod.decls = [d for d in mod.decls if d in others or (d in aliases and aliases[d] not in _TS_BUILTIN_TYPES)]
         _js_imports(mod, rel, text, lines)
+        for em in re.finditer(r"^[ \t]*(?:module\.)?exports\.([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)(?:\.([A-Za-z_$][\w$]*))?\s*;?[ \t]*$",
+                              code, re.M):
+            if not em.group(3):  # `exports.Router = Router`: whatever that name is here (`require('router')`: the package's)
+                mod.bound.setdefault(em.group(1), "reexport:" + em.group(2))
         _js_reexports(mod, rel, text, lines)
         if "require(" in text or "module.exports" in text:
             _cjs(mod, rel, text)
