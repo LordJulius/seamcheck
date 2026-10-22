@@ -22,7 +22,15 @@ _RUST = [re.compile(r"\bfn\s+([A-Za-z_]\w*)")]
 _KOTLIN = [re.compile(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?([A-Za-z_]\w*)\s*\(")]
 # (one line, a bounded run of type/modifier words: an unbounded one backtracked
 # exponentially on long Java files)
-_JAVA = [re.compile(r"^[ \t]*(?:[\w<>\[\],.?]+[ \t]+){1,6}([A-Za-z_]\w*)[ \t]*\([^;\n)]*\)[ \t]*(?:throws [\w., ]+)?\{", re.M)]
+# The parameters may span lines and the body may open on the next line
+# (Allman braces, the C# default: every C# method was missed); a C# body may
+# be `=> expr;`, a constructor may chain `: base(x)`.
+_STMT = r"(?!(?:return|new|else|throw|await|yield|case|goto|using|lock|fixed|checked|unchecked)\b)"
+_JAVA = [re.compile(rf"^[ \t]*(?:@\w+(?:\([^)\n]*\))?[ \t]+)*{_STMT}(?:[\w<>\[\],.?]+[ \t]+){{1,6}}([A-Za-z_]\w*)[ \t]*"
+                    r"\((?:[^;{}()]|\([^()]*\))*\)[ \t]*(?:throws [\w., ]+)?\s*\{", re.M)]
+_CS = [re.compile(rf"^[ \t]*(?:\[[^\]\n]*\][ \t]*)*{_STMT}(?:[\w<>\[\],.?]+[ \t]+){{1,6}}([A-Za-z_]\w*)[ \t]*(?:<[^>\n]*>)?[ \t]*"
+                  r"\((?:[^;{}()]|\([^()]*\))*\)[ \t]*(?::[ \t]*(?:base|this)[ \t]*\((?:[^;{}()]|\([^()]*\))*\))?"
+                  r"(?:\s*where[^{;=]*)?\s*(?:\{|=>)", re.M)]
 _GO = [re.compile(r"^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(", re.M)]
 # C++: a definition line has at least one type word before the name, is not a
 # statement (return / delete / emit...), and has a body (a declaration or a
@@ -39,7 +47,7 @@ LANGS = {
     ".js": ("js", _JS), ".jsx": ("js", _JS), ".mjs": ("js", _JS), ".cjs": ("js", _JS),
     ".ts": ("js", _JS), ".tsx": ("js", _JS), ".mts": ("js", _JS),
     ".rs": ("rust", _RUST), ".kt": ("kotlin", _KOTLIN), ".kts": ("kotlin", _KOTLIN),
-    ".java": ("c", _JAVA), ".cs": ("c", _JAVA), ".go": ("c", _GO),
+    ".java": ("c", _JAVA), ".cs": ("c", _CS), ".go": ("c", _GO),
     ".cpp": ("c", _CPP), ".cc": ("c", _CPP), ".cxx": ("c", _CPP), ".hpp": ("c", _CPP), ".hh": ("c", _CPP),
     ".h": ("c", _CPP), ".qml": ("js", _QML),
 }
@@ -67,18 +75,39 @@ _KT_RECV = r"\bfun\s+(?:<[^>]*>\s*)?([A-Z]\w*)(?:<[^>]*>)?\??\.%s\s*\("
 _ALLCAPS = re.compile(r"[A-Z0-9_]+$")
 
 
-def _typed(fam: str, cpp: bool, text: str) -> list[tuple[str, str]]:
+# Java / C#: `Foo foo` (a local, a parameter), `var x = new Foo(`, and class
+# fields with their modifiers (`private readonly Foo _foo;`)
+_JV_NEW = re.compile(r"\b(?:var|val|final)\s+([a-z_]\w*)\s*=\s*new\s+([A-Z]\w*)\s*[(<{]")
+_JV_FIELD = re.compile(r"^\s*(?:(?:public|private|protected|internal|static|readonly|final|volatile|transient)\s+)*"
+                       r"([A-Z]\w*)(?:<[^>;]*>)?\??\s+([a-z_]\w*)\s*(?:=[^;]*)?;")
+# Go: `c *Command` / `var x Foo` (receivers, parameters, vars), `x := &Foo{`, and
+# struct fields (`flags *flagSet`). Go types may be lowercase (unexported).
+_GO_TYPED = re.compile(r"(?:\bvar\s+|[(,]\s*)([A-Za-z_]\w*)\s+\*?([A-Za-z_]\w*)(?=\s*[,)=]|\s*$)", re.M)
+_GO_NEW = re.compile(r"\b([A-Za-z_]\w*)\s*:?=\s*&?([A-Za-z_]\w*)\s*\{")
+_GO_FIELD = re.compile(r"^\s*([A-Za-z_]\w*)\s+\*?([A-Za-z_]\w*)\s*(?:`[^`]*`)?\s*$")
+_GO_KEYWORDS = {"return", "go", "defer", "case", "range", "package", "import", "type", "func", "else", "chan", "map",
+                "struct", "interface", "break", "continue", "var", "const"}
+
+
+def _typed(tk: str, text: str) -> list[tuple[str, str]]:
     """(name, type) declarations in a stretch of blanked code."""
-    if fam == "kotlin":
+    if tk == "kotlin":
         return [(m.group(1), m.group(2)) for pat in (_KT_TYPED, _KT_NEW) for m in pat.finditer(text)]
-    if fam == "js":
+    if tk == "js":
         return [(m.group(1), m.group(2)) for pat in (_TS_TYPED, _TS_NEW) for m in pat.finditer(text)]
-    if cpp:
-        return [(m.group(2), m.group(1)) for pat in (_CPP_TYPED, _CPP_VALUE) for m in pat.finditer(text)
-                if not _ALLCAPS.match(m.group(1))]
+    if tk in ("cpp", "jvm"):
+        out = [(m.group(2), m.group(1)) for pat in ((_CPP_TYPED, _CPP_VALUE) if tk == "cpp" else (_CPP_VALUE,))
+               for m in pat.finditer(text) if not _ALLCAPS.match(m.group(1))]
+        if tk == "jvm":
+            out += [(m.group(1), m.group(2)) for m in _JV_NEW.finditer(text)]
+        return out
+    if tk == "go":
+        return [(m.group(1), m.group(2)) for pat in (_GO_TYPED, _GO_NEW) for m in pat.finditer(text)
+                if m.group(1) not in _GO_KEYWORDS and m.group(2) not in _GO_KEYWORDS]
     return []
 
 
+_TEST_ATTR = re.compile(r"@Test\b|\[(?:Fact|Theory|Test|TestMethod|TestCase|DataTestMethod)\b|#\[(?:[\w:]+::)?test\b")
 _JS_TEST = re.compile(r"^[ \t]*(?:it|test)(?:\.(?:only|skip|todo|concurrent|each\([^)]*\)))?[ \t]*\(", re.M)
 # Imports, read from the raw text (the blanked code has lost the paths). JS/TS
 # specifiers are kept as "js:<file dir>\0<spec>" for core to resolve against
@@ -94,45 +123,198 @@ _CALL = re.compile(rf"(?:({_ID})\s*(?:\.|::|\?\.|->)\s*)?\b({_ID})\s*(?:::<[^()]
 _CALL_SKIP = _NOT_FUNC | {"catch", "require", "import", "print", "println", "Some", "Ok", "Err", "Box", "Vec",
                           "String", "assert", "setOf", "listOf", "mapOf"}
 
-_PY_DEF = re.compile(r"^(\s*)(?:async\s+)?def\s+([A-Za-z_]\w*)")
+_PY_BLOCK = re.compile(r"^(\s*)(?:async\s+)?(def|class)\s+([A-Za-z_]\w*)")
 _PY_CALL = re.compile(r"(?:\b([A-Za-z_]\w*)\s*\.\s*)?\b([A-Za-z_]\w*)\s*\(")
 _PY_SKIP = {"if", "elif", "while", "for", "return", "and", "or", "not", "in", "is", "print", "len", "range",
             "str", "int", "float", "bool", "list", "dict", "set", "tuple", "isinstance", "super", "lambda",
             "min", "max", "abs", "sorted", "enumerate", "zip", "open", "any", "all", "sum", "map", "filter",
-            "getattr", "setattr", "hasattr", "type", "repr", "round", "with", "assert", "yield", "await", "except"}
+            "getattr", "setattr", "hasattr", "type", "repr", "round", "with", "assert", "yield", "await", "except",
+            "def", "class", "del", "raise", "import", "from", "as", "async", "else", "try", "finally", "global",
+            "nonlocal", "pass", "case", "match", "issubclass", "iter", "next", "id", "hash", "vars", "dir",
+            "callable", "format", "frozenset", "bytes", "bytearray", "object", "reversed", "divmod", "pow", "chr",
+            "ord", "hex", "oct", "bin", "input", "exec", "eval", "compile", "globals", "locals", "memoryview",
+            "property", "staticmethod", "classmethod", "slice", "complex", "breakpoint", "aiter", "anext"}
+_PY_IMPORT = re.compile(r"^[ \t]*import[ \t]+([\w. \t,]+)$", re.M)
+_PY_FROM = re.compile(r"^[ \t]*from[ \t]+(\.*[\w.]*)[ \t]+import[ \t]+(\([^)]*\)|[^\n]+)", re.M)
+# `x = Foo(`, `x: Foo` (a parameter or a local); `self.x = Foo(` / `self.x: Foo` for the class
+_PY_NEW = re.compile(r"(?:^|[;(,]|\bself\.)[ \t]*([A-Za-z_]\w*)[ \t]*(?::[^=\n]*)?=[ \t]*((?:[a-z_]\w*\.)*[A-Z]\w*)[ \t]*\(", re.M)
+_PY_ANN = re.compile(r"(?:^|[(,]|\bself\.)[ \t]*([A-Za-z_]\w*)[ \t]*:[ \t]*([A-Z]\w*)(?![\w.\[])", re.M)
+_PY_SELF_ATTR = re.compile(r"\bself\.([A-Za-z_]\w*)[ \t]*(?::[ \t]*([A-Z]\w*)(?![\w.\[])[^=\n]*)?(?:=[ \t]*((?:[a-z_]\w*\.)*[A-Z]\w*)[ \t]*\()?")
+# a function used as a value: `key=fn`, `(fn,`, `[fn]`, `return fn`, `callback=self.on_x`
+_PY_VALUE = re.compile(r"(?:[=(,\[:]|\breturn)\s*(?:self\.|cls\.)?([A-Za-z_]\w*)\s*(?=[,)\]}]|$)", re.M)
 
 
 def _modname(rel: str) -> str:
     return rel.rsplit(".", 1)[0]
 
 
+def _py_test_file(rel: str) -> bool:
+    base = rel.rsplit("/", 1)[-1]
+    return (base.startswith("test_") or base.endswith("_test.py") or base in ("tests.py", "conftest.py")
+            or "/tests/" in "/" + rel or "/test/" in "/" + rel)
+
+
+def _py_imports(mod: Module, rel: str, code: str) -> None:
+    """`import a.b as c`, `from .x import y as z`, `from x import *`, kept as
+    "py:<dir>\0<spec>" for core to resolve against the project's files."""
+    d = rel.rsplit("/", 1)[0] if "/" in rel else ""
+    where = lambda spec: f"py:{d}\0{spec}"  # noqa: E731
+    for m in _PY_IMPORT.finditer(code):
+        for part in m.group(1).split(","):
+            bits = part.split()
+            if not bits:
+                continue
+            path = bits[0]
+            if len(bits) == 3 and bits[1] == "as":
+                mod.aliases[bits[2]] = where(path)
+                continue
+            # `import a.b.c` binds `a`; `a.b.c.f()` reads as a call on `c`
+            mod.aliases.setdefault(path.split(".")[0], where(path.split(".")[0]))
+            if "." in path:
+                mod.aliases.setdefault(path.rsplit(".", 1)[1], where(path))
+    for m in _PY_FROM.finditer(code):
+        spec, names = m.group(1), m.group(2).strip().strip("()")
+        for part in names.split(","):
+            bits = part.split()
+            if not bits:
+                continue
+            if bits[0] == "*":
+                mod.uses.append(where(spec))
+                mod.reexports.append(where(spec))
+                continue
+            local = bits[2] if len(bits) == 3 and bits[1] == "as" else bits[0]
+            mod.imported[local] = (where(spec), bits[0])
+
+
 def parse_python(path: str, rel: str, text: str, res_of=None) -> list[Module]:
+    """One Module for the file, and one per class (`<file>.<Class>`, its
+    parent the first base): a method is `self.x()`'s target, and two classes'
+    `get` are two functions (they used to overwrite each other: 15-20% of a
+    Python project's functions were lost)."""
     code, strings = blank(text, "python")
     raw, lines = text.split("\n"), code.split("\n")
-    mod = Module(_modname(rel), rel, len(raw), raw, lines)
-    starts = [(i, len(m.group(1).expandtabs(4)), m.group(2)) for i, ln in enumerate(lines) if (m := _PY_DEF.match(ln))]
-    for idx, indent, name in starts:
+    fm = Module(_modname(rel), rel, len(raw), raw, lines)
+    _py_imports(fm, rel, code)
+    blocks = []  # (start, end, indent, kind, name)
+    for i, ln in enumerate(lines):
+        m = _PY_BLOCK.match(ln)
+        if not m:
+            continue
+        indent = len(m.group(1).expandtabs(4))
         end = len(lines) - 1
-        for j in range(idx + 1, len(lines)):
+        for j in range(i + 1, len(lines)):
             t = lines[j]
             if t.strip() == "":
                 continue
-            if len(t[:len(t) - len(t.lstrip())].expandtabs(4)) <= indent and not t.lstrip().startswith(")"):
+            if len(t[:len(t) - len(t.lstrip())].expandtabs(4)) <= indent and not t.lstrip().startswith((")", "]")):
                 end = j - 1
                 break
-        while end > idx and lines[end].strip() == "":
+        while end > i and lines[end].strip() == "":
             end -= 1
-        f = Func(mod.name, name, rel, idx + 1, end + 1, "\n".join(lines[idx:end + 1]),
-                 kind="private" if name.startswith("_") and not name.startswith("__") else "func")
-        for i in range(idx, end + 1):
-            t = lines[i] if i != idx else (lines[i].split("(", 1)[1] if "(" in lines[i] else "")
-            for m in _PY_CALL.finditer(t):
-                if not m.group(1) and m.group(2) in _PY_SKIP:
+        blocks.append((i, end, indent, m.group(2), m.group(3)))
+
+    def enclosing(k: int) -> int:
+        """Index of the innermost block holding block k (-1: the file)."""
+        a, _, ind, _, _ = blocks[k]
+        for j in range(k - 1, -1, -1):
+            b0, b1, bi, _, _ = blocks[j]
+            if b0 < a <= b1 and bi < ind:
+                return j
+        return -1
+
+    outer = [enclosing(k) for k in range(len(blocks))]
+    test_file = _py_test_file(rel)
+    mods = {"": fm}
+    owner_of: dict[int, str] = {}  # block -> module name its defs belong to
+    for k, (a, b, ind, kind, name) in enumerate(blocks):
+        if kind != "class":
+            continue
+        chain, j = [name], outer[k]
+        while j >= 0:
+            if blocks[j][3] == "class":
+                chain.append(blocks[j][4])
+            j = outer[j]
+        mname = fm.name + "." + ".".join(reversed(chain))
+        owner_of[k] = mname
+        if mname in mods:
+            continue
+        cm = Module(mname, rel, len(raw), raw, lines, owner=fm.name, decls=[name])
+        head = " ".join(x.strip() for x in lines[a:min(b, a + 5) + 1])
+        bm = re.match(r"\s*class\s+\w+\s*\(([^)]*)\)", head)
+        if bm:
+            bases = [x.strip() for x in bm.group(1).split(",") if x.strip() and "=" not in x]
+            bases = [x for x in bases if x not in ("object", "ABC", "Protocol", "Generic") and not x.startswith("Generic[")]
+            if bases:
+                cm.parent = "py:" + bases[0].split("[")[0]
+        mods[mname] = cm
+    inside = [False] * len(lines)
+    funcs: dict[tuple[str, str], Func] = {}
+    for k, (a, b, ind, kind, name) in enumerate(blocks):
+        if kind != "def":
+            continue
+        for i in range(a, b + 1):
+            inside[i] = True
+        o = outer[k]
+        mname = owner_of[o] if o >= 0 and blocks[o][3] == "class" else fm.name
+        is_test = test_file and name.startswith("test") and (o < 0 or blocks[o][3] == "class")
+        kind_ = "test" if is_test else "private" if name.startswith("_") and not name.startswith("__") else "func"
+        f = funcs.get((mname, name))
+        if f is None:
+            f = Func(mname, name, rel, a + 1, b + 1, "\n".join(lines[a:b + 1]), kind=kind_)
+            funcs[(mname, name)] = f
+            (mods.get(mname) or fm).funcs.append(f)
+        elif b - a > f.end - f.start:  # `@property x` and its `@x.setter`: one function, the longest span
+            f.start, f.end, f.code = a + 1, b + 1, "\n".join(lines[a:b + 1])
+        _py_collect(f, lines, a, b, first=True)
+    top = Func(fm.name, "<top>", rel, 1, len(lines), "", kind="top")
+    for i, ln in enumerate(lines):
+        if not inside[i] and ln.strip() and not ln.lstrip().startswith(("class ", "import ", "from ")):
+            _py_collect(top, lines, i, i, first=False)
+    fm.funcs.append(top)
+    # declared types: the class's `self.x = Foo()` / `self.x: Foo` for its methods
+    for k, (a, b, ind, kind, name) in enumerate(blocks):
+        if kind != "class":
+            continue
+        cm = mods[owner_of[k]]
+        seen: dict[str, set[str]] = {}
+        for i in range(a, b + 1):
+            for m in _PY_SELF_ATTR.finditer(lines[i]):
+                ty = m.group(2) or m.group(3)
+                if ty:
+                    seen.setdefault(m.group(1), set()).add(ty)
+        for nm, tys in seen.items():
+            if len(tys) == 1:
+                cm.bound.setdefault(nm, "type:" + next(iter(tys)))
+    for cm in mods.values():
+        if cm is not fm:
+            # bare names in a class resolve through its file: share its imports
+            cm.aliases, cm.imported, cm.uses = fm.aliases, fm.imported, fm.uses
+    return [fm] + [m for m in mods.values() if m is not fm]
+
+
+def _py_collect(f: Func, lines: list[str], a: int, b: int, first: bool) -> None:
+    for i in range(a, b + 1):
+        t = lines[i]
+        if first and i == a:
+            t = t.split("(", 1)[1] if "(" in t else ""
+        for m in _PY_CALL.finditer(t):
+            name, q = m.group(2), m.group(1) or ""
+            if not q:
+                before = t[:m.start()].rstrip()
+                if re.search(r"\bsuper\(\s*\)\s*\.$", before):
+                    q = "super"
+                elif before.endswith("."):
+                    q = "."  # `x().name(` / `a[0].name(`: a method on something we can't name
+                elif name in _PY_SKIP:
                     continue
-                f.calls.append(Call(m.group(2), m.group(1) or "", i + 1))
-        mod.funcs.append(f)
-    mod.funcs.append(Func(mod.name, "<top>", rel, 1, len(lines), "", kind="top"))
-    return [mod]
+            f.calls.append(Call(name, q, i + 1))
+        if f.kind != "top":
+            for m in _PY_NEW.finditer(t):
+                f.bound[m.group(1)] = "type:" + m.group(2)
+            for m in _PY_ANN.finditer(t):
+                f.bound.setdefault(m.group(1), "type:" + m.group(2))
+        for m in _PY_VALUE.finditer(t):
+            f.refs.add(m.group(1))
 
 
 _KT_CONT_END = ("=", "+", "-", "*", "/", "%", "&&", "||", "?:", "(", "[", ",", "->", ".", "?.", "!", "<", ">", "..")
@@ -249,6 +431,20 @@ def _kt_imports(mod: Module, text: str, lines: list[str]) -> None:
             mod.uses.append(f"type:{last}")
 
 
+_CS_NAMESPACE = re.compile(r"^[ \t]*namespace[ \t]+([\w.]+)", re.M)
+_CS_USING = re.compile(r"^[ \t]*(?:global[ \t]+)?using[ \t]+(?:static[ \t]+)?([\w.]+)[ \t]*;", re.M)
+
+
+def _cs_imports(mod: Module, code: str) -> None:
+    """C#: a file's namespace is its package (its types see each other), and
+    each `using A.B;` brings that namespace's files into scope."""
+    nm = _CS_NAMESPACE.search(code)
+    if nm:
+        mod.package = nm.group(1)
+    for m in _CS_USING.finditer(code):
+        mod.uses.append(f"pkg:{m.group(1)}")
+
+
 def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     ext = "." + rel.rsplit(".", 1)[-1]
     fam, pats = LANGS[ext]
@@ -274,6 +470,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         _js_imports(mod, rel, text, lines)
     elif fam == "kotlin" or ext == ".java":
         _kt_imports(mod, text, lines)
+    elif ext == ".cs":
+        _cs_imports(mod, code)
     seen: set[tuple[int, str]] = set()
     found = []
     kotlin = fam == "kotlin"
@@ -293,6 +491,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             # (a match ending at `name(` is inside the parameters: a destructured
             # `({ a, b }: {...}) {` must not read as the body)
             k, n = m.end(), len(code)
+            if code[m.end() - 1] == "{":
+                k -= 1  # the declaration matched the body's `{`: the scan must see it (it took the next `;` as the end)
             depth = 1 if code[m.end() - 1] == "(" else 0
             body_start, body_end = None, None
             if qml and name.startswith("on"):
@@ -383,10 +583,11 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     # file-level ones from the lines outside every function (+ TS constructor
     # parameter properties)
     typed_by_line: dict[int, list[tuple[str, str]]] = {}
-    if fam in ("kotlin", "js") or cpp:
+    tk = "cpp" if cpp else "jvm" if ext in (".java", ".cs") else "go" if ext == ".go" else fam
+    if tk in ("kotlin", "js", "cpp", "jvm", "go"):
         for i, ln in enumerate(lines):
-            if ":" in ln or cpp or "=" in ln:  # `x: T`, or `val x = T(...)` / `new T(...)`
-                got = _typed(fam, cpp, ln)
+            if ":" in ln or tk != fam or "=" in ln:  # `x: T`, or `val x = T(...)` / `new T(...)`
+                got = _typed(tk, ln)
                 if got:
                     typed_by_line[i] = got
         inside = [False] * len(lines)
@@ -400,6 +601,13 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 pats_ = [] if inside[i] else [_KT_FIELD, _KT_NEW]
             elif fam == "js":
                 pats_ = [_TS_PARAM_FIELD] + ([] if inside[i] else [_TS_FIELD, _TS_NEW])
+            elif tk == "jvm" and not inside[i]:
+                for m in _JV_FIELD.finditer(ln):
+                    fields.setdefault(m.group(2), set()).add(m.group(1))
+            elif tk == "go" and not inside[i]:
+                for m in _GO_FIELD.finditer(ln):
+                    if m.group(1) not in _GO_KEYWORDS and m.group(2) not in _GO_KEYWORDS:
+                        fields.setdefault(m.group(1), set()).add(m.group(2))
             elif cpp and not inside[i]:
                 for m in _CPP_FIELD.finditer(ln):
                     if not _ALLCAPS.match(m.group(1)) and m.group(1) not in ("Q_OBJECT", "Q_PROPERTY"):
@@ -411,7 +619,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     for name, ss in sorted(spans.items(), key=lambda kv: kv[1][0]):
         a, b = max(ss, key=lambda s: s[1] - s[0])
         # JUnit / kotlin.test: @Test on the declaration or the lines just above it
-        annotated = fam in ("kotlin", "c") and any("@Test" in raw[j] for j in range(max(0, a - 3), a + 1))
+        # JUnit / kotlin.test `@Test`, xUnit / NUnit / MSTest `[Fact]`, Rust `#[test]`
+        annotated = fam in ("kotlin", "c", "rust") and any(_TEST_ATTR.search(raw[j]) for j in range(max(0, a - 3), a + 1))
         f = Func(mod.name, name, rel, a + 1, b + 1, "\n".join(lines[a:b + 1]),
                  kind="test" if (a, name) in tests or annotated else "func")
         if kotlin:
@@ -420,6 +629,7 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 f.recv = rm.group(1)
         seen_lines: set[int] = set()
         for sa, sb in ss:
+            name_col = max(0, lines[sa].find(name))  # the return type before it is no call (`Task<int> Run(`)
             for i in range(sa, sb + 1):
                 if i in seen_lines:
                     continue
@@ -428,7 +638,7 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     f.bound[nm_] = "type:" + ty
                 for m in _CALL.finditer(lines[i]):
                     nm = m.group(2)
-                    if nm in _CALL_SKIP or (i == sa and nm == name):
+                    if nm in _CALL_SKIP or (i == sa and (nm == name or m.start(2) < name_col)):
                         continue
                     # `x().name(` / `a?.b.name(`: a method on something we can't
                     # name, qualified "." (not unqualified: that means in scope)

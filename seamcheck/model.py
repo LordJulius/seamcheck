@@ -66,6 +66,15 @@ class Module:
     bound: dict[str, str] = field(default_factory=dict)
     # Elixir `use X` / `use X, :name` (core reads the imports X's __using__ injects)
     using: list[str] = field(default_factory=list)
+    # A class that is its own module inside a file (Python): the file's module.
+    # Bare names inside it resolve through the file, not the class.
+    owner: str = ""
+    # Modules whose names this one re-exports whole (JS `export * from`,
+    # Python `from x import *`): a lookup that misses here follows them.
+    reexports: list[str] = field(default_factory=list)
+    # Local names bound to imports from outside the project (core fills it):
+    # `json.dumps()`, `fmt.Println()`, `_.map()` reach nothing, not a guess.
+    external: set[str] = field(default_factory=set)
 
     def func_at(self, line: int) -> Func | None:
         best = None

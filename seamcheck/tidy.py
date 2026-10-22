@@ -512,18 +512,18 @@ def split(project, rel: str) -> dict:
 def hotspots(project, limit: int = 15) -> list[dict]:
     """The biggest files (lines in functions), with function count and how
     many other files call into them: where splits pay off most."""
-    per = collections.defaultdict(lambda: {"lines": 0, "functions": 0, "callers": set()})
+    per = collections.defaultdict(lambda: {"lines": set(), "functions": 0, "callers": set()})
     for f in project.funcs.values():
         if f.kind == "top" or is_test(project, f.file):
             continue
         p = per[f.file]
-        p["lines"] += f.end - f.start + 1
+        p["lines"].update(range(f.start, f.end + 1))  # (a nested function's lines count once)
         p["functions"] += 1
         for c, _, ex in project.redges.get(f.id, []):
             cf = project.funcs.get(c)
             if cf and ex and cf.file != f.file:
                 p["callers"].add(cf.file)
-    rows = [{"file": k, "lines": v["lines"], "functions": v["functions"], "caller_files": len(v["callers"])}
+    rows = [{"file": k, "lines": len(v["lines"]), "functions": v["functions"], "caller_files": len(v["callers"])}
             for k, v in per.items()]
     return sorted(rows, key=lambda r: -r["lines"])[:limit]
 

@@ -26,7 +26,7 @@ from . import lang_elixir, lang_gdscript, lang_other
 from .model import Func, Module
 from .scan import blank
 
-CACHE_VERSION = 33
+CACHE_VERSION = 34
 DEFAULT_EXCLUDE = ["**/.git/**", "**/node_modules/**", "**/deps/**", "**/_build/**", "**/target/**",
                    "**/.godot/**", "**/.claude/**", "**/dist/**", "**/build/**", "**/.venv/**", "**/__pycache__/**"]
 
@@ -379,27 +379,61 @@ def _lookup(project: Project, mod_name: str, name: str) -> Func | None:
 _JS_EXT = ("", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".mts", ".cjs")
 
 
-def _tsconfig_paths(project: Project, d: str, cache: dict) -> list[tuple[str, str]]:
-    """(prefix, target dir) pairs from the nearest tsconfig.json's `paths`."""
+def _read_tsconfig(path: str, depth: int = 0) -> dict:
+    """compilerOptions of a tsconfig, its `extends` chain merged in (the
+    base's `paths` count unless this file sets its own)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            txt = fh.read()
+        try:
+            cfg = json.loads(txt)
+        except ValueError:  # tsconfig allows comments and trailing commas
+            txt = re.sub(r"(?m)^\s*//.*$", "", txt)
+            cfg = json.loads(re.sub(r",(\s*[}\]])", r"\1", txt))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(cfg, dict):
+        return {}
+    opts = dict(cfg.get("compilerOptions") or {})
+    here = os.path.dirname(path)
+    if "baseUrl" in opts:
+        opts["baseUrl"] = os.path.normpath(os.path.join(here, opts["baseUrl"]))
+    ext = cfg.get("extends")
+    if isinstance(ext, str) and ext.startswith(".") and depth < 4:
+        base_path = os.path.normpath(os.path.join(here, ext))
+        if not base_path.endswith(".json"):
+            base_path += ".json"
+        base = _read_tsconfig(base_path, depth + 1)
+        for k, v in base.items():
+            opts.setdefault(k, v)
+        opts.setdefault("\0paths_dir", base.get("\0paths_dir", os.path.dirname(base_path)))
+    if "paths" in (cfg.get("compilerOptions") or {}):
+        opts["\0paths_dir"] = here
+    return opts
+
+
+def _tsconfig_paths(project: Project, d: str, cache: dict) -> list[tuple[str, str, bool]]:
+    """(key, target, wildcard) from the nearest tsconfig.json's `paths`:
+    `"@/*": ["src/*"]` is a prefix, `"@app/common": ["packages/common/src/index.ts"]`
+    one exact name."""
     if d in cache:
         return cache[d]
-    found: list[tuple[str, str]] = []
+    found: list[tuple[str, str, bool]] = []
     p = os.path.join(project.root, d, "tsconfig.json")
     if os.path.isfile(p):
         try:
-            with open(p, encoding="utf-8") as fh:
-                txt = fh.read()
-            try:
-                cfg = json.loads(txt)
-            except ValueError:  # tsconfig allows comments and trailing commas
-                txt = re.sub(r"(?m)^\s*//.*$", "", txt)
-                cfg = json.loads(re.sub(r",(\s*[}\]])", r"\1", txt))
-            opts = cfg.get("compilerOptions", {})
-            base = os.path.normpath(os.path.join(d, opts.get("baseUrl", ".")))
+            opts = _read_tsconfig(p)
+            root = os.path.abspath(project.root)
+            base = opts.get("baseUrl") or opts.get("\0paths_dir") or os.path.dirname(p)
             for k, vs in (opts.get("paths") or {}).items():
-                if vs and k.endswith("*") and vs[0].endswith("*"):
-                    found.append((k[:-1], os.path.normpath(os.path.join(base, vs[0][:-1])) + "/"))
-        except (OSError, ValueError, AttributeError):
+                if not vs or not isinstance(vs, list):
+                    continue
+                target = os.path.relpath(os.path.normpath(os.path.join(base, vs[0].rstrip("*"))), root)
+                if k.endswith("*") and vs[0].endswith("*"):
+                    found.append((k[:-1], target.rstrip("/") + "/" if vs[0][:-1].endswith("/") else target, True))
+                elif "*" not in k:
+                    found.append((k, target, False))
+        except (OSError, ValueError, AttributeError, TypeError):
             pass
     elif d:
         found = _tsconfig_paths(project, d.rsplit("/", 1)[0] if "/" in d else "", cache)
@@ -407,22 +441,119 @@ def _tsconfig_paths(project: Project, d: str, cache: dict) -> list[tuple[str, st
     return found
 
 
+EXTERNAL = "ext:"  # _resolve_where: an import from outside the project
+
+
 def _resolve_where(project: Project, where: str, cache: dict) -> str:
-    """A module name for an adapter's "js:<dir>\\0<spec>" (or anything else, unchanged)."""
+    """A module name for an adapter's "js:<dir>\\0<spec>" / "py:<dir>\\0<spec>"
+    (anything else unchanged). "" when it can't be found, EXTERNAL when it
+    names a package from outside the project (node_modules, the stdlib)."""
+    if where.startswith("py:"):
+        return _resolve_py(project, where, cache)
     if not where.startswith("js:"):
         return where
     d, _, spec = where[3:].partition("\0")
     if spec.startswith("."):
         base = os.path.normpath(os.path.join(d, spec))
     else:
-        base = next((t + spec[len(pre):] for pre, t in _tsconfig_paths(project, d, cache) if spec.startswith(pre)), "")
+        base = next((t + spec[len(pre):] if wild else t for pre, t, wild in _tsconfig_paths(project, d, cache)
+                     if (spec.startswith(pre) if wild else spec == pre)), "")
         if not base:
-            return ""  # a package from node_modules
-    base = re.sub(r"\.(?:[mc]?[jt]sx?)$", "", base)
-    for cand in (base, base + "/index"):
+            base = _workspace_entry(project, spec, cache)
+        if not base:
+            return EXTERNAL  # a package from node_modules
+    base = re.sub(r"\.(?:[mc]?[jt]sx?)$", "", base.rstrip("/"))
+    for cand in (base, base + "/index", base + "/src/index"):
         if cand in project.modules:
             return cand
     return ""
+
+
+def _workspace_entry(project: Project, spec: str, cache: dict) -> str:
+    """`@scope/pkg` or `@scope/pkg/sub` -> a path in the project, for monorepo
+    packages named in their package.json (npm / yarn / pnpm workspaces)."""
+    ws = cache.get("\0workspaces")
+    if ws is None:
+        ws = {}
+        for rel in project.files:
+            if rel.endswith("package.json") and rel.rsplit("/", 1)[-1] == "package.json" and "/node_modules/" not in "/" + rel:
+                try:
+                    with open(os.path.join(project.root, rel), encoding="utf-8") as fh:
+                        pkg = json.load(fh)
+                except (OSError, ValueError):
+                    continue
+                if isinstance(pkg, dict) and isinstance(pkg.get("name"), str):
+                    d = rel.rsplit("/", 1)[0] if "/" in rel else ""
+                    main = pkg.get("source") or pkg.get("main") or pkg.get("module") or ""
+                    ws[pkg["name"]] = (d, main if isinstance(main, str) else "")
+        cache["\0workspaces"] = ws
+    for name, (d, main) in ws.items():
+        if spec == name:
+            entry = os.path.normpath(os.path.join(d, main)) if main and not main.startswith(("dist", "./dist", "build", "./build", "lib/", "./lib/")) else ""
+            for cand in ([entry] if entry else []) + [os.path.join(d, "src/index"), os.path.join(d, "index")]:
+                if re.sub(r"\.(?:[mc]?[jt]sx?)$", "", cand) in project.modules:
+                    return cand
+            return os.path.join(d, "src/index")
+        if spec.startswith(name + "/"):
+            rest = spec[len(name) + 1:]
+            for cand in (os.path.join(d, "src", rest), os.path.join(d, rest)):
+                c2 = re.sub(r"\.(?:[mc]?[jt]sx?)$", "", cand)
+                if c2 in project.modules or c2 + "/index" in project.modules:
+                    return cand
+            return os.path.join(d, rest)
+    return ""
+
+
+def _py_index(project: Project, cache: dict) -> dict[str, list[str]]:
+    """Dotted-path suffix -> Python file modules: `flask.helpers` is any
+    module named `.../flask/helpers` (or a package `.../flask/helpers/__init__`)."""
+    idx = cache.get("\0py")
+    if idx is None:
+        idx = defaultdict(list)
+        for m in project.modules.values():
+            if m.owner or not m.file.endswith(".py"):
+                continue
+            path = m.name[:-len("/__init__")] if m.name.endswith("/__init__") else m.name
+            parts = path.split("/")
+            for k in range(len(parts)):
+                idx[".".join(parts[k:])].append(m.name)
+        cache["\0py"] = idx
+    return idx
+
+
+def _resolve_py(project: Project, where: str, cache: dict) -> str:
+    d, _, spec = where[3:].partition("\0")
+    if spec.startswith("."):
+        dots = len(spec) - len(spec.lstrip("."))
+        base = d
+        for _ in range(dots - 1):
+            base = base.rsplit("/", 1)[0] if "/" in base else ""
+        rest = spec[dots:].replace(".", "/")
+        path = f"{base}/{rest}" if base and rest else base or rest
+        for cand in (path, f"{path}/__init__" if path else "__init__"):
+            if cand in project.modules:
+                return cand
+        return ""
+    hits = _py_index(project, cache).get(spec)
+    if not hits:
+        return EXTERNAL  # the stdlib or an installed package
+    if len(hits) == 1:
+        return hits[0]
+    # several (`utils` in two packages, a test fixture named like the real
+    # package): what Python would do. A source root holding the importing
+    # file wins (the longest such); else the shallowest root (`src/flask`
+    # over `tests/apps/x/flask`).
+    depth = spec.count(".") + 1
+
+    def root(h):
+        parts = (h[:-len("/__init__")] if h.endswith("/__init__") else h).split("/")
+        return "/".join(parts[:len(parts) - depth])
+    mine = [h for h in hits if root(h) == "" or d == root(h) or d.startswith(root(h) + "/")]
+    pool = mine or hits
+    key = (lambda h: -len(root(h).split("/"))) if mine else (lambda h: len(root(h).split("/")) if root(h) else 0)
+    best = min(key(h) for h in pool)
+    top = [h for h in pool if key(h) == best]
+    return top[0] if len(top) == 1 else ""
 
 
 _EX_IMPORT = re.compile(r"^\s*import\s+([A-Z]\w*(?:\.[A-Z]\w*)*|__MODULE__)")
@@ -515,11 +646,33 @@ def _is_test_file(project: Project, rel: str) -> bool:
 
 def _resolve_imports(project: Project) -> None:
     cache: dict = {}
+
+    def res(v):
+        return _resolve_where(project, v, cache)
+
     for m in project.modules.values():
         if m.package:
             project.packages[m.package].append(m.name)
-        m.aliases = {k: r for k, v in m.aliases.items() if (r := _resolve_where(project, v, cache))}
-        m.imported = {k: (r, n) for k, (v, n) in m.imported.items() if (r := _resolve_where(project, v, cache))}
+    for m in project.modules.values():
+        ext: set[str] = set()
+        aliases, imported = {}, {}
+        for k, v in m.aliases.items():
+            r = res(v)
+            if r == EXTERNAL:
+                ext.add(k)
+            elif r:
+                aliases[k] = r
+        for k, (v, n) in m.imported.items():
+            r = res(v)
+            if r == EXTERNAL:
+                ext.add(k)
+            elif r:
+                imported[k] = (r, n)
+        m.aliases, m.imported = aliases, imported
+        m.uses = [r for r in (res(u) for u in m.uses) if r and r != EXTERNAL]
+        m.reexports = [r for r in (res(u) for u in m.reexports) if r and r != EXTERNAL]
+        m.external = ext - set(aliases) - set(imported)
+    _python_names(project)
     _qml_context(project)
     for m in project.modules.values():
         for u in m.using:
@@ -528,14 +681,106 @@ def _resolve_imports(project: Project) -> None:
                     m.uses.append(w)
 
 
-def _in_scope(project: Project, where: str, name: str) -> list[Func]:
-    """`name` in a module, or in any file of a "pkg:" package."""
+def _py_class(project: Project, mod: Module, name: str, depth: int = 0) -> str:
+    """The class module a Python name in `mod`'s file means (`Base`, `models.Base`, an
+    imported or re-exported class), or ""."""
+    file_mod = project.modules.get(mod.owner) if mod.owner else mod
+    if file_mod is None or depth > 4:
+        return ""
+    if "." in name:
+        q, _, rest = name.rpartition(".")
+        target = file_mod.aliases.get(q.split(".")[-1])
+        if target and target in project.modules:
+            if f"{target}.{rest}" in project.modules:
+                return f"{target}.{rest}"
+            return _py_class(project, project.modules[target], rest, depth + 1)
+        return ""
+    if f"{file_mod.name}.{name}" in project.modules:
+        return f"{file_mod.name}.{name}"
+    if name in file_mod.aliases and project.modules.get(file_mod.aliases[name], mod).owner:
+        return file_mod.aliases[name]
+    if name in file_mod.imported:
+        w, n = file_mod.imported[name]
+        if w in project.modules:
+            return _py_class(project, project.modules[w], n, depth + 1)
+    for w in file_mod.reexports:
+        if w in project.modules:
+            hit = _py_class(project, project.modules[w], name, depth + 1)
+            if hit:
+                return hit
+    return ""
+
+
+def _python_names(project: Project) -> None:
+    """Python, once every import is resolved: `from x import Foo` (a class) and
+    `from pkg import sub` (a submodule) become aliases, so `Foo.m()` and
+    `sub.f()` are exact; and each class's base names its parent class."""
+    py = [m for m in project.modules.values() if m.file.endswith(".py")]
+    for m in py:
+        if m.owner:
+            continue
+        for local, (w, n) in list(m.imported.items()):
+            sub = (w[:-len("/__init__")] if w.endswith("/__init__") else w.rsplit("/", 1)[0] if "/" in w else "") + "/" + n
+            sub = sub.lstrip("/")
+            if sub in project.modules or sub + "/__init__" in project.modules:
+                m.aliases.setdefault(local, sub if sub in project.modules else sub + "/__init__")
+                continue
+            target = project.modules.get(w)
+            cls = _py_class(project, target, n) if target else ""
+            if cls:
+                m.aliases.setdefault(local, cls)
+    for m in py:
+        if m.owner:
+            fm = project.modules.get(m.owner)
+            if fm:
+                m.aliases, m.imported, m.uses, m.reexports, m.external = fm.aliases, fm.imported, fm.uses, fm.reexports, fm.external
+        if m.parent.startswith("py:"):
+            m.parent = _py_class(project, m, m.parent[3:])
+
+
+def _in_scope(project: Project, where: str, name: str, depth: int = 0) -> list[Func]:
+    """`name` in a module, or in any file of a "pkg:" package. A module that
+    only re-exports the name (an `index.ts` barrel, a package `__init__.py`)
+    leads on to where it is defined."""
     if where.startswith("pkg:"):
         return [t for t in (_lookup(project, mn, name) for mn in project.packages.get(where[4:], [])) if t]
     if where.startswith("type:"):
         return []  # a type is only a scope for method names (see _scope)
     t = _lookup(project, where, name)
-    return [t] if t else []
+    if t:
+        return [t]
+    m = project.modules.get(where)
+    if m is None or depth >= 4:
+        return []
+    if name in m.imported:
+        w, n = m.imported[name]
+        hits = _in_scope(project, w, n, depth + 1)
+        if hits:
+            return hits
+    for w in m.reexports:
+        hits = _in_scope(project, w, name, depth + 1)
+        if hits:
+            return hits
+    return []
+
+
+def _defining_module(project: Project, where: str, name: str, depth: int = 0) -> str:
+    """The module that defines the object a named import refers to
+    (`import { API } from "./helpers"`, through re-exports): `API.create()`
+    is that module's `create`."""
+    m = project.modules.get(where)
+    if m is None or depth > 4:
+        return ""
+    if name in m.decls or f"{where}.{name}" in project.funcs:
+        return where
+    if name in m.imported:
+        w, n = m.imported[name]
+        return _defining_module(project, w, n, depth + 1)
+    for w in m.reexports:
+        hit = _defining_module(project, w, name, depth + 1)
+        if hit:
+            return hit
+    return ""
 
 
 def _scope(project: Project, mod: Module, cache: dict) -> set[str]:
@@ -585,6 +830,8 @@ def _typed_targets(project: Project, mod: Module | None, ty: str, name: str, ext
     """The functions `x.name()` reaches when x is declared `ty`, and whether ty
     is a project type at all."""
     mods = []
+    if mod and mod.file.endswith(".py") and (cls := _py_class(project, mod, ty)):
+        mods.append(cls)
     if mod and ty in mod.aliases:
         mods.append(mod.aliases[ty])
     if ty in project.modules:
@@ -632,7 +879,10 @@ def _scoped_language(rel: str) -> bool:
     """A language where a bare name resolves only through the file's own
     definitions and imports. A plain .js script (a QML library, a browser
     script) sees globals from anywhere, so it is not."""
-    return os.path.splitext(rel)[1] in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts")
+    return os.path.splitext(rel)[1] in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts", ".py")
+
+
+_SELF = {"self", "this", "Self", "cls"}
 
 
 def _build_edges(project: Project) -> None:
@@ -646,7 +896,7 @@ def _build_edges(project: Project) -> None:
     # MapPrefs.kt, or the one declaring `object MapPrefs`.
     for m in project.modules.values():
         stem = os.path.splitext(os.path.basename(m.file))[0]
-        for nm in {stem, *m.decls}:
+        for nm in ({*m.decls} if m.owner else {stem, *m.decls}):  # a Python class is named by its class, not its file
             if m.name not in project.short[nm]:
                 project.short[nm].append(m.name)
     # C++: a class's members are declared in its header; the .cpp's functions
@@ -675,6 +925,14 @@ def _build_edges(project: Project) -> None:
                 t = _lookup(project, mod.parent, c.name)
                 if t:
                     targets = [(t, True)]
+            elif q and mod and q in _SELF and (t := _lookup(project, mod.name, c.name)) and (q != "cls" or mod.owner):
+                # `self.x()` / `this.x()` / `Self::x()`: the caller's own class
+                # (a Python class is its own module; elsewhere, the file)
+                targets = [(t, True)]
+            elif q and mod and q in mod.external and q not in f.bound:
+                # `json.dumps()`, `fmt.Println()`, `path.join()`: a library the file imports
+                project.resolution[os.path.splitext(f.file)[1]][2] += 1
+                continue
             elif q:
                 # Each way to name the qualifier, most certain first; a miss falls
                 # through to the next (an elif chain sent a missed alias straight to
@@ -701,11 +959,17 @@ def _build_edges(project: Project) -> None:
                         project.resolution[os.path.splitext(f.file)[1]][2] += 1
                         continue
                 if not targets and mod and q in mod.aliases:
-                    t = _lookup(project, mod.aliases[q], c.name)
-                    if t:
-                        targets = [(t, True)]
+                    hits = _in_scope(project, mod.aliases[q], c.name)  # (through a package's re-exports)
+                    if len(hits) == 1:
+                        targets = [(hits[0], True)]
                 if not targets and q in project.modules:
                     t = _lookup(project, q, c.name)
+                    if t:
+                        targets = [(t, True)]
+                if not targets and mod and q in mod.imported:
+                    # a named import (`import { API } from "./helpers"`): its module's function
+                    dm = _defining_module(project, *mod.imported[q])
+                    t = _lookup(project, dm, c.name) if dm else None
                     if t:
                         targets = [(t, True)]
                 if not targets:
@@ -725,8 +989,10 @@ def _build_edges(project: Project) -> None:
                     targets = [(inner[0], True)]
             elif not q and mod:
                 # own module, then a name imported by itself, then modules and
-                # packages imported whole, then the rest of its own package
-                hits = _in_scope(project, mod.name, c.name)
+                # packages imported whole, then the rest of its own package.
+                # (A bare name in a Python method means the file's, not the class's.)
+                smod = project.modules.get(mod.owner, mod) if mod.owner else mod
+                hits = _in_scope(project, smod.name, c.name)
                 if not hits and c.name in mod.imported:
                     w, n = mod.imported[c.name]
                     hits = _in_scope(project, w, n)
@@ -736,7 +1002,19 @@ def _build_edges(project: Project) -> None:
                         break
                 if not hits and mod.package:
                     hits = _in_scope(project, "pkg:" + mod.package, c.name)
+                if not hits and f.file.endswith(".py"):
+                    # `Foo(...)` builds a Foo: its __init__
+                    cls = _py_class(project, mod, c.name)
+                    t = _lookup(project, cls, "__init__") if cls else None
+                    if t:
+                        hits = [t]
+                    elif cls:
+                        project.resolution[".py"][0] += 1  # a project class with no __init__ of its own
+                        continue
                 targets = [(t, len(hits) == 1) for t in hits]
+                if not targets and c.name in mod.external:
+                    project.resolution[os.path.splitext(f.file)[1]][2] += 1
+                    continue
                 if not targets and _scoped_language(f.file) and c.name not in mod.imported:
                     # Elixir, Kotlin, Java, an ES module: a bare call reaches only
                     # what is local, imported or in its package. Nothing in scope
@@ -1677,7 +1955,7 @@ def dead(project: Project) -> list[Func]:
             called.add(tgt)
     out = []
     for f in project.funcs.values():
-        if f.kind == "top" or f.id in called or f.name in refs or ENGINE_CALLBACKS.match(f.name):
+        if f.kind in ("top", "test") or f.id in called or f.name in refs or ENGINE_CALLBACKS.match(f.name):
             continue
         # anything named in any file's text as a string or @rpc etc.: be conservative
         out.append(f)
