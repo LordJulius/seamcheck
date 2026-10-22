@@ -658,6 +658,8 @@ class Types:
             if vm is not None:  # an imported module-level variable (`from flask import current_app`)
                 return self.held(vm[0], None, vm[0].bound[vm[1]], depth + 1)
             dm = _defining_module(p, w, n)
+            if dm and fm.file.endswith(".py") and (fn := p.funcs.get(f"{dm}.{n}")) is not None:
+                return self._py_function_value(fn)
             if dm:
                 inner = f"{dm}.{n}"
                 return ("static", (inner if inner in p.modules else dm,), True)
@@ -667,7 +669,7 @@ class Types:
                 return ("static", tuple(mods), exact)
         if seg in p.modules:
             return ("static", (seg,), True)
-        short = p.short.get(seg) if not (seg[:1].islower() and fm.file.endswith((".rb", ".rake", ".ru"))) else None
+        short = p.short.get(seg) if not (seg[:1].islower() and fm.file.endswith((".rb", ".rake", ".ru", ".py"))) else None
         if short:  # (a lowercase Ruby name is a value, never the file `site.rb`)
             return ("static", tuple(short), len(short) == 1)
         if seg[:1].isupper() and not fm.file.endswith((".ex", ".exs", ".gd")):
@@ -676,6 +678,8 @@ class Types:
             return EXT  # a name no project QML file declares: the window's / framework's
         if fm.file.endswith(".rs") and seg in self._rs_external():
             return EXT  # `std::...`, `serde_json::from_str`: a crate the project depends on, not one of its own
+        if fm.file.endswith(".py") and seg in _PY_BUILTIN_NAMES:
+            return EXT  # `int.__new__`, `object.__repr__`: Python's own
         if seg in _JS_GLOBALS and fm.file.endswith(_JS_EXTS):
             return EXT  # `console`, `window`, `document`: the runtime's (no project name took it)
         return self._rb_named(mod, seg)
@@ -731,6 +735,31 @@ class Types:
         if not hits and fm.package:
             hits = _in_scope(self.p, "pkg:" + fm.package, name)
         return hits[0] if len(hits) == 1 else None
+
+    def _py_function_value(self, g):
+        """A Python function used as a value (`run_command.make_context()`):
+        a library decorator made it the library's object (`@click.command`),
+        a plain function's attributes are Python's; a project decorator may
+        return anything (unknown)."""
+        m = self.p.modules.get(g.module)
+        raw = m.raw if m else []
+        decos = []
+        j = g.start - 2
+        ind = len(raw[g.start - 1]) - len(raw[g.start - 1].lstrip()) if 0 < g.start <= len(raw) else 0
+        while 0 <= j < len(raw) and raw[j].strip():
+            ln = raw[j]
+            if ln.lstrip().startswith("@"):
+                decos.append(ln.strip()[1:].split("(")[0])
+            elif not (len(ln) - len(ln.lstrip()) > ind or ln.lstrip().startswith(")")):
+                break  # (an argument line of a multi-line decorator is indented deeper, or closes it)
+            j -= 1
+        if not decos:
+            return EXT
+        fm = self._file_mod(m)
+        root = decos[-1].split(".")[0]  # the outermost decorator says what the name holds
+        if root in fm.external or root in ("functools", "staticmethod", "classmethod", "property"):
+            return EXT
+        return None  # a project decorator: what it returns, we don't know
 
     def _getter(self, mods: list[str], name: str, depth: int):
         """`c.req` read through a getter (`get req(): HonoRequest`, Python's
@@ -831,6 +860,7 @@ _JS_GLOBALS = {"console", "window", "document", "navigator", "localStorage", "se
                "vi", "jest", "expect", "cy"}  # (test runners' globals: vitest / jest `globals`, cypress)
 _DOM_PROPS = {"classList", "style", "dataset"}
 _EXPLICIT_SELF = (".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".php")
+_PY_BUILTIN_NAMES = set(dir(__import__("builtins")))
 _PY_BUILTIN_CALLS = {"vars", "dict", "list", "set", "frozenset", "tuple", "str", "bytes", "bytearray", "sorted",
                      "reversed", "enumerate", "zip", "map", "filter", "range", "iter", "repr", "format", "getattr",
                      "type", "open", "globals", "locals", "dir", "int", "float", "bool", "len", "id", "hash"}

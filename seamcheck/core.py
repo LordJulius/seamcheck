@@ -744,7 +744,14 @@ def _resolve_py(project: Project, where: str, cache: dict) -> str:
             if cand in project.modules:
                 return cand
         return ""
-    hits = _py_index(project, cache).get(spec)
+    depth = spec.count(".") + 1
+
+    def root(h):
+        parts = (h[:-len("/__init__")] if h.endswith("/__init__") else h).split("/")
+        return "/".join(parts[:len(parts) - depth])
+    # an absolute import starts at a source root, never inside a package:
+    # `import typing` in flask/ is the stdlib's, not flask/typing.py
+    hits = [h for h in _py_index(project, cache).get(spec, []) if not root(h) or root(h) + "/__init__" not in project.modules]
     if not hits:
         return EXTERNAL  # the stdlib or an installed package
     if len(hits) == 1:
@@ -753,11 +760,6 @@ def _resolve_py(project: Project, where: str, cache: dict) -> str:
     # package): what Python would do. A source root holding the importing
     # file wins (the longest such); else the shallowest root (`src/flask`
     # over `tests/apps/x/flask`).
-    depth = spec.count(".") + 1
-
-    def root(h):
-        parts = (h[:-len("/__init__")] if h.endswith("/__init__") else h).split("/")
-        return "/".join(parts[:len(parts) - depth])
     mine = [h for h in hits if root(h) == "" or d == root(h) or d.startswith(root(h) + "/")]
     pool = mine or hits
     key = (lambda h: -len(root(h).split("/"))) if mine else (lambda h: len(root(h).split("/")) if root(h) else 0)
@@ -1022,11 +1024,24 @@ def _python_names(project: Project) -> None:
             # library (`werkzeug.test.Client`) means an inherited method may be its
             fm = project.modules.get(m.owner, m)
             got = [c for b in m.bases if (c := _py_class(project, m, b[3:]))]
-            if any(not _py_class(project, m, b[3:]) and (b[3:].split(".")[0] in fm.external or b[3:] in _PY_BUILTINS)
+            if any(not _py_class(project, m, b[3:]) and (b[3:].split(".")[0] in fm.external or b[3:] in _PY_BUILTINS
+                                                          or _py_lib_reexport(project, fm, b[3:].split(".")[0]))
                    for b in m.bases):  # (`class Config(dict)`, `class MyError(ValueError)`: Python's own)
                 m.unresolved = True
             m.bases = got
             m.parent = m.parent or (got[0] if got else "")
+
+
+def _py_lib_reexport(project: Project, fm: Module, name: str, depth: int = 0) -> bool:
+    """`from .compat import MutableMapping`, where compat imports it from a
+    library: the name is the library's."""
+    if depth > 4 or name not in fm.imported:
+        return False
+    w, n = fm.imported[name]
+    src = project.modules.get(w)
+    if src is None:
+        return False
+    return n in src.external or _py_lib_reexport(project, src, n, depth + 1)
 
 
 def _in_scope(project: Project, where: str, name: str, depth: int = 0) -> list[Func]:
