@@ -1208,6 +1208,9 @@ def _assignments(tk: str, text: str) -> list[tuple[str, str]]:
         ch = expression(text, m.end())
         if ch:
             out.append((m.group(1), "expr:" + "\x1f".join(ch)))
+    if tk == "js":  # `const template = <p>Hello</p>`: an element of the JSX runtime
+        for m in re.finditer(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]+)?=\s*\(?\s*<[A-Za-z>]", text):
+            out.append((m.group(1), "jsx:"))
     if tk == "js":  # `var blog = express(), app = express()`: the names after the first
         for m in re.finditer(r"\b(?:var|let|const)\s+", text):
             k, d, n = m.end(), 0, len(text)
@@ -1796,7 +1799,13 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 for nm_, ty in _elements(tk, ln):  # `QHash<QString, Player*> m_players;`: its elements
                     got_fields.setdefault(nm_, set()).add(ty)
             if fam == "js":
-                pass
+                if not inside[i] and home is not mod and home.kind == "interface" and \
+                        re.match(r"^\s*(?:<[^()]*?>)?\s*\(", ln):  # a call signature: `<T>(data: T): Response`
+                    o_ = line_start[i] + ln.index("(")
+                    e_ = lambdas.matching(code, o_)
+                    rm_ = re.match(r"\s*:\s*([^;{}\n]+)", code[e_ + 1:e_ + 300]) if e_ > 0 else None
+                    if rm_ and (t_ := type_name(rm_.group(1))):
+                        got_fields.setdefault("()", set()).add(t_)
             elif ext == ".cs" and not inside[i]:
                 for m in _CS_MEMBER.finditer(ln):
                     got_fields.setdefault(m.group(2), set()).add(generic_name(m.group(1).rstrip("?")))
@@ -1931,6 +1940,9 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             f.returns = _returns(tk, code[line_start_pos:npos], sig, name, cls_name)
             rtext_ = _return_text(tk, code[line_start_pos:npos], sig)
             f.relem = elem_type(rtext_)
+            crm = re.match(r"^ReturnType\s*<\s*([A-Z][\w$]*)\s*>$", rtext_.strip()) if fam == "js" else None
+            if crm:  # `): ReturnType<BodyRespond> =>`: what calling a BodyRespond gives
+                f.returns = "callret:" + crm.group(1)
             if tk == "rust" and _RS_WRAPPED.match(rtext_):  # `-> Option<Foo>`: a method on it is Option's until unwrapped
                 f.returns = "opt:" + f.returns
             elif tk in ("rust", "swift") and rtext_.startswith("(") and lambdas.matching(rtext_, 0) == len(rtext_) - 1:

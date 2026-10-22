@@ -1212,6 +1212,13 @@ _FAMILIES = {
 }
 
 
+# browser globals a project augments (`declare global { interface Window { h: ... } }`): what the
+# augmentation doesn't declare is the browser's
+_DOM_GLOBALS = {"Window", "Document", "Navigator", "HTMLElement", "Element", "Node", "EventTarget", "Event",
+                "GlobalThis", "WorkerGlobalScope", "ServiceWorkerGlobalScope", "Console", "Location", "History",
+                "HTMLCanvasElement", "CanvasRenderingContext2D", "Performance", "Storage", "ImportMeta"}
+
+
 def _family(rel: str) -> set[str]:
     ext = os.path.splitext(rel)[1]
     return _FAMILIES.get(ext, {ext})
@@ -1599,9 +1606,9 @@ def _build_edges(project: Project) -> None:
                     elif kind != "pkg" and any(types.external_base(mn) for mn in mods_):
                         _nothing(project, f, c)  # inherited from a library supertype
                         continue
-                    elif kind == "inst" and mods_ and all(project.modules[mn].file.endswith(".d.ts") and
-                                                          not types._es_module(project.modules[mn].file)
-                                                          and project.modules[mn].kind == "interface" for mn in mods_):
+                    elif kind == "inst" and mods_ and all(project.modules[mn].kind == "interface" and (
+                            project.modules[mn].file.endswith(".d.ts") and not types._es_module(project.modules[mn].file)
+                            or (project.modules[mn].decls or [""])[0] in _DOM_GLOBALS) for mn in mods_):
                         _nothing(project, f, c)  # `interface CanvasRenderingContext2D {...}` in global.d.ts adds to the DOM's
                         continue
                     elif kind == "inst" and mods_ and all(project.modules[mn].kind == "ext" for mn in mods_) and \

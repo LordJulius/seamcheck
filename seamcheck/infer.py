@@ -389,6 +389,8 @@ class Types:
                 return None
             gm_, ty_ = tys.pop()
             return self.instance(self.p.modules[gm_], ty_[6:] if ty_.startswith("tuple:") else ty_) if ty_ else None
+        if held == "jsx:":
+            return self.jsx_element()
         if held.startswith("elem:"):
             return self.loop_element(mod, f, tuple(held[5:].split("\x1f")), depth)
         if held.startswith("lam:"):
@@ -397,6 +399,37 @@ class Types:
             g = self.fixture(mod, held[8:], f)
             return self.returns(g, None, depth + 1) if g is not None else None
         return None
+
+    def jsx_element(self):
+        """What a JSX literal evaluates to: the result of the project's own JSX
+        runtime (hono's `jsxDEV(): JSXNode`) when tsconfig's jsxImportSource
+        names this package; else a library's element (React's)."""
+        if "\0jsx" in self.cache:
+            return self.cache["\0jsx"]
+        got = EXT
+        source = ""
+        for rel in self.p.files:
+            if os.path.basename(rel).startswith("tsconfig") and rel.endswith(".json"):
+                try:
+                    with open(os.path.join(self.p.root, rel), encoding="utf-8") as fh:
+                        m = re.search(r'"jsxImportSource"\s*:\s*"([^"]+)"', fh.read())
+                except OSError:
+                    m = None
+                if m:
+                    source = m.group(1)
+                    break
+        pkg = self._package_name()
+        if source and pkg and (source == pkg or source.startswith(pkg + "/")):
+            runs = [g for n in ("jsxDEV", "jsx") for g in self.p.by_name.get(n, [])
+                    if os.path.basename(g.file).startswith(("jsx-runtime", "jsx-dev-runtime")) and g.returns]
+            tys = {(g.module, g.returns) for g in runs}
+            if len({t for _, t in tys}) == 1:
+                gm, ty = tys.pop()
+                got = self.instance(self.p.modules[gm], ty) or None
+            else:
+                got = None
+        self.cache["\0jsx"] = got
+        return got
 
     def variant(self, mod, spec: str, f=None):
         """What a Rust enum variant holds (`DirEntryInner::Raw(x)`: x is a
@@ -726,6 +759,10 @@ class Types:
             return None
         if g.returns.startswith("expr:"):
             return self.chain(gm, g, tuple(g.returns[5:].split("\x1f")), depth + 1, self_mods=self_mods or self.own_class(gm, g))
+        if g.returns.startswith("callret:"):  # `ReturnType<BodyRespond>`: its call signature's result
+            mods, _, declared = self.type_modules(gm, g.returns[8:])
+            got = self.field(mods, "()", depth + 1) if declared else None
+            return None if got is UNKNOWN else got
         if g.returns.startswith("tuple:"):
             return None  # a tuple: its elements are typed through `let (a, b) =`
         if g.returns.startswith("byov:"):  # C# overloads returning different types: the call's
