@@ -137,7 +137,8 @@ class Server:
         listed now (one appeared or went: a change too) and its config."""
         cfg, _ = config_mod.load(self.root, self.extra)
         pc = cfg.get("project", {})
-        rels = core.list_files(self.root, pc.get("include", ["**/*"]), core.DEFAULT_EXCLUDE + pc.get("exclude", []))
+        rels = core.list_files(self.root, pc.get("include", ["**/*"]),
+                               core.default_exclude(pc.get("include", ["**/*"])) + pc.get("exclude", []))
         out = {rel: core._stamp(self.root, rel) for rel in rels}
         for path in config_mod.files_for(self.root, self.extra):
             out[path] = core._stamp(self.root, path)

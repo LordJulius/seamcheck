@@ -79,7 +79,7 @@ def _in_graph(project, rel: str) -> bool:
     pc = project.config.get("project", {})
     return (rel in project.by_file or core.adapter_for(rel) is not None
             and core.match_any(rel, pc.get("include", ["**/*"]))
-            and not core.match_any(rel, core.DEFAULT_EXCLUDE + pc.get("exclude", [])))
+            and not core.match_any(rel, core.default_exclude(pc.get("include", ["**/*"])) + pc.get("exclude", [])))
 
 
 def record(project, changed: set[str] | None = None) -> None:

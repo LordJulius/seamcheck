@@ -47,7 +47,17 @@ def _code_version() -> str:
 
 _CODE: str | None = None
 DEFAULT_EXCLUDE = ["**/.git/**", "**/node_modules/**", "**/deps/**", "**/_build/**", "**/target/**",
-                   "**/.godot/**", "**/.claude/**", "**/dist/**", "**/build/**", "**/.venv/**", "**/__pycache__/**"]
+                   "**/.godot/**", "**/.claude/**", "**/dist/**", "**/build/**", "**/.venv/**", "**/__pycache__/**",
+                   # third-party code kept in the tree (Go / Composer / Bundler vendoring, a vendored JS bundle):
+                   # not the project's to check; `include` it explicitly to have it read
+                   "**/vendor/**", "**/third_party/**", "**/*.min.js"]
+
+
+def default_exclude(include: list[str]) -> list[str]:
+    """DEFAULT_EXCLUDE, less what the project's `include` names (`vendor/**`
+    listed in include: the vendored code is read)."""
+    named = " ".join(include)
+    return [d for d in DEFAULT_EXCLUDE if d.strip("*/").split("/")[0] not in named]
 
 
 def adapter_for(rel: str):
@@ -279,7 +289,7 @@ def load(root: str, config_path: str | list[str] | None = None, use_cache: bool 
     config, problems = config_mod.load(root, extra)
     proj_cfg = config.get("project", {})
     include = proj_cfg.get("include", ["**/*"])
-    exclude = DEFAULT_EXCLUDE + proj_cfg.get("exclude", [])
+    exclude = default_exclude(include) + proj_cfg.get("exclude", [])
     files = list_files(root, include, exclude)
     if precise is None:
         precise = bool(config.get("precise", {}).get("enabled"))
@@ -519,7 +529,8 @@ def _manifests(project: Project, name: str) -> list[str]:
     not `[project] include` takes it in: they say how imports resolve."""
     found = project.__dict__.setdefault("_manifests", {})
     if name not in found:
-        exclude = DEFAULT_EXCLUDE + project.config.get("project", {}).get("exclude", [])
+        exclude = default_exclude(project.config.get("project", {}).get("include", ["**/*"])) + \
+            project.config.get("project", {}).get("exclude", [])
         found[name] = list_files(project.root, [name, f"**/{name}"], exclude)
     return found[name]
 
