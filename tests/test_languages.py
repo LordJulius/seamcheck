@@ -617,5 +617,24 @@ class SwiftImplicitMembers(Base):
         self.assertEqual([e for e in self.p.edges["Sources/Net/Session.go"] if e[1] == 6], [])
 
 
+class RustFields(Base):
+    FILES = {
+        "Cargo.toml": '[package]\nname = "app"\n\n[dependencies]\nserde_json = "1"\n',
+        "src/style.rs": "pub struct Style;\nimpl Style {\n    pub fn grid(&self) -> bool { true }\n}\n",
+        "src/config.rs": "use crate::style::Style;\npub struct Config {\n    pub style: Style,\n}\n",
+        "src/printer.rs": "use crate::config::Config;\npub struct Printer<'a> {\n    config: &'a Config,\n}\n"
+                          "impl<'a> Printer<'a> {\n    fn header(&self) {\n        self.config.style.grid();\n"
+                          "        let v: Value = serde_json::from_str(\"1\").unwrap();\n"
+                          "        let check = |s: &str| {\n            self.config.style.grid()\n        };\n"
+                          "        check(\"x\");\n    }\n}\n",
+    }
+
+    def test_a_struct_named_like_its_file_has_fields(self):
+        self.assertIn("src/style.grid", self.exact("src/printer.header"))
+
+    def test_b_a_dependency_crate_is_the_librarys(self):
+        self.assertFalse(self.guessed("src/printer.header"))
+
+
 if __name__ == "__main__":
     unittest.main()

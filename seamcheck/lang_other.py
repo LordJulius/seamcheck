@@ -112,7 +112,9 @@ _GO_KEYWORDS = {"return", "go", "defer", "case", "range", "package", "import", "
 
 
 # Rust: `x: &mut Foo` (a parameter, a `let`), `let x = Foo::new(` / `Foo {`
-_RS_TYPED = re.compile(r"(?:\blet\s+(?:mut\s+)?|[(,]\s*(?:mut\s+)?)([a-z_]\w*)\s*:\s*&?(?:'\w+\s+)?(?:mut\s+)?([A-Z]\w*)(?![\w:])")
+_RS_PRIM = r"(?:u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32|f64|bool|char|str)"
+_RS_TYPED = re.compile(r"(?:\blet\s+(?:mut\s+)?|[(,]\s*(?:mut\s+)?)([a-z_]\w*)\s*:\s*&?(?:'\w+\s+)?(?:mut\s+)?"
+                       r"([A-Z]\w*|\[[^\]\n]*\]|" + _RS_PRIM + r")(?![\w:])")
 _RS_NEW = re.compile(r"\blet\s+(?:mut\s+)?([a-z_]\w*)\s*(?::[^=]+)?=\s*([A-Z]\w*)\s*(?:::\s*(?:new|default|with_\w+|from\w*|builder)\s*\(|\{)")
 
 
@@ -956,12 +958,18 @@ def _assignments(tk: str, text: str) -> list[tuple[str, str]]:
         rest = text[m.end():m.end() + 300].lstrip()
         cm = re.match(r"(?:move\s*)?\|[^|]*\|\s*", rest) if tk == "rust" else \
             re.match(r"\{\s*(?:[\w, ]+->)?\s*", rest) if tk == "kotlin" else None
-        if cm and not rest[cm.end():].startswith("{"):
-            ch = expression(rest, cm.end())
-            if ch:
-                out.append((m.group(1), "call:" + "\x1f".join(ch)))
+        if cm:
+            body_at = cm.end()
+            if rest[body_at:].startswith("{") and tk == "rust":  # `|p| {\n  one.expr(p)\n}`: a block of one expression
+                body_at += 1
+            if not rest[body_at:].startswith("{"):
+                ch = expression(rest, body_at)
+                if ch:
+                    out.append((m.group(1), "call:" + "\x1f".join(ch)))
             continue
         lit = _LITERAL.get(tk, {}).get(rest[:1])
+        if lit == "Vec" and not rest.startswith("vec!"):
+            lit = None  # (only `vec![...]`)
         if lit and not re.match(r"[\[{][^\n]*?[\]}]\s*(?:\.|\[|\?\.)", rest):  # (`[a, b].map(...)` is no array)
             out.append((m.group(1), "type:" + lit))  # `x = []`, `x = ""`: the language's own value
             continue
@@ -974,7 +982,8 @@ def _assignments(tk: str, text: str) -> list[tuple[str, str]]:
 # what a literal on the right of `x =` builds
 _LITERAL = {"js": {"[": "Array", '"': "String", "'": "String", "`": "String"},
             "py": {"[": "list", "{": "dict", '"': "str", "'": "str"},
-            "swift": {"[": "Array", '"': "String"}}
+            "swift": {"[": "Array", '"': "String"},
+            "rust": {"[": "Array", '"': "str", "v": "Vec"}}
 
 
 def _own_return(code: str, bpos: int) -> str:
@@ -1410,7 +1419,7 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 for m in _GO_FIELD.finditer(ln):
                     if m.group(1) not in _GO_KEYWORDS and m.group(2) not in _GO_KEYWORDS:
                         got_fields.setdefault(m.group(1), set()).add(m.group(2))
-            elif tk == "rust" and not inside[i] and home is not mod:
+            elif tk == "rust" and not inside[i] and (home is not mod or i in line_class):  # (`struct Config` in config.rs too)
                 for m in _RS_FIELD.finditer(ln):
                     t = type_name(m.group(2))
                     if t:
@@ -1504,6 +1513,10 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     continue
                 done.add(i)
                 for nm_, ty in typed_by_line.get(i, ()):
+                    held_ = f.bound.get(nm_, "")
+                    segs_ = held_[5:].split("\x1f") if held_.startswith("expr:") else []
+                    if len(segs_) > 2 and segs_[0] == ty.split(".")[-1] and segs_[1] in ("new()", "builder()", "default()"):
+                        continue  # `Foo::new()\n  .a()\n  .build()`: the chain's end, not a Foo
                     f.bound[nm_] = "type:" + ty
                 for m in _CALL.finditer(ln):
                     nm = m.group(2)
