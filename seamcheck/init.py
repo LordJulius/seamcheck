@@ -19,7 +19,7 @@ from . import core
 _LANG = {".ex": "Elixir", ".exs": "Elixir", ".kt": "Kotlin", ".kts": "Kotlin", ".java": "Java", ".ts": "TypeScript",
          ".tsx": "TypeScript", ".js": "JavaScript", ".jsx": "JavaScript", ".mjs": "JavaScript", ".py": "Python",
          ".rs": "Rust", ".go": "Go", ".cs": "C#", ".cpp": "C++", ".cc": "C++", ".h": "C++", ".hpp": "C++",
-         ".qml": "QML", ".gd": "GDScript"}
+         ".qml": "QML", ".gd": "GDScript", ".swift": "Swift", ".php": "PHP"}
 # folders that hold code no one maintains by hand
 _SKIP_TOP = {"vendor", "third_party", "thirdparty", "external", "dist", "build", "out", "bin", "obj", "node_modules",
              "deps", "_build", "target", "generated", ".github", "docs", "doc"}

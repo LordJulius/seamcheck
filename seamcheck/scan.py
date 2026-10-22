@@ -4,6 +4,8 @@ Also returns the string literals (line, text) for "method-name" references.
 """
 from __future__ import annotations
 
+import re as _re
+
 # Elixir sigil delimiters: opener -> closer
 _SIGIL = {"(": ")", "[": "]", "{": "}", "<": ">", "/": "/", "|": "|", '"': '"', "'": "'"}
 
@@ -18,7 +20,7 @@ def blank(text: str, lang: str, keep_strings: bool = False) -> tuple[str, list[t
             if out[k] != "\n":
                 out[k] = " "
 
-    cfam = lang in ("c", "rust", "kotlin", "js")
+    cfam = lang in ("c", "rust", "kotlin", "js", "swift", "php")
     while i < n:
         c = text[i]
         if c == "\n":
@@ -53,6 +55,30 @@ def blank(text: str, lang: str, keep_strings: bool = False) -> tuple[str, list[t
         if lang == "rust" and c == "'" and not (i + 2 < n and text[i + 2] == "'") and not (i + 3 < n and text[i + 1] == "\\"):
             i += 1  # a lifetime ('a), not a char literal
             continue
+        if lang == "php" and (c == "#" and text[i + 1:i + 2] != "[" or c == "?" and text[i + 1:i + 2] == ">"):
+            if c == "?":  # `?>`: HTML until the next `<?php`
+                j = text.find("<?php", i)
+                j = n if j < 0 else j + 5
+                wipe(i, j)
+                line += text.count("\n", i, j)
+                i = j
+                continue
+            j = text.find("\n", i)  # a `#` comment (`#[Attr]` is code)
+            j = n if j < 0 else j
+            wipe(i, j)
+            i = j
+            continue
+        if lang == "php" and text.startswith("<<<", i):  # heredoc / nowdoc
+            hm = _HEREDOC.match(text, i)
+            if hm:
+                end = _re.compile(r"^[ \t]*" + hm.group(1) + r"\b", _re.M).search(text, hm.end())
+                j = n if end is None else end.start()
+                strings.append((line, text[hm.end():j]))
+                if not keep_strings:
+                    wipe(hm.end(), j)
+                line += text.count("\n", i, j)
+                i = j if end is None else end.end()
+                continue
         if c == "#" and not cfam:
             j = text.find("\n", i)
             j = n if j < 0 else j
@@ -121,7 +147,7 @@ def blank(text: str, lang: str, keep_strings: bool = False) -> tuple[str, list[t
                     continue
                 if text.startswith(q, j):
                     break
-                if not triple and text[j] == "\n" and lang in ("gdscript", "python", "js", "kotlin") and c != "`":
+                if not triple and text[j] == "\n" and lang in ("gdscript", "python", "js", "kotlin", "swift") and c != "`":
                     break  # unterminated (or not a string at all): stop at end of line
                 j += 1
             end = min(n, j + len(q))
@@ -135,6 +161,7 @@ def blank(text: str, lang: str, keep_strings: bool = False) -> tuple[str, list[t
     return "".join(out), strings
 
 
+_HEREDOC = _re.compile(r"<<<[ \t]*[\"']?([A-Za-z_]\w*)[\"']?[ \t]*\n")
 _REGEX_AFTER = set("(,=:[!&|?{};+-*%<>~^")
 _REGEX_WORDS = ("return", "typeof", "case", "in", "of", "delete", "void", "throw", "new", "yield", "await", "else", "do")
 

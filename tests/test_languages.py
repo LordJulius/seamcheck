@@ -538,5 +538,49 @@ class QmlScope(Base):
         self.assertNotIn("qml/Settings.toString", self.exact("qml/Window.go") | self.guessed("qml/Window.go"))
 
 
+class Swift(Base):
+    FILES = {
+        'Sources/Net/Session.swift': 'open class Session {\n    public init(x: Int) {}\n    func request(_ u: String) -> DataRequest {\n        DataRequest()\n    }\n}\n',
+        'Sources/Net/Request.swift': 'class Request {\n    func cancel() {}\n}\nclass DataRequest: Request {\n    func validate() -> Self { self }\n}\nclass DownloadRequest: Request {\n    override func cancel() {}\n}\nprotocol Retrier {\n    func retry()\n    func other()\n}\n',
+        'Tests/NetTests/Helpers.swift': 'import Net\nextension Session {\n    func request(_ e: Endpoint) -> DataRequest { DataRequest() }\n}\n',
+        'Tests/NetTests/SessionTests.swift': 'import Net\nfinal class SessionTests {\n    let session = Session(x: 1)\n    func testRequest() {\n        session.request("u").validate().cancel()\n    }\n}\n',
+    }
+
+    def test_a_extension_in_another_target_is_the_same_type(self):
+        got = self.exact("Tests/NetTests/SessionTests.testRequest")
+        self.assertLessEqual({"Sources/Net/Session.request", "Tests/NetTests/Helpers.Session.request",
+                              "Sources/Net/Request.DataRequest.validate"}, got)
+
+    def test_b_inherited_method_does_not_fan_out_to_siblings(self):
+        got = {d for d, _, _ in self.p.edges["Tests/NetTests/SessionTests.testRequest"]}
+        self.assertIn("Sources/Net/Request.cancel", got)
+        self.assertNotIn("Sources/Net/Request.DownloadRequest.cancel", got)  # a DataRequest is no DownloadRequest
+
+    def test_c_protocol_requirements_have_no_body(self):
+        self.assertIn("Sources/Net/Request.Retrier.other", self.p.funcs)
+        self.assertEqual(self.p.funcs["Sources/Net/Request.Retrier.retry"].end, 11)
+
+    def test_d_xctest_methods_are_tests(self):
+        self.assertEqual(self.p.funcs["Tests/NetTests/SessionTests.testRequest"].kind, "test")
+
+
+class PHP(Base):
+    FILES = {
+        'src/Routing/Route.php': "<?php\nnamespace App\\Routing;\n\nuse App\\Interfaces\\ResolverInterface;\nuse App\\Dispatcher as Disp;\n\nclass Route\n{\n    private ResolverInterface $resolver;\n    protected $dispatcher;\n\n    public function __construct(ResolverInterface $resolver, Disp $d)\n    {\n        $this->resolver = $resolver;\n        $this->dispatcher = $d;\n    }\n\n    public function run(): void\n    {\n        # a comment with 'quote\n        $this->resolver->resolve('x');\n        $this->dispatcher->dispatch();\n        $r = new Route($this->resolver, new Disp());\n        $r->run();\n    }\n}\n",
+        'src/Interfaces/ResolverInterface.php': '<?php\nnamespace App\\Interfaces;\n\ninterface ResolverInterface\n{\n    public function resolve(string $x);\n}\n',
+        'src/Resolver.php': '<?php\nnamespace App;\n\nuse App\\Interfaces\\ResolverInterface;\n\nclass Resolver implements ResolverInterface\n{\n    public function resolve(string $x) { return $x; }\n}\n',
+        'src/Dispatcher.php': '<?php\nnamespace App;\n\nclass Dispatcher\n{\n    use Logs;\n    public function dispatch() { $this->log(); }\n}\n',
+        'src/Logs.php': '<?php\nnamespace App;\n\ntrait Logs\n{\n    public function log() {}\n}\n',
+    }
+
+    def test_a_typed_properties_and_constructor_assignments(self):
+        got = self.exact("src/Routing/Route.run")
+        self.assertLessEqual({"src/Resolver.resolve", "src/Dispatcher.dispatch", "src/Routing/Route.__construct",
+                              "src/Routing/Route.run"}, got)
+
+    def test_b_trait_methods_are_the_class_s(self):
+        self.assertEqual(self.exact("src/Dispatcher.dispatch"), {"src/Logs.log"})
+
+
 if __name__ == "__main__":
     unittest.main()

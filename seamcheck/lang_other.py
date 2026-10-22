@@ -53,6 +53,12 @@ _CPP = [re.compile(r"^[ \t]*(?!(?:return|else|delete|new|throw|case|co_return|co
         re.compile(r"^(?:\w+::)+(~?[A-Za-z_]\w*)[ \t]*\(", re.M)]  # out-of-line Class::Class( constructors
 # QML: JS functions, signal handlers (`onClicked: {...}` or one line), and
 # component instances (`Button {` is a call to Button.qml) handled below.
+# Swift: `func name(` / `func name<T>(`, and initializers (`Foo(...)` runs `init`)
+_SWIFT_MODS = r"(?:(?:@\w+(?:\([^)\n]*\))?|public|private|internal|fileprivate|open|static|class|final|override|convenience|required|mutating|nonmutating|nonisolated|dynamic|optional|package)\s+)*"
+_SWIFT = [re.compile(r"\bfunc\s+([A-Za-z_]\w*)\s*(?:<[^>\n]*>)?\s*\("),
+          re.compile(rf"^[ \t]*{_SWIFT_MODS}(init)\s*[?!]?\s*(?:<[^>\n]*>)?\s*\(", re.M)]
+# PHP: `function name(` (methods, functions; `__construct` is what `new Foo` runs)
+_PHP = [re.compile(r"\bfunction\s+&?\s*([A-Za-z_]\w*)\s*\(")]
 _QML = [re.compile(rf"\bfunction\s+({_ID})\s*\("),
         re.compile(r"^[ \t]*(on[A-Z]\w*)[ \t]*:", re.M)]
 LANGS = {
@@ -61,7 +67,7 @@ LANGS = {
     ".rs": ("rust", _RUST), ".kt": ("kotlin", _KOTLIN), ".kts": ("kotlin", _KOTLIN),
     ".java": ("c", _JAVA), ".cs": ("c", _CS), ".go": ("c", _GO),
     ".cpp": ("c", _CPP), ".cc": ("c", _CPP), ".cxx": ("c", _CPP), ".hpp": ("c", _CPP), ".hh": ("c", _CPP),
-    ".h": ("c", _CPP), ".qml": ("js", _QML),
+    ".h": ("c", _CPP), ".qml": ("js", _QML), ".swift": ("swift", _SWIFT), ".php": ("php", _PHP),
 }
 # type declarations (Kotlin, Java, C#, TS, Rust, Go): their names qualify calls
 _DECL = re.compile(r"\b(?:class|object|interface|enum|struct|record|trait|type)\s+([A-Z][\w]*)")
@@ -124,7 +130,21 @@ def _typed(tk: str, text: str) -> list[tuple[str, str]]:
     if tk == "go":
         return [(m.group(1), m.group(2)) for pat in (_GO_TYPED, _GO_NEW) for m in pat.finditer(text)
                 if m.group(1) not in _GO_KEYWORDS and m.group(2) not in _GO_KEYWORDS]
+    if tk == "swift":
+        return [(m.group(1), t) for pat in (_SW_TYPED, _SW_NEW) for m in pat.finditer(text) if (t := type_name(m.group(2)))]
+    if tk == "php":
+        return [(m.group(2), t) for m in _PHP_TYPED.finditer(text) if (t := type_name(m.group(1)))] + \
+            [(m.group(1), t) for m in _PHP_NEW.finditer(text) if (t := type_name(m.group(2)))]
     return []
+
+
+# Swift `let x: Foo`, `(with client: Client)`, `let x = Foo(`; PHP `(Foo $x`, `$x = new Foo(`
+_SW_TYPED = re.compile(r"(?:\b(?:let|var)\s+|[(,]\s*(?:[A-Za-z_]\w*\s+)?)([a-z_]\w*)\s*:\s*(?:inout\s+|@escaping\s+|@\w+\s+)*"
+                       r"([A-Z][\w.]*(?:<[^<>=\n]*>)?[?!]?)(?![\w.(])")
+_SW_NEW = re.compile(r"\b(?:let|var)\s+([a-z_]\w*)\s*=\s*(?:try[?!]?\s+|await\s+)*([A-Z]\w*)\s*\(")
+_PHP_TYPED = re.compile(r"(?:[(,]\s*|\b(?:public|private|protected|readonly)\s+)(?:(?:public|private|protected|readonly)\s+)*"
+                        r"\??([A-Z\\][\\\w]*)\s+&?(?:\.\.\.)?(\$\w+)")
+_PHP_NEW = re.compile(r"(\$\w+)\s*=\s*new\s+([\\\w]+)")
 
 
 _TEST_ATTR = re.compile(r"@Test\b|\[(?:Fact|Theory|Test|TestMethod|TestCase|DataTestMethod)\b|#\[(?:[\w:]+::)?test\b")
@@ -652,6 +672,54 @@ def _cs_imports(mod: Module, code: str) -> None:
         mod.bound[m.group(1)] = "type:" + m.group(2).rsplit(".", 1)[-1]
 
 
+_SW_DECL = re.compile(r"\b(?:class|struct|enum|protocol|actor|typealias)\s+([A-Z]\w*)")
+_SW_IMPORT = re.compile(r"^[ \t]*(?:@\w+(?:\([^)\n]*\))?[ \t]+)*import[ \t]+(?:(?:class|struct|enum|protocol|func|var|let|typealias)[ \t]+)?(\w+)", re.M)
+
+
+def _swift_imports(mod: Module, rel: str, code: str) -> None:
+    """Swift: a module (a SwiftPM target, `Sources/<Target>/**`) is one scope,
+    its files see each other's types and functions; `import X` brings target
+    X's in. Outside Sources/ and Tests/ a top folder stands for the target."""
+    parts = rel.split("/")
+    for i, p_ in enumerate(parts[:-1]):
+        if p_ in ("Sources", "Tests", "Source") and i + 2 < len(parts):
+            mod.package = parts[i + 1]
+            break
+    else:
+        mod.package = parts[0] if len(parts) > 1 else ""
+    for m in _SW_IMPORT.finditer(code):
+        mod.uses.append(f"pkg:{m.group(1)}")
+
+
+_PHP_NS = re.compile(r"^[ \t]*namespace[ \t]+([\w\\]+)[ \t]*[;{]", re.M)
+_PHP_USE = re.compile(r"^[ \t]*use[ \t]+(?:function[ \t]+|const[ \t]+)?([^;]+);", re.M)
+
+
+def _php_imports(mod: Module, text: str, code: str) -> None:
+    """PHP: a file's namespace is its package; `use A\\B\\C;` names type C of
+    namespace A\\B (`as D`: by another name), `use A\\{B, C}` several."""
+    nm = _PHP_NS.search(code)
+    if nm:
+        mod.package = nm.group(1).strip("\\").replace("\\", ".")
+    for m in _PHP_USE.finditer(code):
+        if "(" in m.group(1) or "$" in m.group(1):
+            continue  # a closure's `use ($x)`, a trait's `use Foo;` inside a class (the class handles that)
+        spec = re.sub(r"\s+", " ", m.group(1)).strip()
+        group = re.match(r"([\w\\]*)\\\{([^}]*)\}", spec)
+        items = [(group.group(1) + "\\" + x.strip()) for x in group.group(2).split(",") if x.strip()] if group else spec.split(",")
+        for it in items:
+            am = re.match(r"\s*\\?([\w\\]+)(?:\s+as\s+(\w+))?\s*$", it)
+            if not am:
+                continue
+            full = am.group(1).replace("\\", ".")
+            ns, _, name = full.rpartition(".")
+            local = am.group(2) or name
+            if ns:
+                mod.aliases.setdefault(local, "pkg:" + ns)
+            if am.group(2) and am.group(2) != name:
+                mod.bound[local] = "type:" + name
+
+
 # --- classes, return types, assignments (the type layer; see chains.py) ------------
 
 _CLASS = re.compile(
@@ -676,6 +744,9 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
         matches += [(m, "type") for m in re.finditer(r"(?<![\w.])(?:pub(?:\([^)]*\))?\s+)?(struct|enum|trait|union)\s+([A-Za-z_]\w*)", code)]
     else:
         matches = [(m, "type") for m in _CLASS.finditer(code)]
+        if ext in (".swift", ".php"):  # Swift / PHP enums have methods; a Swift actor is a class
+            matches += [(m, "type") for m in re.finditer(r"(?<![\w.$@])(?:(?:public|private|internal|fileprivate|indirect|final)\s+)*"
+                                                         r"(enum|actor)\s+([A-Z]\w*)", code)]
         if fam == "kotlin":
             matches += [(m, "companion") for m in _COMPANION.finditer(code)]
     for m, how in matches:
@@ -737,6 +808,9 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
                         break
                 j += 1
             span = (body, j)
+            if ext == ".php":  # `use SomeTrait;` in the body: the trait's methods are the class's
+                for tm in re.finditer(r"^[ \t]*use[ \t]+([\w\\, \t]+)[ \t]*[;{]", code[body:j], re.M):
+                    bases += [t.strip().split("\\")[-1] for t in tm.group(1).split(",") if t.strip()]
         elif ext in _CPP_EXTS:
             continue  # `class QMouseEvent;`: a forward declaration names a type defined elsewhere
         kind = "ext" if kw in ("extension", "impl") or re.search(r"\bpartial\b", code[max(0, m.start() - 40):m.end()]) else "class"
@@ -978,7 +1052,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         return lo
 
     # (C++: only definitions declare a type; `class QMouseEvent;` names one defined elsewhere)
-    mod.decls = [] if ext in _CPP_EXTS else sorted({d.group(1) for d in (_GO_DECL if ext == ".go" else _DECL).finditer(code)})
+    mod.decls = [] if ext in _CPP_EXTS else sorted({d.group(1) for d in (_GO_DECL if ext == ".go" else _SW_DECL if ext == ".swift" else
+                                                                         _DECL).finditer(code)})
     if fam == "js":
         _js_imports(mod, rel, text, lines)
         _js_reexports(mod, rel, text, lines)
@@ -992,6 +1067,10 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         _go_imports(mod, rel, text, code)
     elif ext == ".rs":
         _rs_imports(mod, rel, code)
+    elif ext == ".swift":
+        _swift_imports(mod, rel, code)
+    elif ext == ".php":
+        _php_imports(mod, text, code)
     elif ext in _CPP_EXTS:
         # `#include "x.h"` (core resolves it): its free functions are in scope
         d = rel.rsplit("/", 1)[0] if "/" in rel else ""
@@ -1052,6 +1131,11 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     break
                 elif depth <= 0 and ch == "\n" and "=>" in code[m.start():k] and not code[max(m.start(), k - 8):k].rstrip().endswith("=>"):
                     body_end = k
+                    break
+                elif depth <= 0 and ch == "\n" and ext == ".swift" and \
+                        not code[k + 1:k + 80].lstrip().startswith(("{", "->", "throws", "rethrows", "async", "where")) and \
+                        not code[m.start():k].rstrip().endswith(("->", ",", "throws", "async", "where", "&", ":")):
+                    body_end = k  # a protocol requirement: no body
                     break
                 k += 1
             if body_start is not None:
@@ -1203,7 +1287,7 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     typed_by_line: dict[int, list[tuple[str, str]]] = {}
     if tk in ("kotlin", "js", "cpp", "jvm", "go", "rust", "swift", "php"):
         for i, ln in enumerate(lines):
-            if ":" in ln or tk != fam or "=" in ln:  # `x: T`, or `val x = T(...)` / `new T(...)`
+            if ":" in ln or tk != fam or "=" in ln or php:  # `x: T`, or `val x = T(...)` / `new T(...)`
                 got = _typed(tk, ln)
                 if got:
                     typed_by_line[i] = got
@@ -1231,8 +1315,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             if fpat and not inside[i]:  # `private val client = rule.newClient()`: a property's value says its type
                 for m in fpat.finditer(ln):
                     ch = expression(code, line_start[i] + m.end())
-                    if ch:
-                        expr_fields.setdefault(home.name, {}).setdefault(m.group(1), ch)
+                    if ch:  # (a PHP property `$x` is read as `->x`)
+                        expr_fields.setdefault(home.name, {}).setdefault(m.group(1).lstrip("$"), ch)
             pats_ = []
             if fam == "kotlin":
                 pats_ = [] if inside[i] else [_KT_FIELD, _KT_NEW]
@@ -1250,7 +1334,14 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 for m in _PHP_FIELD.finditer(ln):
                     t = type_name(m.group(1).replace("\\", "."))
                     if t and (not inside[i] or "__construct" in ln):
-                        got_fields.setdefault(m.group(2), set()).add(t)
+                        got_fields.setdefault(m.group(2).lstrip("$"), set()).add(t)
+                if inside[i] and "$this->" in ln:  # `$this->repo = $repo;`: the parameter's declared type
+                    for m in re.finditer(r"\$this->(\w+)\s*=\s*(\$\w+)\s*;", ln):
+                        fn = next((f_ for f_ in found if f_[0] <= i <= f_[1]), None)
+                        if fn:
+                            ts = {t for j in range(fn[0], i + 1) for v, t in typed_by_line.get(j, ()) if v == m.group(2)}
+                            if len(ts) == 1:
+                                got_fields.setdefault(m.group(1), set()).update(ts)
             elif tk == "go" and not inside[i]:
                 for m in _GO_FIELD.finditer(ln):
                     if m.group(1) not in _GO_KEYWORDS and m.group(2) not in _GO_KEYWORDS:
@@ -1289,6 +1380,9 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         annotated = fam in ("kotlin", "c", "rust") and any(_TEST_ATTR.search(raw[j]) for j in range(max(0, a_ - 3), a_ + 1))
         if go_test and not recv and _GO_TEST.match(name):
             annotated = True  # func TestX(t *testing.T), BenchmarkX, ExampleX, FuzzX
+        if (swift or php) and (name.startswith("test") and (cls is not None or home.kind == "class") and re.search(r"(?:^|/)[Tt]ests?/", rel)
+                               or any(re.search(r"@Test\b|@test\b|#\[Test\]", raw[j]) for j in range(max(0, a_ - 3), a_ + 1))):
+            annotated = True  # XCTest / PHPUnit `testX` methods, swift-testing `@Test`, PHPUnit `#[Test]` / `@test`
         f = Func(home.name, name, rel, a_ + 1, b_ + 1, "\n".join(lines[a_:b_ + 1]),
                  kind="test" if (a_, name) in tests or annotated else "func", recv=recv)
         sig_end = bpos if bpos >= 0 else min(len(code), npos + 400)
