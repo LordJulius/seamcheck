@@ -18,6 +18,7 @@ class Call:
     # what it is called on, step by step: `self.store.get().save()` is
     # ("self", "store", "get()"); () for a bare call (see chains.receiver)
     chain: tuple = ()
+    col: int = -1  # 0-based column of the name (-1: unknown), for a language server's definition request
 
 
 @dataclass
