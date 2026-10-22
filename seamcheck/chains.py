@@ -365,6 +365,9 @@ def elem_type(text: str) -> str:
             break
         t = m.group(1).strip()
     t = t.rstrip("?!").strip()
+    m = re.match(r"^(?:\[\d*\]|map\[[^\]]+\])\s*\*?(.+)$", t)  # Go `[]*Command`, `map[string]*Flag` (its values)
+    if m and not t.startswith("[]]"):
+        return type_name(m.group(1))
     m = re.match(r"^\[([^\[\]:;]+)(?:;[^\]]*)?\]$", t)  # Rust `[Match]` / `[u8; 4]`, Swift `[Foo]`
     if m:
         return type_name(m.group(1))
