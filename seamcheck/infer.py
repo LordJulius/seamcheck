@@ -987,8 +987,10 @@ class Types:
         short = p.short.get(seg) if not (seg[:1].islower() and fm.file.endswith((".rb", ".rake", ".ru", ".py") + _JS_EXTS[:-1])) else None
         if short:  # (a lowercase Ruby / JS name is a value, never the file `site.rb` / `app.js`: those come by import)
             return ("static", tuple(short), len(short) == 1)
-        if seg[:1].isupper() and not fm.file.endswith((".ex", ".exs", ".gd")):
-            return EXT  # a type or module the project doesn't declare
+        if fm.file.endswith(".gd") and (al := self._autoload(fm.file, seg)) is not None:
+            return ("inst", (al,), True)  # project.godot's [autoload] GameState="*res://gamestate.gd": that script, one instance
+        if seg[:1].isupper() and not fm.file.endswith((".ex", ".exs")):
+            return EXT  # a type or module the project doesn't declare (GDScript: the engine's class)
         if fm.file.endswith(".qml") and seg not in self.qml_names and seg not in ("parent", "model", "modelData", "index"):
             return EXT  # a name no project QML file declares: the window's / framework's
         if fm.file.endswith(".rs") and seg in self._rs_external():
@@ -1143,6 +1145,35 @@ class Types:
                         idx.setdefault((m.package, k), []).append(m)
         hits = idx.get((pkg, name), [])
         return hits[0] if len(hits) == 1 else None
+
+    def _autoload(self, rel: str, name: str):
+        """The module of a Godot autoload `name` as the project.godot over
+        `rel` registers it, or None."""
+        loads = self.cache.get("\0autoloads")
+        if loads is None:
+            loads = self.cache["\0autoloads"] = {}
+            for dirpath, dirs, files in os.walk(self.p.root):
+                dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("node_modules", "build", "target")]
+                if "project.godot" not in files:
+                    continue
+                base = os.path.relpath(dirpath, self.p.root).replace(os.sep, "/")
+                base = "" if base == "." else base + "/"
+                try:
+                    with open(os.path.join(dirpath, "project.godot"), encoding="utf-8") as fh:
+                        text = fh.read()
+                except OSError:
+                    continue
+                sec = re.search(r"^\[autoload\]\s*\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
+                for k, v in re.findall(r'^(\w+)\s*=\s*"\*?res://([^"]+\.gd)"', sec.group(1) if sec else "", re.M):
+                    mods_ = self.p.by_file.get(base + v)
+                    if mods_:
+                        loads[(base, k)] = mods_[0].name
+        d = rel
+        while True:
+            d = d.rsplit("/", 1)[0] if "/" in d else ""
+            hit = loads.get((d + "/" if d else "", name))
+            if hit is not None or not d:
+                return hit
 
     def _nested(self, mn: str) -> bool:
         """`<mod>.<name>` is a class nested in mod, not a file named with a
