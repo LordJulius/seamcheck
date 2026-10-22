@@ -14,6 +14,8 @@ from .scan import blank
 
 # extension -> (scanner family, function-declaration regexes)
 _ID = r"[A-Za-z_$][\w$]*"
+# one TS type, as a function type's result reads: `void`, `Promise<T>`, `Foo[]`
+_TS_TYPE = r"(?:void|string|number|boolean|unknown|any|never|null|undefined|bigint|object|[A-Z][\w$.]*(?:<[^()\n]*>)?(?:\[\])?)"
 _JS = [
     re.compile(rf"\bfunction\s*\*?\s*({_ID})\s*\("),
     # `exports.foo = function (`, `app.use = function (`, `Foo.prototype.bar = async function (`:
@@ -27,7 +29,9 @@ _JS = [
     re.compile(rf"\b(?:const|let|var)\s+({_ID})\s*(?::(?:[^=;]|=>){{1,300}}?)?=\s*(?:async\s+)?"
                rf"(?:function\b|\((?:[^()]|\([^()]*\))*\)\s*(?::\s*[^=]+)?=>|{_ID}\s*=>)"),
     # object-literal members (`applyOp: (op) => {`): a zustand store, a handler table
-    re.compile(rf"^[ \t]*({_ID})[ \t]*:[ \t]*(?:async[ \t]+)?(?:function\b|\([^()\n]*\)[ \t]*(?::[^=\n]+)?=>|{_ID}[ \t]*=>)", re.M),
+    # (not a parameter's function type: `fn: (...args: T) => void,`)
+    re.compile(rf"^[ \t]*({_ID})[ \t]*:[ \t]*(?:async[ \t]+)?(?:function\b|\([^()\n]*\)[ \t]*(?::[^=\n]+)?=>|{_ID}[ \t]*=>)"
+               rf"(?![ \t]*{_TS_TYPE}(?:[ \t]*[|&][ \t]*{_TS_TYPE})*[ \t]*(?:[,;)]|$))", re.M),
     # a method `name(params) {`; its parameters hold no string (`describe('x', function () {` is a call)
     # (a generic may nest: `mutateElement<T extends Mutable<Element>>(`; the parameters may span lines)
     re.compile(rf"^[ \t]*(?:(?:public|private|protected|static|async|get|set|override|readonly|export|default)\s+)*({_ID})[ \t]*"

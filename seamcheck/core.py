@@ -1111,6 +1111,7 @@ def _scope(project: Project, mod: Module, cache: dict) -> set[str]:
 
 
 _LOCALS = re.compile(r"\b(?:val|var|let|const)\s+([A-Za-z_$][\w$]*)|[(,]\s*([A-Za-z_$][\w$]*)\s*:(?!:)")
+_DESTRUCTURED = re.compile(r"\b(?:val|var|let|const)\s*[\[{(]([^\]})=;]*)[\]})]\s*(?::[^=;]+)?=")
 _locals_cache: dict[str, set[str]] = {}
 
 
@@ -1122,6 +1123,11 @@ def _shadowed(f: Func, name: str) -> bool:
     if loc is None:
         rb = f.file.endswith((".rb", ".rake", ".ru"))
         loc = _locals_cache[f.id] = {a or ("" if rb else b) for a, b in _LOCALS.findall(f.code)} - {""}
+        for dm in _DESTRUCTURED.finditer(f.code):  # `const [value, setValue] = useState()`, `const { a, b: c } =`
+            for part in dm.group(1).split(","):
+                nm = re.sub(r"^\s*\.\.\.", "", part).split("=")[0].split(":")[-1].strip()
+                if re.match(r"^[A-Za-z_$][\w$]*$", nm):
+                    loc.add(nm)
     return name in loc
 
 
@@ -1533,6 +1539,7 @@ def _build_edges(project: Project) -> None:
     from . import infer
     infer.resolve_bases(project)
     types = infer.Types(project)
+    pending: list = []
     for m in project.modules.values():
         for a in types.ancestors(m.name)[1:]:
             project.children[a].append(m.name)
@@ -1712,10 +1719,13 @@ def _build_edges(project: Project) -> None:
                 # caller itself defines (`const nudge = () => ...` inside a
                 # component) when there is one, else a name guess at most
                 inner = [g for g in project.by_name.get(c.name, []) if g.file == f.file
-                         and f.start <= g.start <= f.end and g.id != f.id]
+                         and f.start <= g.start <= f.end and g.id != f.id
+                         and not (mod and re.match(rf"^\s*{re.escape(c.name)}\s*:", mod.raw[g.start - 1]))]  # (not `key: () =>`)
                 if len(inner) == 1:
                     targets = [(inner[0], True)]
                 elif not inner and _scoped_language(f.file):
+                    if f.file.endswith(_PARAM_FLOW_EXTS) and c.name in _param_names(f):
+                        pending.append((f, c))  # a parameter: what the callers pass (after this pass)
                     _nothing(project, f, c)  # a closure or a parameter: no project function by that name
                     continue
             elif not q and mod:
@@ -1852,6 +1862,8 @@ def _build_edges(project: Project) -> None:
                     o = project.funcs.get(f"{sub}.{t.name}")
                     if o:
                         more.append((o, exact))
+            if not q and f.file.endswith(_PARAM_FLOW_EXTS) and not any(e for _, e in targets) and c.name in _param_names(f):
+                pending.append((f, c))  # `checkFn(x)` on a parameter: what the callers pass (after this pass)
             if not targets:
                 _nothing(project, f, c)
             elif _first_count(project, f, c):
@@ -1864,6 +1876,99 @@ def _build_edges(project: Project) -> None:
             for t, exact in targets + more:
                 project.edges[f.id].append((t.id, c.line, exact))
                 project.redges[t.id].append((f.id, c.line, exact))
+    _param_flow(project, types, pending)
+
+
+def _passed(project: Project, types, f: Func, k: int, depth: int):
+    """The one project function every caller of f passes as its k-th argument
+    (its id), or None."""
+    from . import lambdas
+    callers = project.redges.get(f.id, [])
+    if depth > 4 or not callers or not all(e for _, _, e in callers):
+        return None
+    got = set()
+    pname = (_param_names(f) + [""] * (k + 1))[k]
+    for src, line, _ in callers:
+        g = project.funcs.get(src)
+        gm = next((m for m in project.by_file.get(g.file, []) if m.name == g.module), None) if g else None
+        site = next((c2 for c2 in (g.calls if g else []) if c2.line == line and c2.name == f.name and c2.col >= 0), None)
+        if site is None or gm is None:
+            return None
+        code = "\n".join(gm.code[line - 1:line + 30])
+        o = code.find("(", site.col)
+        close = lambdas.matching(code, o) if o >= 0 else -1
+        args = lambdas.split_top(code[o + 1:close]) if close > 0 else []
+        arg = args[k].strip() if 0 <= k < len(args) else ""
+        if not re.match(r"^[A-Za-z_$][\w$]*$", arg):
+            return None
+        if g.id == f.id and arg == pname:
+            continue  # a recursive call handing the parameter on
+        gparams = _param_names(g)
+        if arg in gparams and arg not in g.bound:  # the caller's own parameter: what its callers pass
+            hit_id = _passed(project, types, g, gparams.index(arg), depth + 1)
+        else:
+            hit = types.bare(gm, g, arg)
+            hit_id = hit.id if hit is not None and hit.kind != "top" else None
+        if hit_id is None:
+            return None
+        got.add(hit_id)
+        if len(got) > 1:
+            return None
+    return got.pop() if len(got) == 1 else None
+
+
+_PARAM_FLOW_EXTS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".py")
+
+
+def _param_names(f: Func) -> list[str]:
+    """A JS / TS / Python function's parameter names, in order ("" for one
+    this can't name: a destructuring, `*args`)."""
+    from . import lambdas
+    k = f.code.find("(")
+    if k < 0 or k > 400:
+        return []
+    e = lambdas.matching(f.code, k)
+    if e < 0:
+        return []
+    out = []
+    for p_ in lambdas.split_top(f.code[k + 1:e]):
+        m = re.match(r"^\s*(?:(?:public|private|protected|readonly)\s+)?([A-Za-z_$][\w$]*)\s*[?]?\s*(?:[:=].*)?$", p_, re.S)
+        out.append(m.group(1) if m and m.group(1) not in ("self", "cls") else "")
+    return out
+
+
+def _param_flow(project: Project, types, pending: list) -> None:
+    """A call through a parameter (`checkFn(x)` in `runCheck(checkFn)`): when
+    every caller is exact and passes the same project function there by name
+    (or hands on its own parameter, whose callers do), the call reaches that
+    function."""
+    for f, c in pending:
+        params = _param_names(f)
+        if c.name not in params:
+            continue
+        got = _passed(project, types, f, params.index(c.name), 0)
+        if got is None:
+            continue
+        target = project.funcs[got]
+        old = [(d, ln, e) for d, ln, e in project.edges[f.id] if ln == c.line and d.rsplit(".", 1)[-1] == c.name and not e]
+        for d, ln, e in old:
+            project.edges[f.id].remove((d, ln, e))
+            if (f.id, ln, e) in project.redges.get(d, []):
+                project.redges[d].remove((f.id, ln, e))
+        project.edges[f.id].append((target.id, c.line, True))
+        project.redges[target.id].append((f.id, c.line, True))
+        res = project.resolution[os.path.splitext(f.file)[1]]
+        if old and res[1] > 0:
+            res[1] -= 1
+            res[0] += 1
+        elif not old and res[2] > 0:  # (it reached nothing: a closure's parameter)
+            res[2] -= 1
+            res[0] += 1
+        if _TRACE is not None:
+            for i, r in enumerate(_TRACE):
+                if r[0] == f.file and r[1] == c.line and r[2] == c.name and r[4] in ("guess", "nothing", "named"):
+                    _TRACE[i] = (r[0], r[1], r[2], r[3], "exact", (target.id,))
+                    break
 
 
 # --- queries ----------------------------------------------------------------------
