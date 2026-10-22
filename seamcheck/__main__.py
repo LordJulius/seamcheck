@@ -352,12 +352,19 @@ def _main(argv=None) -> int:
               f"functions {len(p.funcs)}\ncall edges {edges} (exact {exact}, fuzzy {edges - exact})\n"
               f"load {p.parse_ms} ms, total {int((time.time() - t0) * 1000)} ms")
         print("call sites resolved (exact / name guess only / nothing), and of the calls that reach project")
-        print("code (exact + guess) how many are certain; \"nothing\" is mostly the language's own library:")
-        for ext, (ex, fz, no) in sorted(p.resolution.items(), key=lambda kv: -sum(kv[1])):
+        print("code (exact + guess) how many are certain; \"nothing\" is mostly the language's own library,")
+        print("and \"named\" is the part of it a project function's name matches (a resolver that turns")
+        print("guesses into nothing shows up there):")
+        if a.json:
+            print(json.dumps({ext: dict(zip(("exact", "guess", "nothing", "named"), v)) for ext, v in p.resolution.items()}))
+            return 0
+        for ext, (ex, fz, no, named) in sorted(p.resolution.items(), key=lambda kv: -sum(kv[1][:3])):
             n = ex + fz + no
+            if not n:
+                continue
             own = f"project calls exact {100 * ex // (ex + fz):>3}%" if ex + fz else ""
             print(f"  {ext or '(none)':<6} {n:>7}  exact {100 * ex // n:>3}%  guess {100 * fz // n:>3}%  "
-                  f"nothing {100 * no // n:>3}%   {own}")
+                  f"nothing {100 * no // n:>3}% (named {100 * named // n:>2}%)   {own}")
         return 0
     return 0
 

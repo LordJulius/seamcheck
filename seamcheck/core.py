@@ -111,8 +111,8 @@ def match_any(path: str, globs: list[str]) -> bool:
 
 # --- the project ----------------------------------------------------------------
 
-def _zero3() -> list[int]:
-    return [0, 0, 0]
+def _zero3() -> list[int]:  # [exact, guess only, nothing, nothing though a project function has the name]
+    return [0, 0, 0, 0]
 
 
 @dataclass
@@ -1077,6 +1077,17 @@ _RS_STD_METHODS = {
 }
 
 
+def _nothing(project: Project, f: Func, c) -> None:
+    """A call that reaches no project function. Counted apart when a project
+    function in the caller's language has that name: the share stats shows
+    so a resolver can't look better by turning guesses into nothing."""
+    res = project.resolution[os.path.splitext(f.file)[1]]
+    res[2] += 1
+    fam = _family(f.file)
+    if any(g.kind != "top" and fam & _family(g.file) for g in project.by_name.get(c.name, ())):
+        res[3] += 1
+
+
 def _build_edges(project: Project) -> None:
     _resolve_imports(project)
     _locals_cache.clear()
@@ -1123,7 +1134,7 @@ def _build_edges(project: Project) -> None:
                 targets = [(t, True)]
             elif q and mod and q in mod.external and q not in f.bound:
                 # `json.dumps()`, `fmt.Println()`, `path.join()`: a library the file imports
-                project.resolution[os.path.splitext(f.file)[1]][2] += 1
+                _nothing(project, f, c)
                 continue
             elif q:
                 # Each way to name the qualifier, most certain first; a miss falls
@@ -1148,7 +1159,7 @@ def _build_edges(project: Project) -> None:
                     if hits:
                         targets = [(t, len(hits) == 1) for t in hits]
                     elif not in_project:
-                        project.resolution[os.path.splitext(f.file)[1]][2] += 1
+                        _nothing(project, f, c)
                         continue
                 if not targets and mod and q in mod.aliases:
                     hits = _in_scope(project, mod.aliases[q], c.name)  # (through a package's re-exports)
@@ -1205,7 +1216,7 @@ def _build_edges(project: Project) -> None:
                         continue
                 targets = [(t, len(hits) == 1) for t in hits]
                 if not targets and c.name in mod.external:
-                    project.resolution[os.path.splitext(f.file)[1]][2] += 1
+                    _nothing(project, f, c)
                     continue
                 if not targets and _scoped_language(f.file) and c.name not in mod.imported:
                     # Elixir, Kotlin, Java, an ES module: a bare call reaches only
@@ -1213,20 +1224,19 @@ def _build_edges(project: Project) -> None:
                     # means a library or the language's own (Enum, Compose's Row,
                     # vitest's expect, ConnTest's post): not a guess at every
                     # project function of that name.
-                    project.resolution[os.path.splitext(f.file)[1]][2] += 1
+                    _nothing(project, f, c)
                     continue
             if not targets and q and _MODULE_Q.match(q) and q != "Self":
                 # A qualifier that names a module (`Enum.reject`, `Repo.rollback`)
                 # and misses: the function lives outside the project (or the alias
                 # is wrong). Nothing, not a guess: `Enum.reject` used to land on
                 # every project function named reject.
-                res = project.resolution[os.path.splitext(f.file)[1]]
-                res[2] += 1
+                _nothing(project, f, c)
                 continue
             if not targets and q and c.name in _RS_STD_METHODS and f.file.endswith(".rs"):
                 # `.unwrap()`, `.len()`, `.push()` on a receiver of unknown type:
                 # Option / Result / Vec / String, not a project function of that name
-                project.resolution[".rs"][2] += 1
+                _nothing(project, f, c)
                 continue
             if not targets:
                 # A method on some object, or an import we can't see: every
@@ -1278,8 +1288,10 @@ def _build_edges(project: Project) -> None:
                     o = project.funcs.get(f"{sub}.{t.name}")
                     if o:
                         more.append((o, exact))
-            res = project.resolution[os.path.splitext(f.file)[1]]
-            res[0 if any(e for _, e in targets) else 1 if targets else 2] += 1
+            if not targets:
+                _nothing(project, f, c)
+            else:
+                project.resolution[os.path.splitext(f.file)[1]][0 if any(e for _, e in targets) else 1] += 1
             for t, exact in targets + more:
                 project.edges[f.id].append((t.id, c.line, exact))
                 project.redges[t.id].append((f.id, c.line, exact))
