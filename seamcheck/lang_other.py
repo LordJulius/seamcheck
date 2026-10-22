@@ -95,6 +95,11 @@ _GO_KEYWORDS = {"return", "go", "defer", "case", "range", "package", "import", "
                 "struct", "interface", "break", "continue", "var", "const"}
 
 
+# Rust: `x: &mut Foo` (a parameter, a `let`), `let x = Foo::new(` / `Foo {`
+_RS_TYPED = re.compile(r"(?:\blet\s+(?:mut\s+)?|[(,]\s*(?:mut\s+)?)([a-z_]\w*)\s*:\s*&?(?:'\w+\s+)?(?:mut\s+)?([A-Z]\w*)(?![\w:])")
+_RS_NEW = re.compile(r"\blet\s+(?:mut\s+)?([a-z_]\w*)\s*(?::[^=]+)?=\s*([A-Z]\w*)\s*(?:::\s*(?:new|default|with_\w+|from\w*|builder)\s*\(|\{)")
+
+
 def _typed(tk: str, text: str) -> list[tuple[str, str]]:
     """(name, type) declarations in a stretch of blanked code."""
     if tk == "kotlin":
@@ -107,6 +112,9 @@ def _typed(tk: str, text: str) -> list[tuple[str, str]]:
         if tk == "jvm":
             out += [(m.group(1), m.group(2)) for m in _JV_NEW.finditer(text)]
         return out
+    if tk == "rust":
+        return [(m.group(1), m.group(2)) for pat in (_RS_TYPED, _RS_NEW) for m in pat.finditer(text)
+                if m.group(2) not in ("Self",)]
     if tk == "go":
         return [(m.group(1), m.group(2)) for pat in (_GO_TYPED, _GO_NEW) for m in pat.finditer(text)
                 if m.group(1) not in _GO_KEYWORDS and m.group(2) not in _GO_KEYWORDS]
@@ -441,6 +449,61 @@ def _js_reexports(mod: Module, rel: str, text: str, lines: list[str]) -> None:
                 mod.imported.setdefault((local or src).strip(), (where, src.strip()))
 
 
+_RS_USE = re.compile(r"^[ \t]*(pub(?:\([^)]*\))?[ \t]+)?use[ \t]+([^;]+);", re.M)
+
+
+def _rs_tree(spec: str, prefix: list[str]) -> list[tuple[list[str], str]]:
+    """`a::{b, c::d as e, self, f::*}` -> ([path...], local name) pairs; a
+    glob's local name is "*"."""
+    spec = spec.strip()
+    out: list[tuple[list[str], str]] = []
+    if "{" in spec:
+        head, _, rest = spec.partition("{")
+        body = rest[:rest.rfind("}")]
+        base = prefix + [x for x in head.strip().rstrip(":").split("::") if x]
+        depth, cur = 0, ""
+        for ch in body + ",":
+            if ch == "," and depth == 0:
+                if cur.strip():
+                    out += _rs_tree(cur, base)
+                cur = ""
+                continue
+            depth += ch == "{"
+            depth -= ch == "}"
+            cur += ch
+        return out
+    path, _, alias = spec.partition(" as ")
+    parts = prefix + [x.strip() for x in path.split("::") if x.strip()]
+    if not parts:
+        return out
+    if parts[-1] == "self":
+        parts = parts[:-1]
+        if not parts:
+            return out
+    local = alias.strip() or parts[-1]
+    return out + [(parts, "*" if local == "*" else local)]
+
+
+def _rs_imports(mod: Module, rel: str, code: str) -> None:
+    """Rust `use` declarations, kept as "rs:<file>\0<a::b>" for core to resolve
+    against the workspace's crates; `super::` / `crate::` / `self::` too."""
+    w = lambda parts: f"rs:{rel}\0{'::'.join(parts)}"  # noqa: E731
+    for m in _RS_USE.finditer(code):
+        for parts, local in _rs_tree(re.sub(r"\s+", " ", m.group(2)), []):
+            if local == "*":
+                mod.uses.append(w(parts[:-1]))
+                if m.group(1):
+                    mod.reexports.append(w(parts[:-1]))
+                continue
+            if local == "_":
+                continue
+            mod.aliases[local] = w(parts)
+            if len(parts) > 1:
+                mod.imported[local] = (w(parts[:-1]), parts[-1])
+    for q in ("super", "crate"):
+        mod.aliases.setdefault(q, w([q]))
+
+
 def _kt_imports(mod: Module, text: str, lines: list[str]) -> None:
     pm = _KT_PACKAGE.search(text)
     if pm:
@@ -537,6 +600,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         _cs_imports(mod, code)
     elif ext == ".go":
         _go_imports(mod, rel, text, code)
+    elif ext == ".rs":
+        _rs_imports(mod, rel, code)
     seen: set[tuple[int, str]] = set()
     found = []
     kotlin = fam == "kotlin"
@@ -545,7 +610,7 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     for pat in pats:
         for m in pat.finditer(code):
             name = m.group(1)
-            if name in _NOT_FUNC:
+            if name in _NOT_FUNC and not (fam == "rust" and name == "new"):  # (`fn new` is every constructor)
                 continue
             start_line = line_of(m.start(1))
             if (start_line, name) in seen:
@@ -653,7 +718,7 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     # parameter properties)
     typed_by_line: dict[int, list[tuple[str, str]]] = {}
     tk = "cpp" if cpp else "jvm" if ext in (".java", ".cs") else "go" if ext == ".go" else fam
-    if tk in ("kotlin", "js", "cpp", "jvm", "go"):
+    if tk in ("kotlin", "js", "cpp", "jvm", "go", "rust"):
         for i, ln in enumerate(lines):
             if ":" in ln or tk != fam or "=" in ln:  # `x: T`, or `val x = T(...)` / `new T(...)`
                 got = _typed(tk, ln)
@@ -721,8 +786,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     # `x().name(` / `a?.b.name(`: a method on something we can't
                     # name, qualified "." (not unqualified: that means in scope)
                     q = m.group(1) or ("." if lines[i][:m.start(2)].rstrip().endswith((".", "->")) else "")
-                    if nm in _CALL_SKIP and (not q or nm in _NOT_FUNC):
-                        continue  # (a keyword, or `String(`; `c.String()` is a call)
+                    if nm in _CALL_SKIP and (not q or (nm in _NOT_FUNC and nm != "new")):
+                        continue  # (a keyword, or `String(`; `c.String()` and `Foo::new()` are calls)
                     f.calls.append(Call(nm, q, i + 1))
                 if jsx:  # `<Widget ...>` renders (calls) the component Widget
                     for m in _JSX.finditer(lines[i]):

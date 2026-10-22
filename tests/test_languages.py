@@ -27,7 +27,12 @@ Each case was a wrong answer running seamcheck on open-source repos:
   `export * from` / `export { a } from` led nowhere; a tsconfig `paths` entry
   naming one file (`"@app/common": ["packages/common/src/index.ts"]`), a
   base tsconfig's paths and a workspace package's name went unresolved; and
-  `import _ from "lodash"` made `_.map()` a guess at the project's `map`.
+  `import _ from "lodash"` made `_.map()` a guess at the project's `map`;
+- Rust: no `use` was read (a function imported from another module or a
+  workspace crate was a guess), `super::f()` / `crate::f()` were guesses, a
+  crate rooted by `[[bin]] path = ...` was unknown, and `.unwrap()` /
+  `.len()` on anything guessed at a project function of that name (ripgrep:
+  project calls exact 49%).
 """
 import os
 import sys
@@ -389,6 +394,82 @@ export class App {
 
     def test_package_import_is_a_library(self):
         self.assertEqual(self.guessed("packages/app/App.onPointerDown"), set())
+
+
+class Rust(Base):
+    FILES = {
+        "Cargo.toml": '[package]\nname = "rg"\n\n[[bin]]\nname = "rg"\npath = "crates/core/main.rs"\n',
+        "crates/core/main.rs": """use grep_search::{Searcher, sink::{collect as gather}};
+use crate::flags::parse;
+
+mod flags;
+
+fn main() {
+    let args = parse::low();
+    let mut s = Searcher::new();
+    s.search(&args);
+    gather(args.len());
+    args.unwrap();
+    flags::run();
+}
+
+fn helper() {}
+""",
+        "crates/core/flags/mod.rs": "pub mod parse;\n\npub fn run() {\n    super::helper();\n    crate::helper();\n}\n",
+        "crates/core/flags/parse.rs": """pub fn low() -> Vec<u8> {
+    Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses() {
+        low();
+    }
+}
+""",
+        "crates/searcher/Cargo.toml": '[package]\nname = "grep-search"\n',
+        "crates/searcher/src/lib.rs": """pub mod sink;
+
+pub struct Searcher;
+
+impl Searcher {
+    pub fn new() -> Self {
+        Searcher
+    }
+
+    pub fn search(&mut self, x: &[u8]) {
+        self.reset();
+    }
+
+    fn reset(&mut self) {}
+
+    pub fn len(&self) -> usize {
+        0
+    }
+}
+""",
+        "crates/searcher/src/sink.rs": "pub fn collect(n: usize) {}\n\npub fn unwrap() {}\n",
+    }
+
+    def test_use_across_crates_and_modules(self):
+        got = self.exact("crates/core/main.main")
+        self.assertEqual(got, {"crates/core/flags/parse.low", "crates/searcher/src/lib.new",
+                               "crates/searcher/src/lib.search", "crates/searcher/src/sink.collect",
+                               "crates/core/flags/mod.run"})
+        # `.len()` / `.unwrap()` on a Vec: the standard library, not lib.len or sink.unwrap
+        self.assertEqual(self.guessed("crates/core/main.main"), set())
+
+    def test_super_crate_and_self(self):
+        self.assertEqual(self.exact("crates/core/flags/mod.run"), {"crates/core/main.helper"})
+        self.assertEqual(self.exact("crates/searcher/src/lib.search"), {"crates/searcher/src/lib.reset"})
+
+    def test_rust_tests(self):
+        t = self.p.funcs["crates/core/flags/parse.parses"]
+        self.assertEqual(t.kind, "test")
+        self.assertEqual(self.exact(t.id), {"crates/core/flags/parse.low"})
 
 
 if __name__ == "__main__":
