@@ -22,7 +22,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 
 from . import config as config_mod
-from . import lang_elixir, lang_gdscript, lang_other
+from . import lang_elixir, lang_gdscript, lang_other, lang_ruby
 from .model import Func, Module
 from .scan import blank
 
@@ -58,6 +58,8 @@ def adapter_for(rel: str):
         return lang_elixir.parse
     if ext == ".py":
         return lang_other.parse_python
+    if ext in lang_ruby.EXT:
+        return lang_ruby.parse
     if ext in lang_other.LANGS:
         return lang_other.parse_brace
     return None
@@ -71,6 +73,8 @@ def scan_family(rel: str) -> str:
         return "elixir"
     if ext == ".py":
         return "python"
+    if ext in lang_ruby.EXT:
+        return "ruby"
     if ext in lang_other.LANGS:
         return lang_other.LANGS[ext][0]
     return "python"  # '#' comments are the safest guess
@@ -799,6 +803,7 @@ def _is_test_file(project: Project, rel: str) -> bool:
 
 def _resolve_imports(project: Project) -> None:
     cache: dict = {}
+    lang_ruby.link(project)  # Ruby: requires, constants and supertypes, across files (lang_ruby.py)
 
     def res(v):
         return _resolve_where(project, v, cache)
@@ -1055,6 +1060,7 @@ _FAMILIES = {
     ".ts": {"web"}, ".tsx": {"web"}, ".jsx": {"web"}, ".mjs": {"web"}, ".cjs": {"web"}, ".js": {"web", "qt"},
     ".qml": {"qt"}, ".cpp": {"qt"}, ".cc": {"qt"}, ".cxx": {"qt"}, ".h": {"qt"}, ".hpp": {"qt"}, ".hh": {"qt"},
     ".py": {"py"}, ".gd": {"gd"}, ".rs": {"rs"}, ".go": {"go"}, ".cs": {"cs"},
+    ".rb": {"rb"}, ".rake": {"rb"}, ".ru": {"rb"},
 }
 
 
@@ -1067,7 +1073,8 @@ def _scoped_language(rel: str) -> bool:
     """A language where a bare name resolves only through the file's own
     definitions and imports. A plain .js script (a QML library, a browser
     script) sees globals from anywhere, so it is not."""
-    return os.path.splitext(rel)[1] in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts", ".py", ".go", ".rs")
+    return os.path.splitext(rel)[1] in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts", ".py", ".go", ".rs",
+                                         ".rb", ".rake", ".ru")
 
 
 _SELF = {"self", "this", "Self", "cls"}
