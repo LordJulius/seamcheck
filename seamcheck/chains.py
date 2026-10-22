@@ -391,6 +391,9 @@ def type_name(text: str) -> str:
             t = re.sub(r"^(?:const|mut|readonly|final|static|volatile|unowned|weak|inout|ref|out|in|dyn|impl|some|any)\s+", "", t)
             t = t.lstrip("&*^").strip()
             t = re.sub(r"^'\w+\s+", "", t)  # a Rust lifetime
+        inter = [p.strip() for p in re.split(r"\s&\s(?![^<\[(]*[>\])])", t) if p.strip()]
+        if len(inter) > 1:  # TS `Response & TypedResponse<T>`: a Response (with more)
+            t = inter[0]
         # `Foo | None`, `Foo | null | undefined`
         parts = [p.strip() for p in re.split(r"\|(?![^<\[(]*[>\])])", t) if p.strip()]
         parts = [p for p in parts if p not in ("None", "null", "undefined", "nil", "void")]
