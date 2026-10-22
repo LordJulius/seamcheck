@@ -141,8 +141,10 @@ class Types:
         m = self.p.modules[mn]
         own = self._file_mod(m).name
         w = fm.aliases.get(name) or (fm.imported.get(name, ("", ""))[0])
-        if w and (w == mn or w == own):
+        if w and (w == mn or w == own or (w.startswith("pkg:") and self._pkg_of(mn) == w[4:])):
             return True
+        if w:
+            return False  # the import names another package's
         for u in fm.uses:
             if u == f"type:{name}" and name in m.decls:
                 return True
@@ -449,6 +451,9 @@ class Types:
             name = seg[:-2]
             if kind == "static":
                 from .core import _in_scope
+                nested = [f"{mn}.{name}" for mn in mods if f"{mn}.{name}" in self.p.modules]
+                if nested:  # `Request.Builder()`: builds the nested class
+                    return ("inst", tuple(nested), len(nested) == 1)
                 hits = [h for mn in mods for h in _in_scope(self.p, mn, name)]
                 if not hits:
                     hits, _ = self.method(list(mods), name)
@@ -505,12 +510,23 @@ def resolve_bases(project) -> None:
             mods = [x for x in mods if x != m.name and project.modules[x].kind != "ext"] or [x for x in mods if x != m.name]
             if mods:
                 got.append(mods[0])
-            elif b in fm.external or (not declared and b not in fm.imported and b not in fm.aliases):
+            elif b in fm.external or (not declared and not _from_project(project, fm, b)):
                 missing = True  # a library supertype (imported from outside, or declared nowhere)
         m.bases = got
         m.unresolved = missing
         if got and not m.parent:
             m.parent = got[0]
+
+
+def _from_project(project, fm, name: str) -> bool:
+    """`name` is imported from a module or package of the project (a re-export
+    we couldn't follow), not from a library (`import java.util.ArrayList`)."""
+    w = fm.aliases.get(name) or fm.imported.get(name, ("", ""))[0]
+    if not w:
+        return False
+    if w.startswith("pkg:"):
+        return w[4:] in project.packages
+    return w in project.modules
 
 
 _IDENT = re.compile(r"^[\w$]+$")

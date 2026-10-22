@@ -539,8 +539,9 @@ def _kt_imports(mod: Module, text: str, lines: list[str]) -> None:
         pkg, _, last = path.rpartition(".")
         if last[:1].islower():  # a top-level function (or property)
             mod.imported[alias or last] = (f"pkg:{pkg}", last)
-        else:  # a type: its file is in scope for method-name matches
+        else:  # a type: its file is in scope for method-name matches, and its package says which one
             mod.uses.append(f"type:{last}")
+            mod.imported.setdefault(alias or last, (f"pkg:{pkg}", last))
 
 
 _CS_NAMESPACE = re.compile(r"^[ \t]*namespace[ \t]+([\w.]+)", re.M)
@@ -713,6 +714,16 @@ _ASSIGN = {
     "cpp": re.compile(r"\bauto\s*[&*]*\s+([A-Za-z_]\w*)\s*=(?!=)"),
     "php": re.compile(r"(\$[A-Za-z_]\w*)\s*=(?![=>])"),
     "py": re.compile(r"^[ \t]*([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)", re.M),
+}
+
+
+# a class-level property set from an expression (no declared type)
+_FIELD_ASSIGN = {
+    "kotlin": re.compile(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*=(?!=)"),
+    "swift": re.compile(r"\b(?:let|var)\s+([A-Za-z_]\w*)\s*=(?!=)"),
+    "js": re.compile(r"^\s*(?:(?:private|public|protected|readonly|static|declare|override)\s+)*#?([A-Za-z_$][\w$]*)\s*[?!]?\s*(?::[^=;\n]+)?=(?![=>])"),
+    "php": re.compile(r"(?:private|public|protected|var)\s+(?:readonly\s+)?(?:\??[\\\w]+\s+)?(\$\w+)\s*=(?!=)"),
+    "jvm": re.compile(r"\bvar\s+([A-Za-z_]\w*)\s*=(?!=)"),
 }
 
 
@@ -1083,9 +1094,16 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 home = class_module(enclosing_classes(c["pos"]) + [c])
                 for m in _KT_FIELD.finditer(c["hdr"]):
                     fields.setdefault(home.name, {}).setdefault(m.group(1), set()).add(m.group(2))
+        expr_fields: dict[str, dict[str, tuple]] = {}
+        fpat = _FIELD_ASSIGN.get(tk)
         for i, ln in enumerate(lines):
             home = line_class.get(i, mod)
             got_fields = fields.setdefault(home.name, {})
+            if fpat and not inside[i]:  # `private val client = rule.newClient()`: a property's value says its type
+                for m in fpat.finditer(ln):
+                    ch = expression(ln, m.end())
+                    if ch:
+                        expr_fields.setdefault(home.name, {}).setdefault(m.group(1), ch)
             pats_ = []
             if fam == "kotlin":
                 pats_ = [] if inside[i] else [_KT_FIELD, _KT_NEW]
@@ -1125,6 +1143,10 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             target = mod if mname == mod.name else mods.get(mname)
             if target is not None:
                 target.bound = {**target.bound, **{k: "type:" + next(iter(v)) for k, v in fl.items() if len(v) == 1}}
+        for mname, fl in expr_fields.items():
+            target = mod if mname == mod.name else mods.get(mname)
+            if target is not None:
+                target.bound = {**{k: "expr:" + "\x1f".join(ch) for k, ch in fl.items()}, **target.bound}
         # Go: a type's methods see the fields of its struct
         if go:
             for m_ in mods.values():
