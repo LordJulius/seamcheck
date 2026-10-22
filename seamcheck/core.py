@@ -1558,7 +1558,8 @@ def _build_edges(project: Project) -> None:
                 if infer.is_ext(v):
                     # a library value; a Kotlin / C# / Swift extension the project
                     # declares on that library type is the one exception
-                    exts = types.ext_fns.get((v[1][0], c.name), []) if v[1] else []
+                    exts = (types.ext_fns.get((v[1][0], c.name), []) or
+                            types.ext_fns.get((v[1][0].split("`")[0], c.name), [])) if v[1] else []
                     if exts and f.file.endswith(".swift"):
                         exts = [g for g in exts if _swift_labels_match(project, mod, c, g)]
                     own = [g for g in exts if g.file == f.file]
@@ -1583,6 +1584,8 @@ def _build_edges(project: Project) -> None:
                         hits, on_type = types.method(list(mods_), c.name)
                         if kind == "inst":  # (`super.x()` runs the parent's x itself: no subtype's)
                             recv = ("\0super",) if c.chain[-1] in ("super", "base", "parent") else tuple(mods_)
+                    if len(hits) > 1 and c.targs >= 0:  # C#: `NoOp()` is not `NoOp<T>()`
+                        hits = [h for h in hits if not h.targs or str(c.targs) in h.targs.split(",")] or hits
                     if hits:
                         # on the type: one definition (or one type's overloads); through an
                         # interface: each implementation runs. Several same-named types and
@@ -1796,7 +1799,7 @@ def _build_edges(project: Project) -> None:
                     # has is no proof (`res.json()` on a fetch Response is not Context.json,
                     # `@app.call` not Logger#call); the receiver's type is what settles it
                     mine = []
-                own = [g for g in cands if g.file == f.file and g.recv]
+                own = [g for g in cands if g.file == f.file and g.recv] if not f.file.endswith(".cs") else []
                 if targets:
                     pass
                 elif len(own) == 1 and q != "" and len(cands) > 1:

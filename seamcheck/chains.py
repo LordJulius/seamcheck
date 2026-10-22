@@ -16,6 +16,15 @@ UNWRAP = {"unwrap()", "expect()", "unwrap_or_default()", "unwrap_or()", "unwrap_
           "get()", "orElseThrow()", "requireNotNull()", "checkNotNull()", "value()", "Value", "Result", "await"}
 
 
+def _top_commas(text: str) -> int:
+    d, n = 0, 0
+    for ch in text:
+        d += ch in "<([{"
+        d -= ch in ">)]}"
+        n += ch == "," and d == 0
+    return n
+
+
 def _skip_back_ws(code: str, i: int) -> int:
     while i > 0 and code[i - 1] in " \t\r\n":
         i -= 1
@@ -108,9 +117,11 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
             if k < 0:
                 return ()
             j = _skip_back_ws(code, k)
+            arity = ""
             if j > 0 and code[j - 1] == ">":  # `foo<T>(`: a generic call
                 g = _match_back(code, j, ">", "<")
                 if g > 0:
+                    arity = "`" + str(1 + _top_commas(code[g + 1:j - 1]))
                     j = _skip_back_ws(code, g)
             s = _ident_back(code, j)
             if s == j:  # `(expr).x`: a parenthesized expression
@@ -122,10 +133,10 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
             name = code[s:j]
             before = code[max(0, s - 4):s]
             if before.endswith("new ") or before.endswith("new\t"):
-                segs.append(f"new {name}()")
+                segs.append(f"new {name}{arity}()")
                 i = s - 4
                 break
-            segs.append(name + "()")
+            segs.append(name + (arity if CALL_TARGS else "") + "()")
             i = s
         elif ch == "]":
             k = _match_back(code, i, "]", "[")
@@ -176,7 +187,7 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
             segs.append("(...)")
             break
     segs.reverse()
-    return tuple(segs)
+    return _bare_first(segs)
 
 
 def expression(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
@@ -210,6 +221,7 @@ def expression(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
         j = i
         while j < n and code[j] in " \t":
             j += 1
+        arity = ""
         if j < n and code[j] == "<":  # generic arguments: `make<T>(` / `List<Foo>()`
             depth, k = 0, j
             while k < n and k - j < 200:
@@ -223,6 +235,7 @@ def expression(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                     break
                 k += 1
             if depth == 0 and k < n and code[k] == ">":
+                arity = "`" + str(1 + _top_commas(code[j + 1:k]))
                 j = k + 1
         if j < n and code[j] in "({" and not (code[j] == "{" and not new and not name[:1].isupper()):
             close = ")" if code[j] == "(" else "}"
@@ -238,9 +251,9 @@ def expression(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
             if code[j] == "{":  # a struct / object literal `Foo { a: 1 }`: builds a Foo
                 segs.append(f"new {name}()")
             elif new:
-                segs.append(f"new {name}()")
+                segs.append(f"new {name}{arity}()")
             else:
-                segs.append(name + "()")
+                segs.append(name + (arity if CALL_TARGS else "") + "()")
             new = False
             i = k + 1
         else:
@@ -271,7 +284,23 @@ def expression(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
             end = code[i:i + 1]
             if end and end not in ";,)\n\r}]" and not code[i:].lstrip(" \t").startswith(("//", "#", "as ", "?:", "??", "||", "or ")):
                 return ()  # more expression follows: `a.b() + 1`, a ternary...
-            return tuple(segs)
+            return _bare_first(segs)
+    return _bare_first(segs)
+
+
+# C#: a method call's segment carries its type-argument count (`Handle<E>()`
+# -> "Handle`1()"), as `Policy.NoOp()` and `Policy.NoOp<T>()` are different
+# methods; set while a C# file is parsed
+CALL_TARGS = False
+_TARGS_SEG = re.compile(r"^([\w$]+)`\d+\(\)$")
+
+
+def _bare_first(segs) -> tuple:
+    """The chain, with a leading bare call's type-argument count dropped."""
+    if segs and CALL_TARGS:
+        m = _TARGS_SEG.match(segs[0])
+        if m:
+            segs[0] = m.group(1) + "()"
     return tuple(segs)
 
 
@@ -282,6 +311,22 @@ _WRAPPERS = {"Promise", "Task", "ValueTask", "Future", "Box", "Rc", "Arc", "Opti
              "QScopedPointer", "QWeakPointer", "unique_ptr", "shared_ptr", "weak_ptr", "optional", "Ptr",
              # what a `with` gives
              "ContextManager", "AbstractContextManager", "AsyncContextManager", "AbstractAsyncContextManager"}
+
+
+def generic_name(text: str) -> str:
+    """type_name, plus the generic arity when the type itself is generic
+    (`Builder<TResult>` -> "Builder`1"): C# has `Builder` and `Builder<T>` side
+    by side. Lookups fall back to the plain name, so other languages lose nothing."""
+    t = type_name(text)
+    m = re.match(r"^\s*(?:const\s+|readonly\s+)?([\w.:]+)\s*<(.*)>\s*[?*&]*\s*$", text.strip(), re.S)
+    if not t or not m or m.group(1).replace("::", ".").split(".")[-1] != t.split(".")[-1]:
+        return t
+    depth, n = 0, 1
+    for ch in m.group(2):
+        depth += ch in "<([{"
+        depth -= ch in ">)]}"
+        n += ch == "," and depth == 0
+    return f"{t}`{n}"
 
 
 def type_name(text: str) -> str:
