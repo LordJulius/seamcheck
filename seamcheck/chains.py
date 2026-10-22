@@ -274,10 +274,28 @@ def expression(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                 return ()
             segs.append(name)
             i = j
-        # what follows: another link, an unwrap, or the end
+        # what follows: another link, an unwrap, an index, or the end
         while True:
             while i < n and code[i] in " \t":
                 i += 1
+            if i < n and code[i] == "[" and segs and segs[-1] not in ("[]",):  # `xs.get()[0]`: an element
+                depth, k = 0, i
+                while k < n:
+                    if code[k] in "([{":
+                        depth += 1
+                    elif code[k] in ")]}":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    elif code[k] in ";\n" and depth <= 1:
+                        k = n
+                        break
+                    k += 1
+                if k >= n:
+                    return ()
+                segs.append("[]")
+                i = k + 1
+                continue
             if code.startswith("!!", i) or (i < n and code[i] == "!" and code[i + 1:i + 2] in (".", "")):
                 segs.append("!!")
                 i += 2 if code.startswith("!!", i) else 1
