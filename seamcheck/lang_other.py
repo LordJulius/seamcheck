@@ -120,6 +120,37 @@ _RS_TYPED = re.compile(r"(?:\blet\s+(?:mut\s+)?|[(,]\s*(?:mut\s+)?)([a-z_]\w*)\s
 _RS_NEW = re.compile(r"\blet\s+(?:mut\s+)?([a-z_]\w*)\s*(?::[^=]+)?=\s*([A-Z]\w*)\s*(?:::\s*(?:new|default|with_\w+|from\w*|builder)\s*\(|\{)")
 
 
+_GEN_C = re.compile(r"(?<![\w>.])([A-Za-z_][\w:.]*)\s*<((?:[^<>;=(){}]|<(?:[^<>]|<[^<>]*>)*>)*)>\s*[\*&]*\s*([A-Za-z_]\w*)\s*(?=[;={(,)\[:]|$)", re.M)
+_GEN_K = re.compile(r"([A-Za-z_$][\w$]*)\s*[?!]?\s*:\s*(?:readonly\s+)?([\w.$]+)\s*<((?:[^<>;=]|<(?:[^<>]|<[^<>]*>)*>)*)>")
+_ARR_TS = re.compile(r"([A-Za-z_$][\w$]*)\s*[?!]?\s*:\s*(?:readonly\s+)?([A-Z][\w$.]*)\s*\[\s*\]")
+_NOT_CONTAINER = {"template", "static_cast", "dynamic_cast", "reinterpret_cast", "const_cast", "return", "new", "typename"}
+
+
+def _elements(tk: str, text: str) -> list[tuple[str, str]]:
+    """("name[]", element type) for a container declaration: `QHash<QString,
+    Player*> m_players`, `List<Foo> xs`, `xs: Map<K, Foo>`, TS `xs: Foo[]`.
+    The element is the last type argument (a map's value)."""
+    if tk not in ("cpp", "jvm", "kotlin", "js", "swift") or "<" not in text and "[" not in text:
+        return []
+    out = []
+    if tk in ("cpp", "jvm"):
+        hits = [(m.group(3), m.group(1), m.group(2)) for m in _GEN_C.finditer(text) if m.group(1) not in _NOT_CONTAINER]
+    else:
+        hits = [(m.group(1), m.group(2), m.group(3)) for m in _GEN_K.finditer(text)]
+        out += [(m.group(1) + "[]", t) for m in _ARR_TS.finditer(text) if (t := type_name(m.group(2)))]
+    for name, cont, args in hits:
+        depth, last = 0, 0
+        for k, ch in enumerate(args):
+            depth += ch in "<([{"
+            depth -= ch in ">)]}"
+            if ch == "," and depth == 0:
+                last = k + 1
+        elem = type_name(args[last:])
+        if elem and elem != type_name(f"{cont}<{args}>") and elem[:1].isupper():
+            out.append((name + "[]", elem))
+    return out
+
+
 def _typed(tk: str, text: str) -> list[tuple[str, str]]:
     """(name, type) declarations in a stretch of blanked code."""
     if tk == "kotlin":
@@ -987,7 +1018,7 @@ _ASSIGN = {
     "rust": re.compile(r"\blet\s+(?:mut\s+)?([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)"),
     "go": re.compile(r"(?:^|[;{]|\bvar\b)\s*([A-Za-z_]\w*)\s*(?:,\s*[A-Za-z_]\w*\s*)*(?::=|=(?!=))", re.M),
     "jvm": re.compile(r"\bvar\s+([A-Za-z_]\w*)\s*=(?!=)"),
-    "cpp": re.compile(r"\bauto\s*[&*]*\s+([A-Za-z_]\w*)\s*=(?!=)"),
+    "cpp": re.compile(r"\bauto\s*[&*]*\s*([A-Za-z_]\w*)\s*=(?!=)\s*[*&]?"),  # (`auto &x = *it.value().get();`)
     "php": re.compile(r"(\$[A-Za-z_]\w*)\s*=(?![=>])"),
     "py": re.compile(r"^[ \t]*([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)", re.M),
 }
@@ -1200,6 +1231,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     elif ext == ".php":
         _php_imports(mod, text, code)
     elif ext in _CPP_EXTS:
+        for gm in re.finditer(r"\bQ_GLOBAL_STATIC(?:_WITH_ARGS)?\s*\(\s*([\w:<>]+)\s*,\s*(\w+)", code):
+            mod.bound.setdefault(gm.group(2), "type:" + type_name(gm.group(1)))  # Qt's global object `s_session`
         # `#include "x.h"` (core resolves it): its free functions are in scope
         d = rel.rsplit("/", 1)[0] if "/" in rel else ""
         for im in re.finditer(r'^[ \t]*#[ \t]*include[ \t]*"([^"]+)"', text, re.M):
@@ -1423,7 +1456,7 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     if tk in ("kotlin", "js", "cpp", "jvm", "go", "rust", "swift", "php"):
         for i, ln in enumerate(lines):
             if ":" in ln or tk != fam or "=" in ln or php:  # `x: T`, or `val x = T(...)` / `new T(...)`
-                got = _typed(tk, ln)
+                got = _typed(tk, ln) + _elements(tk, ln)
                 if got:
                     typed_by_line[i] = got
         inside = [False] * len(lines)
@@ -1457,6 +1490,11 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 pats_ = [] if inside[i] else [_KT_FIELD, _KT_NEW]
             elif fam == "js":
                 pats_ = [_TS_PARAM_FIELD] + ([] if inside[i] else [_TS_FIELD, _TS_NEW, _TS_CONST])
+            if not inside[i] and tk in ("cpp", "jvm", "kotlin", "js", "swift"):
+                for nm_, ty in _elements(tk, ln):  # `QHash<QString, Player*> m_players;`: its elements
+                    got_fields.setdefault(nm_, set()).add(ty)
+            if fam == "js":
+                pass
             elif tk == "jvm" and not inside[i]:
                 for m in _JV_FIELD.finditer(ln):
                     got_fields.setdefault(m.group(2), set()).add(m.group(1))
