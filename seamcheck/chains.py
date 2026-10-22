@@ -252,7 +252,9 @@ _WRAPPERS = {"Promise", "Task", "ValueTask", "Future", "Box", "Rc", "Arc", "Opti
              "Deferred", "Lazy", "Ref", "RefCell", "Cell", "Mutex", "RwLock", "Pin", "Cow", "Awaitable",
              "Coroutine", "Observable", "Single", "Maybe", "NotRequired", "Required", "Final", "ClassVar",
              "Annotated", "ReadOnly", "Readonly", "WeakReference", "Nullable", "QPointer", "QSharedPointer",
-             "QScopedPointer", "QWeakPointer", "unique_ptr", "shared_ptr", "weak_ptr", "optional", "Ptr"}
+             "QScopedPointer", "QWeakPointer", "unique_ptr", "shared_ptr", "weak_ptr", "optional", "Ptr",
+             # what a `with` gives
+             "ContextManager", "AbstractContextManager", "AsyncContextManager", "AbstractAsyncContextManager"}
 
 
 def type_name(text: str) -> str:

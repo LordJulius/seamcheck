@@ -186,7 +186,7 @@ _PY_IMPORT = re.compile(r"^[ \t]*import[ \t]+([\w. \t,]+)$", re.M)
 _PY_FROM = re.compile(r"^[ \t]*from[ \t]+(\.*[\w.]*)[ \t]+import[ \t]+(\([^)]*\)|[^\n]+)", re.M)
 # `x = Foo(`, `x: Foo` (a parameter or a local); `self.x = Foo(` / `self.x: Foo` for the class
 _PY_NEW = re.compile(r"(?:^|[;(,]|\bself\.)[ \t]*([A-Za-z_]\w*)[ \t]*(?::[^=\n]*)?=[ \t]*((?:[a-z_]\w*\.)*[A-Z]\w*)[ \t]*\(", re.M)
-_PY_ANN = re.compile(r"(?:^|[(,]|\bself\.)[ \t]*([A-Za-z_]\w*)[ \t]*:[ \t]*([A-Z]\w*)(?![\w.\[])", re.M)
+_PY_ANN = re.compile(r"^[ \t]*([A-Za-z_]\w*)[ \t]*:[ \t]*([^=\n#]+?)[ \t]*(?:=|#|$)", re.M)
 _PY_SELF_ATTR = re.compile(r"\bself\.([A-Za-z_]\w*)[ \t]*(?::[ \t]*([A-Z]\w*)(?![\w.\[])[^=\n]*)?(?:=[ \t]*((?:[a-z_]\w*\.)*[A-Z]\w*)[ \t]*\()?")
 # a function used as a value: `key=fn`, `(fn,`, `[fn]`, `return fn`, `callback=self.on_x`
 _PY_VALUE = re.compile(r"(?:[=(,\[:]|\breturn)\s*(?:self\.|cls\.)?([A-Za-z_]\w*)\s*(?=[,)\]}]|$)", re.M)
@@ -322,7 +322,8 @@ def parse_python(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 j = outer[j]
             if j >= 0 and blocks[j][3] == "class" and owner_of.get(j):
                 f.bound.setdefault("self", "mod:" + owner_of[j])
-        _py_collect(f, lines, a, b, first=True)
+        nested = {i for (a2, b2, _, kind2, _) in blocks if kind2 == "def" and a < a2 <= b for i in range(a2, b2 + 1)}
+        _py_collect(f, lines, a, b, first=True, skip=nested)
         _py_types(f, lines, a, b, test_file, fixture=any(
             re.match(r"\s*@(?:pytest\.)?fixture\b", lines[j]) for j in range(max(0, a - 3), a)))
     top = Func(fm.name, "<top>", rel, 1, len(lines), "", kind="top")
@@ -347,6 +348,25 @@ def parse_python(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 ty = m.group(2) or m.group(3)
                 if ty:
                     seen.setdefault(m.group(1), set()).add(ty)
+        # the class body's own attributes (`session_interface: SessionInterface = ...`,
+        # `json_provider_class = DefaultJSONProvider`), lines at the body's indent
+        body_ind = None
+        for i in range(a + 1, b + 1):
+            ln = lines[i]
+            if not ln.strip():
+                continue
+            ind_i = len(ln) - len(ln.lstrip())
+            if body_ind is None:
+                body_ind = ind_i
+            if ind_i != body_ind:
+                continue
+            am = re.match(r"\s*([A-Za-z_]\w*)\s*:\s*([^=\n#]+?)\s*(?:=|#|$)", ln)
+            if am and (ty := type_name(am.group(2))) and not ty.startswith(("ClassVar", "t.ClassVar")):
+                seen.setdefault(am.group(1), set()).add(ty)
+                continue
+            vm = re.match(r"\s*([a-z_]\w*)\s*=\s*((?:[a-z_]\w*\.)*[A-Z]\w*)\s*\(", ln)
+            if vm:
+                seen.setdefault(vm.group(1), set()).add(vm.group(2))
         for nm, tys in seen.items():
             if len(tys) == 1:
                 cm.bound.setdefault(nm, "type:" + next(iter(tys)))
@@ -378,8 +398,26 @@ def _py_types(f: Func, lines: list[str], a: int, b: int, test_file: bool, fixtur
         k += 1
         head += " " + lines[k].strip()
     rm = re.search(r"\)\s*->\s*([^:]+?)\s*:\s*$", head)
-    if rm and type_name(rm.group(1)):
-        f.returns = type_name(rm.group(1))
+    ann = rm.group(1) if rm else ""
+    if ann and any(re.match(r"\s*@(?:contextlib\.)?(?:async)?contextmanager\b", lines[j]) for j in range(max(0, a - 3), a)):
+        # a @contextmanager's `-> Iterator[Response]`: `with f() as r` gives a Response
+        ann = re.sub(r"^(?:[\w.]+\.)?(?:Async)?(?:Iterator|Generator)\[(.*)\]$", r"\1", ann.strip()).split(",")[0]
+    if ann and type_name(ann):
+        f.returns = type_name(ann)
+    sig = head[head.find("(") + 1:]
+    depth, last, parts = 0, 0, []
+    for k, ch in enumerate(sig):  # the parameters, split at top-level commas
+        depth += ch in "([{"
+        depth -= ch in ")]}"
+        if depth < 0 or (ch == "," and depth == 0):
+            parts.append(sig[last:k])
+            last = k + 1
+            if depth < 0:
+                break
+    for prm in parts:
+        pm = re.match(r"\s*([A-Za-z_]\w*)\s*:\s*([^=]+?)\s*(?:=.*)?$", prm, re.S)
+        if pm and (ty := type_name(pm.group(2))):
+            f.bound.setdefault(pm.group(1), "type:" + ty)  # `app: flask.Flask`, `options: dict[str, t.Any]`
     for m in re.finditer(r"[(,]\s*(\*\*?)([A-Za-z_]\w*)", head):
         f.bound[m.group(2)] = "type:dict" if m.group(1) == "**" else "type:tuple"  # `**kwargs`, `*args`
     body = "\n".join(lines[a:b + 1])
@@ -394,9 +432,9 @@ def _py_types(f: Func, lines: list[str], a: int, b: int, test_file: bool, fixtur
                 if ch:
                     f.returns = "expr:" + "\x1f".join(ch)
     for nm_, held in _assignments("py", body):
-        if nm_ != f.name:
+        if nm_ != f.name or held.split("\x1f")[0] not in (f"expr:{f.name}", f"expr:{f.name}()"):  # (`app = create_app()` in `def app()`)
             f.bound.setdefault(nm_, held)
-    for m in re.finditer(r"\bwith[ \t]+(.+?)[ \t]+as[ \t]+([A-Za-z_]\w*)[ \t]*[:,)]", body):
+    for m in re.finditer(r"\bwith[ \t]+((?:[^:\n]|\([^()]*\))+?)\s+as[ \t]+([A-Za-z_]\w*)[ \t]*[:,)]", body):
         ch = expression(m.group(1) + "\n", 0)  # `with httpx.Client() as client:` (a context manager gives itself)
         if ch:
             f.bound.setdefault(m.group(2), "expr:" + "\x1f".join(ch))
@@ -408,11 +446,14 @@ def _py_types(f: Func, lines: list[str], a: int, b: int, test_file: bool, fixtur
                 f.bound.setdefault(prm, "fixture:" + prm)
 
 
-def _py_collect(f: Func, lines: list[str], a: int, b: int, first: bool) -> None:
+def _py_collect(f: Func, lines: list[str], a: int, b: int, first: bool, skip: set[int] | None = None) -> None:
     body = "\n".join(lines[a:b + 1])
     off = 0
     for i in range(a, b + 1):
         t = lines[i]
+        if skip and i in skip:  # a nested def's lines: its own function's calls
+            off += len(lines[i]) + 1
+            continue
         cut = 0
         if (first and i == a) or _PY_BLOCK.match(t):
             cut = t.index("(") + 1 if "(" in t else len(t)  # a (nested) def's own name is no call
@@ -427,7 +468,9 @@ def _py_collect(f: Func, lines: list[str], a: int, b: int, first: bool) -> None:
                     q = "."  # `x().name(` / `a[0].name(`: a method on something we can't name
                 elif name in _PY_SKIP:
                     continue
-            chain = receiver(body, off + cut + m.start(2)) if q and q != "super" else ()
+            chain = receiver(body, off + cut + m.start(2)) if q and q != "super" else ("super()",) if q == "super" else ()
+            if chain == ("(...)",) and t[:m.start()].rstrip().endswith(("}.", "].")):
+                chain = ("<literal>",)  # `{"a": 1}.get(k)`, `[...].count(x)`: Python's own
             if chain and q != ".":
                 q = chain[-1] if re.match(r"^\w+$", chain[-1]) else "."
             f.calls.append(Call(name, q, i + 1, chain, cut + m.start(2)))
@@ -435,7 +478,8 @@ def _py_collect(f: Func, lines: list[str], a: int, b: int, first: bool) -> None:
             for m in _PY_NEW.finditer(t):
                 f.bound[m.group(1)] = "type:" + m.group(2)
             for m in _PY_ANN.finditer(t):
-                f.bound.setdefault(m.group(1), "type:" + m.group(2))
+                if (ty := type_name(m.group(2))):  # `x: flask.Flask`, `y: dict[str, Any] = {}`, `z: Optional[Foo]`
+                    f.bound.setdefault(m.group(1), "type:" + ty)
         for m in _PY_VALUE.finditer(t):
             f.refs.add(m.group(1))
         off += len(lines[i]) + 1
