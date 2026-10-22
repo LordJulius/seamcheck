@@ -82,9 +82,9 @@ _JV_FIELD = re.compile(r"^\s*(?:(?:public|private|protected|internal|static|read
                        r"([A-Z]\w*)(?:<[^>;]*>)?\??\s+([a-z_]\w*)\s*(?:=[^;]*)?;")
 # Go: `c *Command` / `var x Foo` (receivers, parameters, vars), `x := &Foo{`, and
 # struct fields (`flags *flagSet`). Go types may be lowercase (unexported).
-_GO_TYPED = re.compile(r"(?:\bvar\s+|[(,]\s*)([A-Za-z_]\w*)\s+\*?([A-Za-z_]\w*)(?=\s*[,)=]|\s*$)", re.M)
-_GO_NEW = re.compile(r"\b([A-Za-z_]\w*)\s*:?=\s*&?([A-Za-z_]\w*)\s*\{")
-_GO_FIELD = re.compile(r"^\s*([A-Za-z_]\w*)\s+\*?([A-Za-z_]\w*)\s*(?:`[^`]*`)?\s*$")
+_GO_TYPED = re.compile(r"(?:\bvar\s+|[(,]\s*)([A-Za-z_]\w*)\s+\*?((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)(?=\s*[,)=]|\s*$)", re.M)
+_GO_NEW = re.compile(r"\b([A-Za-z_]\w*)\s*:?=\s*&?((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s*\{")
+_GO_FIELD = re.compile(r"^\s*(?:var\s+)?([A-Za-z_]\w*)\s+\*?((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s*(?:`[^`]*`)?\s*$")
 _GO_KEYWORDS = {"return", "go", "defer", "case", "range", "package", "import", "type", "func", "else", "chan", "map",
                 "struct", "interface", "break", "continue", "var", "const"}
 
@@ -445,6 +445,40 @@ def _cs_imports(mod: Module, code: str) -> None:
         mod.uses.append(f"pkg:{m.group(1)}")
 
 
+_GO_RECV = re.compile(r"^func\s*\(\s*(?:\w+\s+)?\*?\s*([A-Za-z_]\w*)")
+_GO_TEST = re.compile(r"(?:Test|Benchmark|Example|Fuzz)(?:[A-Z_0-9]|$)")
+_GO_DECL = re.compile(r"\btype\s+([A-Za-z_]\w*)(?:\[[^\]]*\])?\s+(?!=)")
+_GO_PACKAGE = re.compile(r"^package\s+(\w+)", re.M)
+_GO_IMPORT_ONE = re.compile(r'^import\s+(?:([\w.]+)\s+)?"([^"]+)"', re.M)
+_GO_IMPORT_BLOCK = re.compile(r"^import\s*\(([^)]*)\)", re.M)
+_GO_IMPORT_LINE = re.compile(r'^\s*(?:([\w.]+)\s+)?"([^"]+)"', re.M)
+
+
+def _go_imports(mod: Module, rel: str, text: str, code: str) -> None:
+    """Go: the files of one directory and package see each other (the package
+    is "<dir>#<name>"); an import binds its package name ("go:<path>", or
+    "go?:<path>" when the name is the path's own, which core corrects to the
+    package's real name)."""
+    d = rel.rsplit("/", 1)[0] if "/" in rel else ""
+    pm = _GO_PACKAGE.search(code)
+    if pm:
+        mod.package = f"{d}#{pm.group(1)}"
+    specs = [(m.group(1), m.group(2)) for m in _GO_IMPORT_ONE.finditer(text)]
+    for blk in _GO_IMPORT_BLOCK.finditer(text):
+        specs += [(m.group(1), m.group(2)) for m in _GO_IMPORT_LINE.finditer(blk.group(1))]
+    for alias, path in specs:
+        if alias == "_":
+            continue
+        if alias == ".":
+            mod.uses.append(f"go:{path}")
+            continue
+        last = path.rstrip("/").rsplit("/", 1)[-1]
+        if not alias and re.match(r"v\d+$", last) and "/" in path:  # module/v2: the package is the one before
+            last = path.rstrip("/").rsplit("/", 2)[-2]
+        name = alias or re.sub(r"[^\w]", "_", last.removeprefix("go-").removesuffix("-go"))
+        mod.aliases[name] = f"go:{path}" if alias else f"go?:{path}"
+
+
 def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     ext = "." + rel.rsplit(".", 1)[-1]
     fam, pats = LANGS[ext]
@@ -465,13 +499,15 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 hi = mid - 1
         return lo
 
-    mod.decls = sorted({d.group(1) for d in _DECL.finditer(code)})
+    mod.decls = sorted({d.group(1) for d in (_GO_DECL if ext == ".go" else _DECL).finditer(code)})
     if fam == "js":
         _js_imports(mod, rel, text, lines)
     elif fam == "kotlin" or ext == ".java":
         _kt_imports(mod, text, lines)
     elif ext == ".cs":
         _cs_imports(mod, code)
+    elif ext == ".go":
+        _go_imports(mod, rel, text, code)
     seen: set[tuple[int, str]] = set()
     found = []
     kotlin = fam == "kotlin"
@@ -576,9 +612,13 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     # One function per name (ids are module.name). Same-named spans merge: the
     # longest is the span (a type member `applyOp: (op: Op) => void;` loses to
     # its implementation), and the calls of every span are kept.
-    spans: dict[str, list[tuple[int, int]]] = {}
+    # Go: methods are keyed by their receiver type too (two types' String()
+    # are two functions), each type's in a module of its own, `<file>.<Type>`
+    go = ext == ".go"
+    spans: dict[tuple[str, str], list[tuple[int, int]]] = {}
     for a, b, name in sorted(found):
-        spans.setdefault(name, []).append((a, b))
+        rm = _GO_RECV.match(lines[a]) if go else None
+        spans.setdefault((rm.group(1) if rm else "", name), []).append((a, b))
     # declared types: per line (a function takes the ones on its lines), and
     # file-level ones from the lines outside every function (+ TS constructor
     # parameter properties)
@@ -616,13 +656,22 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 for m in pat_.finditer(ln):
                     fields.setdefault(m.group(1), set()).add(m.group(2))
         mod.bound = {k: "type:" + next(iter(v)) for k, v in fields.items() if len(v) == 1}
-    for name, ss in sorted(spans.items(), key=lambda kv: kv[1][0]):
+    subs: dict[str, Module] = {}
+    go_test = go and rel.endswith("_test.go")
+    for (recv, name), ss in sorted(spans.items(), key=lambda kv: kv[1][0]):
         a, b = max(ss, key=lambda s: s[1] - s[0])
-        # JUnit / kotlin.test: @Test on the declaration or the lines just above it
+        home = mod
+        if recv:
+            home = subs.get(recv)
+            if home is None:
+                home = subs[recv] = Module(f"{mod.name}.{recv}", rel, len(raw), raw, lines, owner=mod.name,
+                                           decls=[recv], aliases=mod.aliases, uses=mod.uses, bound=mod.bound)
         # JUnit / kotlin.test `@Test`, xUnit / NUnit / MSTest `[Fact]`, Rust `#[test]`
         annotated = fam in ("kotlin", "c", "rust") and any(_TEST_ATTR.search(raw[j]) for j in range(max(0, a - 3), a + 1))
-        f = Func(mod.name, name, rel, a + 1, b + 1, "\n".join(lines[a:b + 1]),
-                 kind="test" if (a, name) in tests or annotated else "func")
+        if go_test and not recv and _GO_TEST.match(name):
+            annotated = True  # func TestX(t *testing.T), BenchmarkX, ExampleX, FuzzX
+        f = Func(home.name, name, rel, a + 1, b + 1, "\n".join(lines[a:b + 1]),
+                 kind="test" if (a, name) in tests or annotated else "func", recv=recv)
         if kotlin:
             rm = re.search(_KT_RECV % re.escape(name), lines[a])
             if rm:
@@ -638,16 +687,18 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     f.bound[nm_] = "type:" + ty
                 for m in _CALL.finditer(lines[i]):
                     nm = m.group(2)
-                    if nm in _CALL_SKIP or (i == sa and (nm == name or m.start(2) < name_col)):
+                    if i == sa and (nm == name or m.start(2) < name_col):
                         continue
                     # `x().name(` / `a?.b.name(`: a method on something we can't
                     # name, qualified "." (not unqualified: that means in scope)
                     q = m.group(1) or ("." if lines[i][:m.start(2)].rstrip().endswith((".", "->")) else "")
+                    if nm in _CALL_SKIP and (not q or nm in _NOT_FUNC):
+                        continue  # (a keyword, or `String(`; `c.String()` is a call)
                     f.calls.append(Call(nm, q, i + 1))
                 if jsx:  # `<Widget ...>` renders (calls) the component Widget
                     for m in _JSX.finditer(lines[i]):
                         f.calls.append(Call(m.group(2), m.group(1) or "", i + 1))
-        mod.funcs.append(f)
+        home.funcs.append(f)
     top = Func(mod.name, "<top>", rel, 1, len(lines), "", kind="top")
     if ext == ".qml":
         # `Button {` instantiates Button.qml: a use of that component
@@ -657,4 +708,4 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 top.calls.append(Call(cm.group(1), cm.group(1), i + 1))
                 top.refs.add(cm.group(1))
     mod.funcs.append(top)
-    return [mod]
+    return [mod, *subs.values()]

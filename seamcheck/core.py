@@ -450,6 +450,8 @@ def _resolve_where(project: Project, where: str, cache: dict) -> str:
     names a package from outside the project (node_modules, the stdlib)."""
     if where.startswith("py:"):
         return _resolve_py(project, where, cache)
+    if where.startswith(("go:", "go?:")):
+        return _resolve_go(project, where.split(":", 1)[1], cache)
     if not where.startswith("js:"):
         return where
     d, _, spec = where[3:].partition("\0")
@@ -502,6 +504,38 @@ def _workspace_entry(project: Project, spec: str, cache: dict) -> str:
                     return cand
             return os.path.join(d, rest)
     return ""
+
+
+def _resolve_go(project: Project, path: str, cache: dict) -> str:
+    """A Go import path -> "pkg:<dir>#<name>" through the go.mod files'
+    module paths; EXTERNAL for the standard library and other modules."""
+    mods = cache.get("\0gomod")
+    if mods is None:
+        mods = []
+        for rel in project.files:
+            if rel == "go.mod" or rel.endswith("/go.mod"):
+                try:
+                    with open(os.path.join(project.root, rel), encoding="utf-8") as fh:
+                        mm = re.search(r"^module\s+(\S+)", fh.read(), re.M)
+                except OSError:
+                    continue
+                if mm:
+                    mods.append((mm.group(1).strip('"'), rel.rsplit("/", 1)[0] if "/" in rel else ""))
+        mods.sort(key=lambda x: -len(x[0]))  # the most specific module first
+        cache["\0gomod"] = mods
+        by_dir: dict[str, list[str]] = defaultdict(list)
+        for key in project.packages:
+            if "#" in key:
+                d, _, name = key.rpartition("#")
+                by_dir[d].append(key)
+        cache["\0godirs"] = by_dir
+    for mpath, mdir in mods:
+        if path == mpath or path.startswith(mpath + "/"):
+            d = os.path.normpath(os.path.join(mdir, path[len(mpath):].lstrip("/"))) if path != mpath else mdir
+            d = "" if d == "." else d
+            keys = [k for k in cache["\0godirs"].get(d, []) if not k.endswith("_test")]
+            return f"pkg:{keys[0]}" if len(keys) == 1 else ""
+    return EXTERNAL
 
 
 def _py_index(project: Project, cache: dict) -> dict[str, list[str]]:
@@ -661,6 +695,8 @@ def _resolve_imports(project: Project) -> None:
             if r == EXTERNAL:
                 ext.add(k)
             elif r:
+                if v.startswith("go?:") and r.startswith("pkg:"):
+                    k = r.rpartition("#")[2]  # imported without a name: the package's own name
                 aliases[k] = r
         for k, (v, n) in m.imported.items():
             r = res(v)
@@ -829,6 +865,8 @@ def _groups(project: Project) -> dict[str, str]:
 def _typed_targets(project: Project, mod: Module | None, ty: str, name: str, ext_cache: dict) -> tuple[list[Func], bool]:
     """The functions `x.name()` reaches when x is declared `ty`, and whether ty
     is a project type at all."""
+    if mod and mod.file.endswith(".go"):
+        return _go_typed(project, mod, ty, name)
     mods = []
     if mod and mod.file.endswith(".py") and (cls := _py_class(project, mod, ty)):
         mods.append(cls)
@@ -850,6 +888,32 @@ def _typed_targets(project: Project, mod: Module | None, ty: str, name: str, ext
             ext_cache.setdefault(("", ""), [])  # (built)
         hits = list(ext_cache.get((ty, name), []))
     return hits, bool(mods)
+
+
+def _go_typed(project: Project, mod: Module, ty: str, name: str) -> tuple[list[Func], bool]:
+    """Go `x.M()` with x declared a type of the caller's own package: that
+    type's method M, from whichever file of the package defines it."""
+    fm = project.modules.get(mod.owner, mod) if mod.owner else mod
+    idx = project.__dict__.setdefault("_go_types", {})
+    if not idx:
+        for m in project.modules.values():
+            if m.owner and m.file.endswith(".go"):
+                o = project.modules.get(m.owner)
+                if o and o.package:
+                    idx.setdefault((o.package, m.decls[0]), []).append(m.name)
+        idx.setdefault(("", ""), [])
+    pkg = fm.package
+    if "." in ty:  # `w tui.Window`: a type of an imported package
+        q, _, ty = ty.partition(".")
+        target = mod.aliases.get(q, "")
+        if not target.startswith("pkg:"):
+            return [], False  # another module's or the standard library's type
+        pkg = target[4:]
+    hits = [t for mn in idx.get((pkg, ty), []) if (t := project.funcs.get(f"{mn}.{name}"))]
+    if hits:
+        return hits, True
+    declared = any(ty in project.modules[mn].decls for mn in project.packages.get(pkg, []) if mn in project.modules)
+    return [], declared  # declared here and missed: an embedded type's method (a guess); else a builtin
 
 
 # A qualifier that is a module's name: `Enum`, `Foo.Bar`, `Vector3`. Not a
@@ -879,7 +943,7 @@ def _scoped_language(rel: str) -> bool:
     """A language where a bare name resolves only through the file's own
     definitions and imports. A plain .js script (a QML library, a browser
     script) sees globals from anywhere, so it is not."""
-    return os.path.splitext(rel)[1] in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts", ".py")
+    return os.path.splitext(rel)[1] in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts", ".py", ".go")
 
 
 _SELF = {"self", "this", "Self", "cls"}
@@ -993,15 +1057,15 @@ def _build_edges(project: Project) -> None:
                 # (A bare name in a Python method means the file's, not the class's.)
                 smod = project.modules.get(mod.owner, mod) if mod.owner else mod
                 hits = _in_scope(project, smod.name, c.name)
-                if not hits and c.name in mod.imported:
-                    w, n = mod.imported[c.name]
+                if not hits and c.name in smod.imported:
+                    w, n = smod.imported[c.name]
                     hits = _in_scope(project, w, n)
-                for w in ([] if hits else mod.uses):
+                for w in ([] if hits else smod.uses):
                     hits = _in_scope(project, w, c.name)
                     if hits:
                         break
-                if not hits and mod.package:
-                    hits = _in_scope(project, "pkg:" + mod.package, c.name)
+                if not hits and smod.package:
+                    hits = _in_scope(project, "pkg:" + smod.package, c.name)
                 if not hits and f.file.endswith(".py"):
                     # `Foo(...)` builds a Foo: its __init__
                     cls = _py_class(project, mod, c.name)
