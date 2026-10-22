@@ -75,7 +75,7 @@ _TS_TYPED = re.compile(r"(?:\b(?:const|let|var)\s+|[(,]\s*|^\s*)([A-Za-z_$][\w$]
 _TS_FIELD = re.compile(r"^\s*(?:(?:private|public|protected|readonly|static|declare)\s+)*([a-z_$][\w$]*)\s*[?!]?\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])\s*[;=]", re.M)
 _TS_PARAM_FIELD = re.compile(r"\b(?:private|public|protected|readonly)\s+([a-z_$][\w$]*)\s*\??\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])")
 # `Client client(...);` at a statement start, `QString name` as a parameter
-_CPP_VALUE = re.compile(r"(?:^|[(,])\s*(?:const\s+|final\s+)?([A-Z]\w*)\s+([a-z_]\w*)\s*(?=[({;=,)]|:(?!:))", re.M)
+_CPP_VALUE = re.compile(r"(?:^|[(,])\s*(?:const\s+|final\s+)?([A-Z]\w*(?:<[^;=(){}]*>)?)\s+([a-z_]\w*)\s*(?=[({;=,)]|:(?!:))", re.M)
 _CPP_TYPED = re.compile(r"(?<![\w:>])([A-Z]\w*)\s*[\*&]+\s*([a-z_]\w*)\s*(?=[,;=)\[{]|:(?!:)|$)", re.M)
 # a C++ class member in a header: `BoardModel* m_board = nullptr;`, `Hub m_hub;`
 _CPP_FIELD = re.compile(r"^\s*(?:(?:mutable|static|const|inline)\s+)*((?:std::|[A-Z])[\w:]*(?:<[^;()]*>)?)\s*[\*&]?\s*([a-z_]\w*)\s*(?:=[^;]*|\{[^;]*\})?;")
@@ -109,8 +109,8 @@ def _typed(tk: str, text: str) -> list[tuple[str, str]]:
     if tk == "js":
         return [(m.group(1), m.group(2)) for pat in (_TS_TYPED, _TS_NEW) for m in pat.finditer(text)]
     if tk in ("cpp", "jvm"):
-        out = [(m.group(2), m.group(1)) for pat in ((_CPP_TYPED, _CPP_VALUE) if tk == "cpp" else (_CPP_VALUE,))
-               for m in pat.finditer(text) if not _ALLCAPS.match(m.group(1))]
+        out = [(m.group(2), t) for pat in ((_CPP_TYPED, _CPP_VALUE) if tk == "cpp" else (_CPP_VALUE,))
+               for m in pat.finditer(text) if not _ALLCAPS.match(m.group(1)) and (t := type_name(m.group(1)))]
         if tk == "jvm":
             out += [(m.group(1), m.group(2)) for m in _JV_NEW.finditer(text)]
         return out
@@ -1140,6 +1140,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             annotated = True  # func TestX(t *testing.T), BenchmarkX, ExampleX, FuzzX
         f = Func(home.name, name, rel, a_ + 1, b_ + 1, "\n".join(lines[a_:b_ + 1]),
                  kind="test" if (a_, name) in tests or annotated else "func", recv=recv)
+        sig_end = bpos if bpos >= 0 else min(len(code), npos + 400)
+        sig = code[npos + len(name):sig_end]
         if kotlin:
             rm = re.search(_KT_RECV % re.escape(name), lines[a_])
             if rm:
@@ -1148,10 +1150,11 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             rm = re.match(r"\s*(?:<[^>]*>)?\s*\(\s*this\s+([\w.<>\[\]?]+)\s+\w+", code[npos + len(name):npos + len(name) + 300])
             if rm:
                 f.recv = type_name(rm.group(1)).rsplit(".", 1)[-1]
+                wm = re.search(rf"\bwhere\s+{re.escape(f.recv)}\s*:\s*([\w.<>]+)", sig)
+                if wm:  # `this TBuilder b ... where TBuilder : ResiliencePipelineBuilderBase`
+                    f.recv = type_name(wm.group(1)).rsplit(".", 1)[-1]
         # the declared return type
         line_start_pos = line_start[a_]
-        sig_end = bpos if bpos >= 0 else min(len(code), npos + 400)
-        sig = code[npos + len(name):sig_end]
         cls_name = (cls["name"] if cls else "") or (home.decls[-1] if home is not mod or recv else "")
         if (a_, name) not in tests:
             f.returns = _returns(tk, code[line_start_pos:npos], sig, name, cls_name)
