@@ -30,7 +30,8 @@ from .model import Func
 DEFAULT_TESTS = ["test/**", "tests/**", "**/test/**", "**/tests/**", "**/__tests__/**", "**/src/test/**",
                  "**/src/androidTest/**", "**/*.test.*", "**/*.spec.*", "**/*_test.*", "**/test_*.py",
                  "**/*Test.kt", "**/*Test.java", "**/*_spec.rb", "**/spec/**/*.rb",
-                 "**/test_*.rb"]
+                 "**/test_*.rb", "Tests/**", "**/Tests/**", "**/*Tests.swift", "**/*Tests.kt", "**/*Tests.java",
+                 "**/*.Tests/**", "**/*.Specs/**", "**/*Tests.cs", "**/*Test.cs"]
 DEFAULT_CORPUS = ["scripts/**", "config/**", "deploy/**", "priv/**", "rel/**", "bin/**", "tools/**", "Makefile",
                   "justfile", "*.toml", "*.json", "*.yml", "*.yaml", ".github/**", "**/*.service", "**/*.sh",
                   "**/*.tscn", "**/*.tres", "**/*.heex", "**/*.eex", "**/*.html", "**/AndroidManifest.xml",
