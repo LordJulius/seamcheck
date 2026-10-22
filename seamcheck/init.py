@@ -1,15 +1,17 @@
 """`seamcheck init`: a first seamcheck.toml for a repo that has none.
 
 It writes only what it can see: the languages present, the folders their code
-lives in (as `include` and as impact `areas`), and the test layout when it is
-not one of the usual ones. Rules are the project's to write; the file shows
+lives in (as `include` and as impact `areas`), the test layout when it is
+not one of the usual ones, and the rule packs of the frameworks it finds. Rules are the project's to write; the file shows
 one of each common kind, commented out, to start from. `--hook` also installs
 the pre-commit gate.
 """
 from __future__ import annotations
 
 import collections
+import json
 import os
+import re
 import stat
 
 from . import core
@@ -67,6 +69,47 @@ def _top_dirs(files: list[str]) -> dict[str, collections.Counter]:
     return out
 
 
+# a framework is in use when its manifest says so: pack -> (manifest names, what one holds)
+_FRAMEWORKS = {
+    "phoenix": (("mix.exs",), re.compile(r"\{:phoenix\b")),
+    "compose": (("build.gradle", "build.gradle.kts", "libs.versions.toml"),
+                re.compile(r"\bcompose\s*=\s*true|androidx\.compose|org\.jetbrains\.compose")),
+    "qml": (("CMakeLists.txt",), re.compile(r"Qt6?::Quick\b|\bqt_add_qml_module\b|\bQuick\b")),
+}
+
+
+def _uses_react(text: str) -> bool:
+    try:
+        pkg = json.loads(text)
+    except ValueError:
+        return False
+    return isinstance(pkg, dict) and any("react" in (pkg.get(k) or {}) for k in ("dependencies", "devDependencies", "peerDependencies"))
+
+
+def detect_packs(root: str, files: list[str]) -> list[str]:
+    """The rule packs (seamcheck/packs) whose framework a manifest declares.
+    QML needs its files too: a Qt Widgets app links Qt Quick for one view."""
+    manifests = {"package.json"} | {n for names, _ in _FRAMEWORKS.values() for n in names}
+    found = set()
+    for rel in files:
+        base = os.path.basename(rel)
+        if base not in manifests:
+            continue
+        try:
+            with open(os.path.join(root, rel), encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        if base == "package.json" and _uses_react(text):
+            found.add("react")
+        for pack, (names, rx) in _FRAMEWORKS.items():
+            if base in names and rx.search(text):
+                found.add(pack)
+    if not any(rel.endswith(".qml") for rel in files):
+        found.discard("qml")
+    return sorted(found)
+
+
 def render(root: str) -> tuple[str, list[str]]:
     """The config text, and a summary of what was found (one line each)."""
     files = core.list_files(root, ["**/*"], core.DEFAULT_EXCLUDE)
@@ -86,6 +129,10 @@ def render(root: str) -> tuple[str, list[str]]:
     name = os.path.basename(os.path.abspath(root))
     lines = ["# seamcheck config (https://github.com/LordJulius/seamcheck). Written by `seamcheck init`;",
              "# everything here is yours to change.", "", "[project]", f'name = "{name}"']
+    packs = detect_packs(root, files)
+    if packs:
+        lines.append("# rules true for any project on these frameworks (seamcheck/packs; override one by its id)")
+        lines.append("packs = [" + ", ".join(f'"{p}"' for p in packs) + "]")
     if include:
         lines.append("include = [" + ", ".join(f'"{g}"' for g in include) + "]")
     lines.append('exclude = ["**/generated/**", "**/*.min.js"]')
@@ -97,6 +144,8 @@ def render(root: str) -> tuple[str, list[str]]:
         lines += ["", "[tidy]", "tests = [" + ", ".join(f'"{g}"' for g in tidy.DEFAULT_TESTS + [f"{d}/**" for d in unusual]) + "]"]
     text = "\n".join(lines) + "\n" + _EXAMPLES
     summary = [f"{n:>6} files  {lang}" for lang, n in langs.most_common()]
+    if packs:
+        summary.append(f"rule packs: {', '.join(packs)}")
     if not langs:
         summary.append("no source files seamcheck reads (it reads " + ", ".join(sorted(set(_LANG.values()))) + ")")
     return text, summary

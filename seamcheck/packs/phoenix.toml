@@ -1,0 +1,30 @@
+# Phoenix / OTP: true for any project on the BEAM. Each rule guards a failure
+# the runtime makes silent or fatal, not a style. Turn on with
+# `[project] packs = ["phoenix"]`; ids become `phoenix/<id>`.
+
+[[rule]]
+id = "ets-owner"
+kind = "lint"
+lint = "ets-owner"
+why = "an ETS table dies with the process that made it: made in a request, it is gone when the request ends"
+
+[[rule]]
+id = "handle-info-catch-all"
+kind = "lint"
+lint = "handle-info-catch-all"
+why = "a subscribed process receives everything on its topics; the first message no clause matches crashes it"
+
+[[rule]]
+id = "rescue-logged-at-debug"
+kind = "lint"
+lint = "elixir-rescue-debug"
+why = "production drops debug logs: a failure rescued into Logger.debug happens invisibly"
+
+[[rule]]
+id = "no-atoms-from-strings"
+kind = "forbid"
+pattern = '\b(?:String|List)\.to_atom\(|:erlang\.(?:binary|list)_to_atom\('
+in = ["**/*.ex"]
+severity = "warn"
+why = "atoms are never garbage collected: atoms made from input fill the atom table and the node dies"
+message = "use String.to_existing_atom/1, or map the known strings to atoms"
