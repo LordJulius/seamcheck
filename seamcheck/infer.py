@@ -38,6 +38,13 @@ class Types:
         for m in project.modules.values():
             for d in m.decls:
                 self.by_type.setdefault(d, []).append(m.name)
+        for m in project.modules.values():  # `export { Hono as HonoBase }`: the class under its exported name
+            if not m.owner and m.file.endswith(_JS_EXTS) and m.raw and "export" in (txt := "\n".join(m.raw)):
+                for blk in re.finditer(r"\bexport\s*\{([^}]*)\}(?!\s*from)", txt):
+                    for a, b in re.findall(r"([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)", blk.group(1)):
+                        own = [mn for mn in self.by_type.get(a, ()) if project.modules[mn].file == m.file]
+                        if own and a != b:
+                            self.by_type.setdefault(b, []).extend(x for x in own if x not in self.by_type.get(b, []))
         for qname, cls in project.__dict__.get("_qml_names", {}).items():  # a C++ class registered under a QML name
             if qname != cls:
                 self.by_type.setdefault(qname, []).extend(self.by_type.get(cls, []))
@@ -118,6 +125,11 @@ class Types:
             if got:
                 prim = got
                 break
+        else:
+            if fm.file.endswith(_ES_MODULE) and all(self._es_module(p.modules[mn].file) for mn in prim):
+                # an ES module sees another module's type only by importing it: not imported,
+                # `Response` is the runtime's (not client/types.ts's interface Response)
+                return [], False, False
         prims = {self._primary(mn) for mn in prim}
         mods = list(dict.fromkeys(prim + [mn for mn in exts if mn not in prim]))
         # one type built per platform (battery-macos.cpp / battery-win.cpp, one
@@ -138,6 +150,17 @@ class Types:
                 up = os.path.dirname(up)
             cache[d] = up
         return cache[d]
+
+    def _es_module(self, rel: str) -> bool:
+        """A TS/JS file that is a module (imports or exports), not an ambient
+        `.d.ts` / script whose declarations are global."""
+        key = ("\0esm", rel)
+        if key not in self.cache:
+            mods = self.p.by_file.get(rel) or []
+            raw = "\n".join(mods[0].raw) if mods else ""
+            self.cache[key] = rel.endswith(_ES_MODULE) and not rel.endswith(".d.ts") and \
+                bool(re.search(r"^[ \t]*(?:import|export)\b", raw, re.M)) and "declare global" not in raw
+        return self.cache[key]
 
     def _primary(self, mn: str) -> str:
         """Which type a module is part of: a C++ class's header and source are
@@ -434,6 +457,8 @@ class Types:
         cur = self.first(mod, f, chain[0], depth, self_mods)
         for seg in chain[1:]:
             if cur is None or is_ext(cur):
+                if cur is not None and "[]" in chain[chain.index(seg):]:
+                    return None  # an element of a library collection (`shapes[0]`): could be a project object
                 return cur if cur is None else EXT
             cur = self.step(mod, cur, seg, depth)
         return cur
@@ -662,6 +687,7 @@ class Types:
         return got
 
 
+_ES_MODULE = (".ts", ".tsx", ".mts", ".cts")
 _JS_EXTS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".qml")
 _JS_GLOBALS = {"console", "window", "document", "navigator", "localStorage", "sessionStorage", "globalThis",
                "location", "history", "process", "performance", "crypto"}

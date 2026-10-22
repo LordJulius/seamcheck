@@ -18,6 +18,8 @@ _JS = [
     # `exports.foo = function (`, `app.use = function (`, `Foo.prototype.bar = async function (`:
     # an anonymous function stored as a property is called by that property's name
     re.compile(rf"^[ \t]*(?:{_ID}\.)+({_ID})[ \t]*=[ \t]*(?:async[ \t]+)?function[ \t]*\*?[ \t]*\(", re.M),
+    # `this.use = (arg, ...handlers) => {` in a constructor: a member of the class
+    re.compile(rf"^[ \t]*this\.({_ID})[ \t]*=[ \t]*(?:async[ \t]+)?(?:\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=\n]+?)?=>|{_ID}[ \t]*=>)", re.M),
     re.compile(rf"\b(?:const|let|var)\s+({_ID})\s*(?::[^=]+)?=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::\s*[^=]+)?=>|{_ID}\s*=>)"),
     # object-literal members (`applyOp: (op) => {`): a zustand store, a handler table
     re.compile(rf"^[ \t]*({_ID})[ \t]*:[ \t]*(?:async[ \t]+)?(?:function\b|\([^()\n]*\)[ \t]*(?::[^=\n]+)?=>|{_ID}[ \t]*=>)", re.M),
@@ -28,7 +30,7 @@ _JS = [
     # component's handlers, none of which were functions
     re.compile(rf"^[ \t]*(?:(?:public|private|protected|static|readonly|override|declare|export|default|const|let|var)[ \t]+)*({_ID})[ \t]*[?!]?[ \t]*"
                rf"(?::[^=\n]+)?=[ \t]*(?:async[ \t]+)?(?:<[^()]*?>[ \t]*)?"
-               rf"(?:\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=\n]+?)?=>|{_ID}[ \t]*=>)", re.M),
+               rf"(?:\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=;]+?)?=>|{_ID}[ \t]*=>)", re.M),
 ]
 _RUST = [re.compile(r"\bfn\s+([A-Za-z_]\w*)")]
 _KOTLIN = [re.compile(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?([A-Za-z_]\w*)\s*\(")]
@@ -937,10 +939,19 @@ def _assignments(tk: str, text: str) -> list[tuple[str, str]]:
             if ch:
                 out.append((m.group(1), "call:" + "\x1f".join(ch)))
             continue
+        lit = _LITERAL.get(tk, {}).get(rest[:1])
+        if lit and not re.match(r"[\[{][^\n]*?[\]}]\s*(?:\.|\[|\?\.)", rest):  # (`[a, b].map(...)` is no array)
+            out.append((m.group(1), "type:" + lit))  # `x = []`, `x = ""`: the language's own value
+            continue
         ch = expression(text, m.end())
         if ch:
             out.append((m.group(1), "expr:" + "\x1f".join(ch)))
     return out
+
+
+# what a literal on the right of `x =` builds
+_LITERAL = {"js": {"[": "Array", '"': "String", "'": "String", "`": "String"},
+            "py": {"[": "list", "{": "dict", '"': "str", "'": "str"}}
 
 
 def _own_return(code: str, bpos: int) -> str:
@@ -1270,8 +1281,9 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         if not chain:
             return mod, None
         inner = chain[-1]
+        member = code[max(0, npos - 5):npos] == "this."  # `this.use = (...) =>` in the constructor: the class's
         for fa, fb, _, fp in fspans:
-            if fp < npos and fa <= a_ <= fb and fp > inner["span"][0] and (fa, fp) != (a_, npos):
+            if fp < npos and fa <= a_ <= fb and fp > inner["span"][0] and (fa, fp) != (a_, npos) and not member:
                 return mod, None  # inside a method: a local function
         return class_module(chain), inner
     for c in classes:  # every class gets its module, methods or not (fields, an interface)

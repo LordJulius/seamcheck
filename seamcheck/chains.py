@@ -266,9 +266,14 @@ def type_name(text: str) -> str:
         # `Foo | None`, `Foo | null | undefined`
         parts = [p.strip() for p in re.split(r"\|(?![^<\[(]*[>\])])", t) if p.strip()]
         parts = [p for p in parts if p not in ("None", "null", "undefined", "nil", "void")]
+        if len(parts) > 1:  # `Response | Promise<Response>`: one type, sync or not
+            each = {type_name(p) for p in parts}
+            return each.pop() if len(each) == 1 else ""
         if len(parts) != 1:
             return ""
         t = parts[0]
+        if re.search(r"\[\s*\]\s*[?!]?$", t):
+            return "Array"  # `Foo[]`: an array (the language's), not a Foo
         m = re.match(r"^([\w.:$\\]+)\s*[<\[](.*)[>\]]\s*[?!*&]*$", t, re.S)
         if m:
             head = m.group(1).split("::")[-1].split(".")[-1]
