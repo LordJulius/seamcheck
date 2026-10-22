@@ -932,6 +932,9 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
             qn = re.match(r"(?:\s*::\s*[A-Za-z_]\w*)+", code[m.end():m.end() + 200])
             if qn:  # `struct Device::DevicePrivate {`: the nested type's own name
                 name = qn.group(0).rsplit("::", 1)[-1].strip()
+            sq = re.match(r"(?:\.[A-Za-z_]\w*)+", code[m.end():m.end() + 200]) if ext == ".swift" and kw == "extension" else None
+            if sq:  # `extension NameSpecification.Element {`: the nested type's own name
+                name = sq.group(0).rsplit(".", 1)[-1]
             if _ALLCAPS.match(name):  # `class KDECONNECTCORE_EXPORT NetworkPacket`: an export macro, then the name
                 nm2 = re.match(r"\s+([A-Za-z_]\w*)", code[m.end():m.end() + 200])
                 if nm2 and not _ALLCAPS.match(nm2.group(1)):
@@ -1386,7 +1389,7 @@ def _go_imports(mod: Module, rel: str, text: str, code: str) -> None:
         mod.aliases[name] = f"go:{path}" if alias else f"go?:{path}"
 
 
-def _bind_lambdas(f: Func, fam: str, body: str, open_: int, name: str, chain: tuple, targs: int) -> None:
+def _bind_lambdas(f: Func, fam: str, body: str, open_: int, name: str, chain: tuple, first_line: int, targs: int) -> None:
     """`run(x, b => b.go())`: `b` is whatever run's parameter at that place
     hands its callback ("lam:<arg>/<param>/<params>/<type args>\x1e<name>\x1e<chain>")."""
     if open_ >= len(body) or body[open_] != "(" or "\x1e" in name:
@@ -1396,22 +1399,24 @@ def _bind_lambdas(f: Func, fam: str, body: str, open_: int, name: str, chain: tu
         return
     args = lambdas.split_top(body[open_ + 1:close])
     found = lambdas.lambda_args(fam, args)
+    spans, at = [], open_ + 1
+    for a_ in args:  # each argument's extent in the body
+        spans.append((at, at + len(a_)))
+        at += len(a_) + 1
     if fam in ("kotlin", "swift"):  # a trailing lambda: `run(x) { b -> ... }`
         k = close + 1
         while k < len(body) and body[k] in " \t":
             k += 1
         if body[k:k + 1] == "{":
             found.append((len(args), lambdas.brace_lambda(fam, body[k:k + 200])))
+            spans.append((k, lambdas.matching(body, k)))
     for argi, names in found:
+        a_, b_ = spans[argi] if argi < len(spans) else (0, -1)
         for pi, nm_ in enumerate(names):
             if not nm_ or nm_ == "_":
                 continue
             spec = f"lam:{argi}/{pi}/{len(names)}/{targs}\x1e{name}\x1e" + "\x1f".join(chain)
-            held = f.bound.get(nm_)
-            if held is None:
-                f.bound[nm_] = spec
-            elif held.startswith("lam:") and held != spec:
-                f.bound[nm_] = "lam:?"  # (one name, two lambdas: neither says)
+            _bind_param(f, nm_, spec, body, a_, b_, first_line)  # (one name, two lambdas: neither says)
 
 
 _TRAILING_SKIP = {"get", "set", "init", "apply", "run", "with", "use", "synchronized", "async", "launch",
@@ -1424,23 +1429,46 @@ _TRAILING_SKIP = {"get", "set", "init", "apply", "run", "with", "use", "synchron
                   "override", "static", "final", "unowned", "weak", "convenience", "required", "dynamic", "indirect"}
 
 
-def _bind_closure(f: Func, fam: str, body: str, brace: int, name: str, chain: tuple) -> None:
+def _bind_closure(f: Func, fam: str, body: str, brace: int, name: str, chain: tuple, first_line: int = -1) -> None:
     """`xs.map { x -> ... }`: the closure's parameters, as the callee's sole
     (last) argument hands them."""
     names = lambdas.brace_lambda(fam, body[brace:brace + 400])
+    end = lambdas.matching(body, brace)
     for pi, nm_ in enumerate(names):
         if not nm_ or nm_ == "_":
             continue
         spec = f"lam:0/{pi}/{len(names)}/-1\x1e{name}\x1e" + "\x1f".join(chain)
-        held = f.bound.get(nm_)
-        if held is None:
-            f.bound[nm_] = spec
-        elif held.startswith("lam:") and held != spec:
-            f.bound[nm_] = "lam:?"
+        _bind_param(f, nm_, spec, body, brace, end, first_line)
+
+
+def _bind_param(f: Func, nm_: str, spec: str, body: str, a: int, b: int, first_line: int) -> None:
+    """A lambda parameter: for the whole function when no other lambda uses
+    the name, and (`\$0`, `it`, `e` in many closures) on the lambda's own lines."""
+    held = f.bound.get(nm_)
+    if held is None:
+        f.bound[nm_] = spec
+    elif held.startswith("lam:") and held != spec:
+        f.bound[nm_] = "lam:?"
+    elif not held.startswith("lam:"):
+        return  # (a framework's `req` / a declared type says more)
+    if first_line < 0 or b < a:
+        return
+    l0 = first_line + body.count("\n", 0, a) + 1
+    l1 = l0 + body.count("\n", a, b)
+    for ln_ in range(l0, l1 + 1):
+        key = f"{nm_}@{ln_}"
+        old = f.bound.get(key)
+        if old is None or (old.startswith("lam:") and b - a < _LAM_SIZE.get((id(f), key), 1 << 30)):
+            f.bound[key] = spec  # (the innermost lambda over a line wins)
+            _LAM_SIZE[(id(f), key)] = b - a
+
+
+_LAM_SIZE: dict = {}  # (function, "name@line") -> the extent of the lambda bound there
 
 
 def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     from . import chains
+    _LAM_SIZE.clear()
     chains.CALL_TARGS = rel.endswith(".cs")
     chains.TRAILING_CLOSURES = rel.endswith((".swift", ".kt", ".kts"))
     try:
@@ -2074,7 +2102,7 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     f.calls.append(Call(nm, q, i + 1, chain if q else (), m.start(2)))
                     if tk in ("jvm", "kotlin", "js", "swift", "rust"):
                         ta_ = m.group(0)[m.end(2) - m.start(0):].strip()
-                        _bind_lambdas(f, fam, body, off + m.end() - 1, nm, chain if q else (),
+                        _bind_lambdas(f, fam, body, off + m.end() - 1, nm, chain if q else (), sa,
                                       1 + _top_commas(ta_[1:ta_.rindex(">")]) if ta_.startswith("<") and ">" in ta_ else -1)
                     if ext == ".cs":
                         ta = m.group(0)[m.end(2) - m.start(0):].strip()
@@ -2086,9 +2114,9 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                         if tm.group(1):
                             tch = receiver(body, off + tm.start(2))
                             if tch:
-                                _bind_closure(f, fam, body, off + tm.end() - 1, tm.group(2), tch)
+                                _bind_closure(f, fam, body, off + tm.end() - 1, tm.group(2), tch, sa)
                         elif not re.search(r"[\w)\]>?]\s*$", ln[:tm.start(2)]):  # `performEvent { $0... }`: a bare call
-                            _bind_closure(f, fam, body, off + tm.end() - 1, tm.group(2), ())
+                            _bind_closure(f, fam, body, off + tm.end() - 1, tm.group(2), (), sa)
                 if jsx:  # `<Widget ...>` renders (calls) the component Widget
                     for m in _JSX.finditer(ln):
                         f.calls.append(Call(m.group(2), m.group(1) or "", i + 1))
