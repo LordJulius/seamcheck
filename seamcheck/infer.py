@@ -59,7 +59,8 @@ class Types:
         self.ext_fns: dict[tuple[str, str], list] = {}
         for g in project.funcs.values():
             if g.recv and not g.module.endswith("." + g.recv):
-                self.ext_fns.setdefault((g.recv, g.name), []).append(g)
+                for r in g.recv.split("|"):  # (C# overloads: one function, several receivers)
+                    self.ext_fns.setdefault((r, g.name), []).append(g)
 
     # --- types -> modules -----------------------------------------------------------
 
@@ -111,6 +112,11 @@ class Types:
                     return inner, len(inner) == 1, True
             name = last
         cands = self.by_type.get(name, [])
+        if not cands and "`" in name:  # `List`1` where only a plain `List` (Java, TS): that one
+            name = name.split("`")[0]
+            cands = self.by_type.get(name, [])
+        elif not cands:  # the plain name of a type only declared generic (`Foo` for `Foo<T>`, C#)
+            cands = [mn for k, v in self.by_type.items() if k.startswith(name + "`") for mn in v]
         if not cands:
             return [], False, False
         exts = [mn for mn in cands if p.modules[mn].kind == "ext"]
@@ -291,7 +297,8 @@ class Types:
             for a in self.ancestors(mn):
                 m = self.p.modules[a]
                 for d in (m.decls[:1] if m.owner or m.kind == "ext" else m.decls[-1:]):
-                    impls += [g for g in self.ext_fns.get((d, name), []) if g not in impls]
+                    impls += [g for g in (self.ext_fns.get((d, name)) or (self.ext_fns.get((d.split("`")[0], name), [])
+                                                                          if "`" in d else [])) if g not in impls]
             if impls:
                 return impls, False  # (extensions: the receiver's type is sure, each overload may be the one)
         return impls, False
@@ -531,7 +538,7 @@ class Types:
             return [mod.name]
         return None
 
-    def returns(self, g, self_mods, depth: int):
+    def returns(self, g, self_mods, depth: int, targs=None):
         if depth > _MAX or not g.returns:
             return None
         gm = self.p.modules.get(g.module)
@@ -539,6 +546,23 @@ class Types:
             return None
         if g.returns.startswith("expr:"):
             return self.chain(gm, g, tuple(g.returns[5:].split("\x1f")), depth + 1, self_mods=self_mods or self.own_class(gm, g))
+        if g.returns.startswith("byov:"):  # C# overloads returning different types: the call's
+            ovs = [(e.split("=", 1)[0].split("/"), e.split("=", 1)[1]) for e in g.returns[5:].split("|")]
+            want = targs if targs is not None else "0"
+            ovs = [o for o in ovs if o[0][1] == want] or ([] if targs is not None else ovs)
+            if any(o[0][0] for o in ovs):  # extension overloads: the one on the receiver's type
+                decls = {d_ for mn in self_mods or () for a in self.ancestors(mn)
+                         for m in [self.p.modules[a]] for d_ in (m.decls[:1] if m.owner or m.kind == "ext" else m.decls[-1:])}
+                decls |= {d_.split("`")[0] for d_ in decls}
+                ovs = [o for o in ovs if o[0][0] in decls] or ([] if self_mods else ovs)
+            tys = {t for _, t in ovs}
+            if len(tys) != 1 or not next(iter(tys)):
+                return None
+            ty = tys.pop()
+            if ty == "Self":
+                mods = self_mods or self.own_class(gm, g)
+                return ("inst", tuple(mods), True) if mods else None
+            return self.instance(gm, ty, self_mods)
         if g.returns == "Self":
             mods = self_mods or self.own_class(gm, g)
             return ("inst", tuple(mods), True) if mods else None
@@ -807,6 +831,12 @@ class Types:
         return [c for mn in mods if mn in self.p.modules and self.p.modules[mn].file.endswith(".py")
                 and not self.p.modules[mn].owner and (c := _py_class(self.p, self.p.modules[mn], name))]
 
+    def _nested(self, mn: str) -> bool:
+        """`<mod>.<name>` is a class nested in mod, not a file named with a
+        dot beside it (`ResilienceContextPool.Shared.cs`)."""
+        m = self.p.modules[mn]
+        return bool(m.owner) or m.file.endswith(".py")
+
     def step(self, mod, cur, seg: str, depth: int):
         kind, mods, exact = cur
         if seg in ("?", "!!"):
@@ -825,10 +855,13 @@ class Types:
             got = [mn for mn in self.by_type.get(seg, ()) if self._pkg_of(mn) == mods[0]]
             return ("static", tuple(got), True) if got else None
         if seg.endswith("()"):
-            name = seg[:-2]
+            name, targs = seg[:-2], None
+            if "`" in name:  # C# `Handle<E>()`: the overloads taking one type argument
+                name, targs = name.split("`")
             if kind == "static":
                 from .core import _in_scope
-                nested = [f"{mn}.{name}" for mn in mods if f"{mn}.{name}" in self.p.modules] or self._py_classes(mods, name)
+                nested = [f"{mn}.{name}" for mn in mods if f"{mn}.{name}" in self.p.modules and self._nested(f"{mn}.{name}")] \
+                    or self._py_classes(mods, name)  # (not the file `Pool.Shared.cs` beside `Pool.cs`)
                 if nested:  # `Request.Builder()`: builds the nested class (`httpx.Client()`: the class the package exports)
                     return ("inst", tuple(nested), len(nested) == 1)
                 hits = [h for mn in mods for h in _in_scope(self.p, mn, name)]
@@ -836,11 +869,14 @@ class Types:
                     hits, _ = self.method(list(mods), name)
             else:
                 hits, _ = self.method(list(mods), name)
+            if mod.file.endswith(".cs") and len(hits) > 1:
+                want = targs or "0"
+                hits = [g for g in hits if not g.targs or want in g.targs.split(",")] or hits
             if len(hits) == 1:
-                return self.returns(hits[0], list(mods) if kind == "inst" else None, depth + 1)
+                return self.returns(hits[0], list(mods) if kind == "inst" else None, depth + 1, targs)
             if hits and len({g.returns for g in hits}) == 1 and hits[0].returns:
                 # overloads that all return the same type: whichever runs, that is the value
-                return self.returns(hits[0], list(mods) if kind == "inst" else None, depth + 1)
+                return self.returns(hits[0], list(mods) if kind == "inst" else None, depth + 1, targs)
             if not hits:
                 if kind == "static" and seg == "new()" and mod.file.endswith((".gd", ".rb", ".rake", ".ru")):
                     return ("inst", mods, exact)  # `Foo.new()` (GDScript, Ruby): a Foo (no `new` of its own)
@@ -851,7 +887,8 @@ class Types:
             return None
         # a field / property / nested type
         if kind == "static":
-            inner = [f"{mn}.{seg}" for mn in mods if f"{mn}.{seg}" in self.p.modules] or self._py_classes(mods, seg)
+            inner = [f"{mn}.{seg}" for mn in mods if f"{mn}.{seg}" in self.p.modules and self._nested(f"{mn}.{seg}")] \
+                or self._py_classes(mods, seg)
             if inner:
                 return ("static", tuple(inner), len(inner) == 1)
             for mn in mods:

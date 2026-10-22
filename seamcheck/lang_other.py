@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 import re
 
-from .chains import expression, receiver, type_name
+from .chains import _top_commas, expression, generic_name, receiver, type_name
 from .model import Call, Func, Module
 from .scan import blank
 
@@ -44,7 +44,7 @@ _KOTLIN = [re.compile(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?([A-Za-z_]\w*)\s*\("
 _STMT = r"(?!(?:return|new|else|throw|await|yield|case|goto|using|lock|fixed|checked|unchecked)\b)"
 _JAVA = [re.compile(rf"^[ \t]*(?:@\w+(?:\([^)\n]*\))?[ \t]+)*{_STMT}(?:[\w<>\[\],.?]+[ \t]+){{1,6}}([A-Za-z_]\w*)[ \t]*"
                     r"\((?:[^;{}()]|\([^()]*\))*\)[ \t]*(?:throws [\w., ]+)?\s*\{", re.M)]
-_CS = [re.compile(rf"^[ \t]*(?:\[[^\]\n]*\][ \t]*)*{_STMT}(?:[\w<>\[\],.?]+[ \t]+){{1,6}}([A-Za-z_]\w*)[ \t]*(?:<[^>\n]*>)?[ \t]*"
+_CS = [re.compile(rf"^[ \t]*(?:\[[^\]\n]*\][ \t]*)*{_STMT}(?:(?:[\w<>\[\],.?]+|[\w.]*<?\((?:[^()\n;{{}}=]|\([^()\n]*\))*\)[>?\[\]]*)[ \t]+){{1,6}}([A-Za-z_]\w*)[ \t]*(?:<[^>\n]*>)?[ \t]*"
                   r"\((?:[^;{}()]|\([^()]*\))*\)[ \t]*(?::[ \t]*(?:base|this)[ \t]*\((?:[^;{}()]|\([^()]*\))*\))?"
                   r"(?:\s*where[^{;=]*)?\s*(?:\{|=>)", re.M)]
 _GO = [re.compile(r"^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(", re.M)]
@@ -91,7 +91,8 @@ _TS_FIELD = re.compile(r"^\s*(?:(?:private|public|protected|readonly|static|decl
 _TS_CONST = re.compile(r"^\s*(?:export\s+)?(?:declare\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])", re.M)
 _TS_PARAM_FIELD = re.compile(r"\b(?:private|public|protected|readonly)\s+([a-z_$][\w$]*)\s*\??\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])")
 # `Client client(...);` at a statement start, `QString name` as a parameter
-_CPP_VALUE = re.compile(r"(?:^|[(,])\s*(?:const\s+|final\s+)?([A-Z]\w*(?:\.[A-Z]\w*)*(?:<[^;=(){}]*>)?)\s+([a-z_]\w*)\s*(?=[({;=,)]|:(?!:))", re.M)
+_CPP_VALUE = re.compile(r"(?:^|[(,])\s*(?:(?:const|final|this|using|await\s+using|out|ref|in|params|scoped|readonly)\s+)*"
+                        r"([A-Z]\w*(?:\.[A-Z]\w*)*(?:<[^;=(){}]*>)?)\s+([a-z_]\w*)\s*(?=[({;=,)]|:(?!:)|in\s)", re.M)
 _CPP_TYPED = re.compile(r"(?<![\w:>])([A-Z]\w*)\s*[\*&]+\s*([a-z_]\w*)\s*(?=[,;=)\[{]|:(?!:)|$)", re.M)
 # a C++ class member in a header: `BoardModel* m_board = nullptr;`, `Hub m_hub;`
 _CPP_FIELD = re.compile(r"^\s*(?:(?:mutable|static|const|inline)\s+)*((?:std::|[A-Z])[\w:]*(?:<[^;()]*>)?)\s*[\*&]?\s*([a-z_]\w*)\s*(?:=[^;]*|\{[^;]*\})?;")
@@ -104,6 +105,10 @@ _ALLCAPS = re.compile(r"[A-Z0-9_]+$")
 _JV_NEW = re.compile(r"\b(?:var|val|final)\s+([a-z_]\w*)\s*=\s*new\s+([A-Z]\w*)\s*[(<{]")
 _JV_FIELD = re.compile(r"^\s*(?:(?:public|private|protected|internal|static|readonly|final|volatile|transient)\s+)*"
                        r"([A-Z]\w*)(?:<[^>;]*>)?\??\s+([a-z_]\w*)\s*(?:=[^;]*)?;")
+# C#: fields and properties (`public static Pool Shared { get; } = ...`, `Foo<T> _x;`, `Bar Baz => ...`)
+_CS_MEMBER = re.compile(r"^\s*(?:\[[^\]\n]*\]\s*)*(?:(?:public|private|protected|internal|static|readonly|virtual|override|abstract|sealed|"
+                        r"new|required|const|volatile|unsafe|extern|partial)\s+)*([A-Z][\w.]*(?:<[^;={}()]*>)?\??)\s+([A-Za-z_]\w*)\s*"
+                        r"(?:\{\s*(?:get|set|init|private|protected|internal)\b|=>|=(?![=>])|;)")
 # Go: `c *Command` / `var x Foo` (receivers, parameters, vars), `x := &Foo{`, and
 # struct fields (`flags *flagSet`). Go types may be lowercase (unexported).
 _GO_TYPED = re.compile(r"(?:\bvar\s+|[(,]\s*)([A-Za-z_]\w*)\s+\*?((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)(?=\s*[,)=]|\s*$)", re.M)
@@ -159,7 +164,8 @@ def _typed(tk: str, text: str) -> list[tuple[str, str]]:
         return [(m.group(1), m.group(2)) for pat in (_TS_TYPED, _TS_NEW) for m in pat.finditer(text)]
     if tk in ("cpp", "jvm"):
         out = [(m.group(2), t) for pat in ((_CPP_TYPED, _CPP_VALUE) if tk == "cpp" else (_CPP_VALUE,))
-               for m in pat.finditer(text) if not _ALLCAPS.match(m.group(1)) and (t := type_name(m.group(1)))]
+               for m in pat.finditer(text) if not _ALLCAPS.match(m.group(1))
+               and (t := (generic_name(m.group(1)) if tk == "jvm" else type_name(m.group(1))))]
         if tk == "jvm":
             out += [(m.group(1), m.group(2)) for m in _JV_NEW.finditer(text)]
         return out
@@ -938,6 +944,18 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
             if len(tail) == 2:
                 bases = [b.split("::")[-1].split(".")[-1].split("\\")[-1] for b in re.findall(r"[A-Za-z_$][\w$.:\\]*", tail[1])]
                 bases = [b for b in bases if b not in _BASE_SKIP]
+                if ext == ".cs":  # `: Policy<TResult>, IAsyncPolicy`: a generic base by its arity
+                    raw_tail = re.split(r":", re.sub(r"\bwhere\b.*", "", hdr, flags=re.S), maxsplit=1)
+                    if len(raw_tail) == 2:
+                        depth, last, parts = 0, 0, []
+                        for k2, ch2 in enumerate(raw_tail[1] + ","):
+                            depth += ch2 in "<(["
+                            depth -= ch2 in ">)]"
+                            if ch2 == "," and depth == 0:
+                                parts.append(raw_tail[1][last:k2])
+                                last = k2 + 1
+                        gb = [generic_name(x).split(".")[-1] for x in parts if generic_name(x)]
+                        bases = [b for b in gb if b.split("`")[0] not in _BASE_SKIP] or bases
         span = None
         if body is not None:
             d, j = 0, body
@@ -958,7 +976,9 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
         kind = "ext" if kw in ("extension", "impl") or re.search(r"\bpartial\b", code[max(0, m.start() - 40):m.end()]) else "class"
         if kw in ("interface", "protocol", "trait"):
             kind = "interface"
-        out.append({"name": name, "kw": kw, "bases": bases, "hdr": hdr, "pos": m.start(), "span": span, "kind": kind})
+        am = re.match(r"\s*<([^>{]*)>", hdr) if ext == ".cs" else None  # C#'s `class Builder<TResult>`
+        out.append({"name": name, "kw": kw, "bases": bases, "hdr": hdr, "pos": m.start(), "span": span, "kind": kind,
+                    "arity": (am.group(1).count(",") + 1) if am else 0})
     return out
 
 
@@ -1004,9 +1024,11 @@ def _returns(tk: str, prefix: str, sig: str, name: str, cls: str) -> str:
     if tk in ("jvm", "cpp"):
         p = re.sub(r"\[[^\]]*\]|@\w+(?:\([^)]*\))?", " ", prefix)  # attributes / annotations
         p = re.sub(r"\b\w+::\s*$", "", p.rstrip()).rstrip()  # `Foo* Class::` -> `Foo*`
+        if re.search(r"\)[?\[\]]*$", p):
+            return ""  # a C# tuple `(bool, object?) TryGet(`: no one class
         toks = re.findall(r"[\w.:]+(?:<[^;{}()]*>)?[?*&\[\]]*", p)
         toks = [t for t in toks if t not in _RET_MODS]
-        return type_name(toks[-1]) if toks else ""
+        return (generic_name(toks[-1]) if tk == "jvm" else type_name(toks[-1])) if toks else ""
     return ""
 
 
@@ -1191,9 +1213,21 @@ def _go_imports(mod: Module, rel: str, text: str, code: str) -> None:
 
 
 def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
+    from . import chains
+    chains.CALL_TARGS = rel.endswith(".cs")
+    try:
+        return _parse_brace(path, rel, text, res_of)
+    finally:
+        chains.CALL_TARGS = False
+
+
+def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     ext = "." + rel.rsplit(".", 1)[-1]
     fam, pats = LANGS[ext]
     code, strings = blank(text, fam)
+    if ext == ".cs":  # preprocessor lines (`#pragma warning disable` between a signature and its `=>`)
+        code = re.sub(r"(?m)^[ \t]*#[ \t]*(?:pragma|region|endregion|nullable|if|elif|else|endif|define|undef|warning|error|line)\b[^\n]*",
+                      lambda m: " " * len(m.group()), code)
     raw, lines = text.split("\n"), code.split("\n")
     mod = Module(_modname(rel), rel, len(raw), raw, lines)
     line_start = [0]
@@ -1359,6 +1393,11 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     # class is named like the file: Java / Kotlin / C# / Swift convention).
     # Go methods go by their receiver, C++ `Foo::bar` bodies by their class.
     classes = [] if go or qml else _classes(code, ext, fam)
+    plain: set = set()
+    if ext == ".cs":  # a generic class goes by `Name`N`, not by the plain name another class may hold
+        plain = {c["name"] for c in classes if not c.get("arity")}
+        gen = {c["name"] for c in classes if c.get("arity")} - plain
+        mod.decls = [d for d in mod.decls if d not in gen]
     for c in classes:
         if c["span"]:
             c["a"], c["b"] = line_of(c["span"][0]), line_of(c["span"][1])
@@ -1371,19 +1410,27 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     def enclosing_classes(pos: int) -> list[dict]:
         return sorted((c for c in classes if c["span"] and c["span"][0] < pos <= c["span"][1]), key=lambda c: c["span"][0])
 
+    def ckey(c: dict) -> str:  # C#: `PolicyBuilder` and `PolicyBuilder<T>` are two classes
+        return f"{c['name']}`{c['arity']}" if ext == ".cs" and c.get("arity") else c["name"]
+
     def class_module(chain: list[dict]) -> Module:
-        names = [c["name"] for c in chain if c["name"]]
+        names = [ckey(c) for c in chain if c["name"]]
         if not names:
             return mod
-        if len(names) == 1 and _stem_key(names[0]) == stem:
+        # (C#: `Foo<T>` in Foo.cs is the file's class unless a plain `Foo` is there too)
+        file_cls = _stem_key(names[0].split("`")[0] if names[0].split("`")[0] not in plain else names[0]) == stem
+        if len(names) == 1 and file_cls:
             home = mod
         else:
             # (a class nested in the file's own class: `OkHttpClient.Builder` is `<file>.Builder`)
-            path = names[1:] if _stem_key(names[0]) == stem else names
+            path = names[1:] if file_cls else names
             mname = f"{mod.name}.{'.'.join(path)}"
             home = mods.get(mname)
             if home is None:
-                home = mods[mname] = Module(mname, rel, len(raw), raw, lines, owner=mod.name, decls=[names[-1]],
+                arity = chain[-1].get("arity", 0) if chain[-1]["name"] else 0
+                last_ = names[-1].split("`")[0]
+                home = mods[mname] = Module(mname, rel, len(raw), raw, lines, owner=mod.name,
+                                            decls=[f"{last_}`{arity}" if arity else last_],
                                             aliases=mod.aliases, uses=mod.uses, imported=mod.imported)
         last = chain[-1] if chain[-1]["name"] else (chain[-2] if len(chain) > 1 else chain[-1])
         if last["kw"] == "companion":
@@ -1391,13 +1438,17 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         for b in last["bases"]:
             if b not in home.bases and b != names[-1]:
                 home.bases.append(b)
-        if home is not mod and last["kind"] == "ext" and not any(c["name"] == names[-1] and c["kind"] != "ext" for c in classes):
+        if home is not mod and last["kind"] == "ext" and not any(ckey(c) == names[-1] and c["kind"] != "ext" for c in classes):
             home.kind = "ext"
         elif home is not mod:
             home.kind = home.kind or ("interface" if last["kind"] == "interface" else "class")
         else:
             mod.kind = mod.kind or "class"
-            if names[-1] not in mod.decls:
+            arity = chain[-1].get("arity", 0) if chain[-1]["name"] else 0
+            if arity:
+                last_ = names[-1].split("`")[0]
+                mod.decls = [d for d in mod.decls if d != last_ or last_ in plain] + [f"{last_}`{arity}"]
+            elif names[-1] not in mod.decls:
                 mod.decls.append(names[-1])
         return home
 
@@ -1417,6 +1468,9 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         if c["name"] and (c["kw"] != "companion"):
             outer = enclosing_classes(c["pos"])
             class_module(outer + [c])
+    if ext == ".cs":  # a class with a module of its own is not the file's (`partial class Policy` in WrapExtensions.cs)
+        own_ = {d for m_ in mods.values() for d in m_.decls}
+        mod.decls = [d for d in mod.decls if d not in own_ or d.split("`")[0] in {c["name"] for c in classes if _stem_key(c["name"]) == stem}]
     # Go: methods are keyed by their receiver type (two types' String() are
     # two functions), each type's in a module of its own, `<file>.<Type>`
     spans: dict[tuple[str, str], list[tuple[int, int, int, int]]] = {}
@@ -1495,6 +1549,9 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     got_fields.setdefault(nm_, set()).add(ty)
             if fam == "js":
                 pass
+            elif ext == ".cs" and not inside[i]:
+                for m in _CS_MEMBER.finditer(ln):
+                    got_fields.setdefault(m.group(2), set()).add(generic_name(m.group(1).rstrip("?")))
             elif tk == "jvm" and not inside[i]:
                 for m in _JV_FIELD.finditer(ln):
                     got_fields.setdefault(m.group(2), set()).add(m.group(1))
@@ -1570,18 +1627,36 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             rm = re.search(_KT_RECV % re.escape(name), lines[a_])
             if rm:
                 f.recv = rm.group(1)
-        elif ext == ".cs":  # an extension method: `static bool IsPrimitive(this Type t)`
-            rm = re.match(r"\s*(?:<[^>]*>)?\s*\(\s*this\s+([\w.<>\[\]?]+)\s+\w+", code[npos + len(name):npos + len(name) + 300])
-            if rm:
-                f.recv = type_name(rm.group(1)).rsplit(".", 1)[-1]
-                wm = re.search(rf"\bwhere\s+{re.escape(f.recv)}\s*:\s*([\w.<>]+)", sig)
-                if wm:  # `this TBuilder b ... where TBuilder : ResiliencePipelineBuilderBase`
-                    f.recv = type_name(wm.group(1)).rsplit(".", 1)[-1]
+        elif ext == ".cs":  # overloads share one function: each one's type-parameter count, receiver, return type
+            recvs, by_ov, targs = [], [], set()
+            for _sa, _sb, np_, bp_ in ss:
+                after = code[np_ + len(name):np_ + len(name) + 300]
+                gm_ = re.match(r"\s*<([^<>()]*(?:<[^<>()]*>[^<>()]*)*)>\s*\(", after)
+                t_ = 1 + gm_.group(1).count(",") if gm_ else 0  # (`NoOp<TResult>()`: 1)
+                targs.add(t_)
+                sig_ = code[np_ + len(name):bp_ if bp_ >= 0 else np_ + 400]
+                rm = re.match(r"\s*(?:<[^>]*>)?\s*\(\s*this\s+([\w.<>\[\]?]+)\s+\w+", after)
+                r = ""
+                if rm:  # an extension method: `static bool IsPrimitive(this Type t)`
+                    r = generic_name(rm.group(1)).rsplit(".", 1)[-1]  # (`this PolicyBuilder<T> b`: PolicyBuilder`1)
+                    wm = re.search(rf"\bwhere\s+{re.escape(r)}\s*:\s*([\w.<>]+)", sig_)
+                    if wm:  # `this TBuilder b ... where TBuilder : ResiliencePipelineBuilderBase`
+                        r = generic_name(wm.group(1)).rsplit(".", 1)[-1]
+                    if r not in recvs:
+                        recvs.append(r)
+                rt = _returns(tk, code[code.rfind("\n", 0, np_) + 1:np_], sig_, name, cls["name"] if cls else "")
+                if f"{r}/{t_}={rt}" not in by_ov:
+                    by_ov.append(f"{r}/{t_}={rt}")
+            f.targs = ",".join(map(str, sorted(targs)))
+            if recvs:
+                f.recv = "|".join(recvs)
         # the declared return type
         line_start_pos = line_start[a_]
         cls_name = (cls["name"] if cls else "") or (home.decls[-1] if home is not mod or recv else "")
         if (a_, name) not in tests:
             f.returns = _returns(tk, code[line_start_pos:npos], sig, name, cls_name)
+            if ext == ".cs" and len({x.split("=", 1)[1] for x in by_ov}) > 1:
+                f.returns = "byov:" + "|".join(by_ov)  # overloads that return different types
             if not f.returns and bpos >= 0 and re.search(r"\breturn\s+(?:this|self|\$this)\s*[;\n}]", f.code):
                 f.returns = "Self"  # a builder step: `return this`
             if not f.returns and bpos >= 0:
@@ -1617,6 +1692,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     segs_ = held_[5:].split("\x1f") if held_.startswith("expr:") else []
                     if len(segs_) > 2 and segs_[0] == ty.split(".")[-1] and segs_[1] in ("new()", "builder()", "default()"):
                         continue  # `Foo::new()\n  .a()\n  .build()`: the chain's end, not a Foo
+                    if len(segs_) > 1 and segs_[0] == f"new {ty}()":
+                        continue  # `var x = new Builder().Add().Build()`: the chain's end, not a Builder
                     f.bound[nm_] = "type:" + ty
                 for m in _CALL.finditer(ln):
                     nm = m.group(2)
@@ -1631,6 +1708,9 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     if nm in _CALL_SKIP and (not q or (nm in _NOT_FUNC and nm != "new")):
                         continue  # (a keyword, or `String(`; `c.String()` and `Foo::new()` are calls)
                     f.calls.append(Call(nm, q, i + 1, chain if q else (), m.start(2)))
+                    if ext == ".cs":
+                        ta = m.group(0)[m.end(2) - m.start(0):].strip()
+                        f.calls[-1].targs = 1 + _top_commas(ta[1:ta.rindex(">")]) if ta.startswith("<") else 0
                 if jsx:  # `<Widget ...>` renders (calls) the component Widget
                     for m in _JSX.finditer(ln):
                         f.calls.append(Call(m.group(2), m.group(1) or "", i + 1))

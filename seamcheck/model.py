@@ -19,6 +19,7 @@ class Call:
     # ("self", "store", "get()"); () for a bare call (see chains.receiver)
     chain: tuple = ()
     col: int = -1  # 0-based column of the name (-1: unknown), for a language server's definition request
+    targs: int = -1  # C#: how many type arguments it passes (`Handle<E>()`: 1), -1 unknown
 
 
 @dataclass
@@ -38,6 +39,7 @@ class Func:
     recv: str = ""  # Kotlin extension function: the receiver type (`fun JSONObject.opt(`)
     returns: str = ""  # the declared return type's class ("Self": the class it is called on), "" unknown
     kind: str = "func"  # "func", "top" (module-level code), "private"...
+    targs: str = ""  # C#: its overloads' type-parameter counts ("0,1"), "" unknown
     id: str = ""  # "Module.name" (set in __post_init__; kept in sync when a module is renamed)
 
     def __post_init__(self) -> None:
