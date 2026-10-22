@@ -1226,6 +1226,19 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         home.funcs.append(f)
     if qml:
         _qml_types(mod, code, stem)
+    if go:  # `type Window interface { Top() int ... }`: a module listing the methods
+        for im in re.finditer(r"^type\s+([A-Za-z_]\w*)(?:\[[^\]]*\])?\s+interface\s*\{", code, re.M):
+            k, d = im.end(), 1
+            while k < len(code) and d:
+                d += code[k] == "{"
+                d -= code[k] == "}"
+                k += 1
+            names = re.findall(r"^\s*([A-Za-z_]\w*)\s*\(", code[im.end():k], re.M)
+            iname = f"{mod.name}.{im.group(1)}"
+            imod = mods.get(iname) or Module(iname, rel, len(raw), raw, lines, owner=mod.name, decls=[im.group(1)],
+                                             aliases=mod.aliases, uses=mod.uses, imported=mod.imported)
+            imod.kind, imod.methods = "interface", names
+            mods[iname] = imod
     top = Func(mod.name, "<top>", rel, 1, len(lines), "", kind="top")
     if ext == ".qml":
         # `Button {` instantiates Button.qml: a use of that component
