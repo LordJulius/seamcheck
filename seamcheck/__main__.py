@@ -135,6 +135,8 @@ def _main(argv=None) -> int:
     ap.add_argument("--seeds", default="1-4", help="fuzz: seeds, e.g. 1-8 or 3,7,19")
     ap.add_argument("--jobs", type=int, default=4, help="fuzz: runs at once")
     ap.add_argument("--limit", type=int, default=20, help="tidy reports: rows shown per list")
+    ap.add_argument("--precise", action="store_true",
+                    help="ask language servers where the calls the static resolver guesses go (see README)")
     ap.add_argument("--fuzzy", action="store_true", help="callers / callees / path / impact: also follow name-guess edges")
     ap.add_argument("--since", help="tidy reports: only files changed since this git ref; impact: start from the functions changed since it")
     ap.add_argument("--ids", action="store_true", help="tidy reports: only ids, one per line")
@@ -160,7 +162,7 @@ def _main(argv=None) -> int:
         return runcmd.main(a, root)
     if a.cmd == "tighten":
         return _tighten(root, a.config)
-    p = core.load(root, a.config, use_cache=not a.no_cache)
+    p = core.load(root, a.config, use_cache=not a.no_cache, precise=a.precise or None)
 
     if a.cmd in ("check", "map"):
         findings = (core.run_rules(p, a.only.split(",") if a.only else None, a.skip.split(",") if a.skip else None)
@@ -356,7 +358,8 @@ def _main(argv=None) -> int:
         print("and \"named\" is the part of it a project function's name matches (a resolver that turns")
         print("guesses into nothing shows up there):")
         if a.json:
-            print(json.dumps({ext: dict(zip(("exact", "guess", "nothing", "named"), v)) for ext, v in p.resolution.items()}))
+            out = {ext: dict(zip(("exact", "guess", "nothing", "named"), v)) for ext, v in p.resolution.items()}
+            print(json.dumps(dict(out, precise=p.precise) if p.precise else out))
             return 0
         for ext, (ex, fz, no, named) in sorted(p.resolution.items(), key=lambda kv: -sum(kv[1][:3])):
             n = ex + fz + no
@@ -365,6 +368,9 @@ def _main(argv=None) -> int:
             own = f"project calls exact {100 * ex // (ex + fz):>3}%" if ex + fz else ""
             print(f"  {ext or '(none)':<6} {n:>7}  exact {100 * ex // n:>3}%  guess {100 * fz // n:>3}%  "
                   f"nothing {100 * no // n:>3}% (named {100 * named // n:>2}%)   {own}")
+        if p.precise:
+            from . import precise
+            print(precise.summary(p.precise))
         return 0
     return 0
 
