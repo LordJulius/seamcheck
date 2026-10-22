@@ -1556,6 +1556,8 @@ def _build_edges(project: Project) -> None:
                 # the receiver's type, step by step (see infer.py)
                 types.line = c.line
                 v = types.chain(mod, f, c.chain)
+                if v is not None and v[0] == "wrap":
+                    v = infer.EXT  # `self.bump().map(...)`: Option's own method
                 if infer.is_ext(v):
                     # a library value; a Kotlin / C# / Swift extension the project
                     # declares on that library type is the one exception
