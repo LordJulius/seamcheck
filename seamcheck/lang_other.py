@@ -27,13 +27,19 @@ _JS = [
     # object-literal members (`applyOp: (op) => {`): a zustand store, a handler table
     re.compile(rf"^[ \t]*({_ID})[ \t]*:[ \t]*(?:async[ \t]+)?(?:function\b|\([^()\n]*\)[ \t]*(?::[^=\n]+)?=>|{_ID}[ \t]*=>)", re.M),
     # a method `name(params) {`; its parameters hold no string (`describe('x', function () {` is a call)
-    re.compile(rf"^\s*(?:(?:public|private|protected|static|async|get|set|override|readonly|export|default)\s+)*({_ID})\s*(?:<[^>\n]*>)?\s*\((?:[^;\n()'\"`]|\([^;\n()'\"`]*\))*\)\s*(?::\s*[^{{;\n]+)?\{{", re.M),
+    # (a generic may nest: `mutateElement<T extends Mutable<Element>>(`; the parameters may span lines)
+    re.compile(rf"^[ \t]*(?:(?:public|private|protected|static|async|get|set|override|readonly|export|default)\s+)*({_ID})[ \t]*"
+               rf"(?:<[^<>\n]*(?:<[^<>\n]*(?:<[^<>\n]*>[^<>\n]*)*>[^<>\n]*)*>)?\s*\((?:[^;()'\"`]|\([^;()'\"`]*\))*\)\s*(?::\s*[^{{;\n]+)?\{{", re.M),
     # class fields holding an arrow function (`private onPointerDown = (e) => {`,
     # `static create = <T,>(\n  {a, b}: Opts,\n) => {`): a React class
     # component's handlers, none of which were functions
     re.compile(rf"^[ \t]*(?:(?:public|private|protected|static|readonly|override|declare|export|default|const|let|var)[ \t]+)*({_ID})[ \t]*[?!]?[ \t]*"
                rf"(?::[^=\n]+)?=[ \t]*(?:async[ \t]+)?(?:<[^()]*?>[ \t]*)?"
                rf"(?:\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=;]+?)?=>|{_ID}[ \t]*=>)", re.M),
+    # a method's start only (`static createElement<T extends X>(\n  {a}: {b?: number;} = {},\n): R & {...} {`):
+    # the body scan below matches the brackets, and without a body it is a call
+    re.compile(rf"(?P<tsstart>)^[ \t]*(?:(?:public|private|protected|static|async|get|set|override|abstract)[ \t]+)*({_ID})[ \t]*"
+               rf"(?:<[^<>\n]*(?:<[^<>\n]*(?:<[^<>\n]*>[^<>\n]*)*>[^<>\n]*)*>)?[ \t]*\(", re.M),
 ]
 _RUST = [re.compile(r"\bfn\s+([A-Za-z_]\w*)")]
 _KOTLIN = [re.compile(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?([A-Za-z_]\w*)\s*\(")]
@@ -76,6 +82,12 @@ LANGS = {
 }
 # type declarations (Kotlin, Java, C#, TS, Rust, Go): their names qualify calls
 _DECL = re.compile(r"\b(?:class|object|interface|enum|struct|record|trait|type)\s+([A-Z][\w]*)")
+_TS_ALIAS = re.compile(r"\btype\s+([A-Z]\w*)\s*(?:<[^=;]*?>)?\s*=\s*[|&]?\s*([A-Za-z_$][\w$]*)")
+_TS_BUILTIN_TYPES = {"Map", "Set", "WeakMap", "WeakSet", "Array", "ReadonlyArray", "ReadonlyMap", "ReadonlySet", "Record",
+                     "Promise", "string", "number", "boolean", "bigint", "symbol", "object", "unknown", "any", "never",
+                     "Uint8Array", "Uint16Array", "Uint32Array", "Float32Array", "Float64Array", "ArrayBuffer", "DataView",
+                     "Date", "RegExp", "Error", "Function", "Blob", "File", "URL", "Headers", "Request", "Response",
+                     "HTMLElement", "Element", "Node", "Event", "MouseEvent", "KeyboardEvent", "PointerEvent", "Iterable"}
 # Declared types (no inference): `name: Type` in Kotlin / TS declarations and
 # parameters, `Type* name` / `Type& name` in C++. The type is one Capitalized
 # word (a generic `List<Foo>` is List, outside the project: its calls resolve
@@ -1278,7 +1290,11 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     # (C++: only definitions declare a type; `class QMouseEvent;` names one defined elsewhere)
     mod.decls = [] if ext in _CPP_EXTS else sorted({d.group(1) for d in (_GO_DECL if ext == ".go" else _SW_DECL if ext == ".swift" else
                                                                          _DECL).finditer(code)})
-    if fam == "js":
+    if fam == "js":  # `type X` declares only as `type X = ...` (not `import { type X }`), and an alias of a
+        # runtime type (`type ElementsMap = Map<...> & Brand`) is that library type, no project class
+        aliases = {m.group(1): m.group(2) for m in _TS_ALIAS.finditer(code)}
+        others = {m.group(1) for m in re.finditer(r"\b(?:class|interface|enum)\s+([A-Z]\w*)", code)}
+        mod.decls = [d for d in mod.decls if d in others or (d in aliases and aliases[d] not in _TS_BUILTIN_TYPES)]
         _js_imports(mod, rel, text, lines)
         _js_reexports(mod, rel, text, lines)
         if "require(" in text or "module.exports" in text:
@@ -1308,14 +1324,17 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     cpp = ext in (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h", ".c")
     qml = ext == ".qml"
     for pat in pats:
+        ts_start = "tsstart" in pat.groupindex
         for m in pat.finditer(code):
-            name = m.group(1)
+            name = m.group(2) if ts_start else m.group(1)
             if name in _NOT_FUNC and not (fam == "rust" and name == "new"):  # (`fn new` is every constructor)
                 continue
-            start_line = line_of(m.start(1))
+            npos_ = m.start(2) if ts_start else m.start(1)
+            start_line = line_of(npos_)
             if (start_line, name) in seen:
                 continue
-            seen.add((start_line, name))
+            if not ts_start:
+                seen.add((start_line, name))
             # Body: the first { after the signature (at paren depth 0), matched;
             # or, for `=> expr` / `= expr`, the rest of the statement.
             # (a match ending at `name(` is inside the parameters: a destructured
@@ -1350,6 +1369,11 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 elif ch in ")]":
                     depth -= 1
                 elif depth <= 0 and ch == "{":
+                    if fam == "js" and code[:k].rstrip()[-1:] in (":", "&", "|", ",", "<"):
+                        e_ = lambdas.matching(code, k)  # a type literal (`): R & { get(): R } {`), not the body
+                        if e_ > 0:
+                            k = e_ + 1
+                            continue
                     body_start = k
                     break
                 elif depth <= 0 and ch == ";":
@@ -1386,9 +1410,15 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             if qml and name.startswith("on") and body_start is None:
                 body_end = code.find("\n", m.end())  # `onX: expr` on one line
                 body_end = n - 1 if body_end < 0 else body_end
+            if ts_start:
+                close_ = lambdas.matching(code, m.end() - 1)
+                after_ = code[close_ + 1:body_start].strip() if close_ > 0 and body_start is not None else None
+                if after_ is None or (after_ and not after_.startswith(":")) or code[m.end():body_start].count("\n") > 40:
+                    continue  # a call statement (`foo(\n  a,\n)`), not a method: only `{` or `: Type {` follows
+            seen.add((start_line, name))  # (a start-only match claims its line only with a body)
             if body_end is None:
                 body_end = min(n - 1, m.end() + 200)
-            found.append((start_line, line_of(body_end), name, m.start(1), body_start if body_start is not None else -1))
+            found.append((start_line, line_of(body_end), name, npos_, body_start if body_start is not None else -1))
     tests: set[tuple[int, str]] = set()
     if fam == "js":
         # it("...") / test("...") blocks (vitest, jest, node:test): anonymous
