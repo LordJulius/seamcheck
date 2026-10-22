@@ -1554,6 +1554,7 @@ def _build_edges(project: Project) -> None:
                     targets = [(g, False) for g in stat]
             elif c.chain and mod:
                 # the receiver's type, step by step (see infer.py)
+                types.line = c.line
                 v = types.chain(mod, f, c.chain)
                 if infer.is_ext(v):
                     # a library value; a Kotlin / C# / Swift extension the project

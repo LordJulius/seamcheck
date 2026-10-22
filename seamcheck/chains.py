@@ -305,7 +305,7 @@ def _bare_first(segs) -> tuple:
 
 
 _WRAPPERS = {"Promise", "Task", "ValueTask", "Future", "Box", "Rc", "Arc", "Option", "Optional", "Result",
-             "Deferred", "Lazy", "Ref", "RefCell", "Cell", "Mutex", "RwLock", "Pin", "Cow", "Awaitable",
+             "Deferred", "Lazy", "LazyLock", "OnceCell", "OnceLock", "Ref", "RefCell", "Cell", "Mutex", "RwLock", "Pin", "Cow", "Awaitable",
              "Coroutine", "Observable", "Single", "Maybe", "NotRequired", "Required", "Final", "ClassVar",
              "Annotated", "ReadOnly", "Readonly", "WeakReference", "Nullable", "QPointer", "QSharedPointer",
              "QScopedPointer", "QWeakPointer", "unique_ptr", "shared_ptr", "weak_ptr", "optional", "Ptr",

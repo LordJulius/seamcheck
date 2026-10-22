@@ -1065,6 +1065,59 @@ def _return_text(tk: str, prefix: str, sig: str) -> str:
     return ""
 
 
+_RS_ARM = re.compile(r"(?:\b([A-Z]\w*)::)?\b([A-Z]\w*)\s*\(\s*(?:ref\s+)?(?:mut\s+)?([a-z_]\w*)\s*\)\s*(=>|=(?![=>]))")
+
+
+def _rs_arms(body: str, first_line: int):
+    """(name, 1-based line, "variant:<Enum::>Variant") for each line a
+    `Variant(x) =>` arm or an `if let Variant(x) = ...` block binds x on."""
+    out = []
+    starts = [0]
+    for ln in body.split("\n")[:-1]:
+        starts.append(starts[-1] + len(ln) + 1)
+
+    def line_at(pos):
+        lo, hi = 0, len(starts) - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if starts[mid] <= pos:
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo
+    for m in _RS_ARM.finditer(body):
+        if m.group(2) in ("Some", "Ok", "Err", "Box", "Rc", "Arc", "Cow", "Vec"):
+            continue
+        k = m.end()
+        while k < len(body) and body[k] in " \t\n":
+            k += 1
+        if m.group(4) == "=":  # `if let V(x) = expr {`: the block after
+            k = body.find("{", k)
+        if k < 0 or k >= len(body):
+            continue
+        if body[k] == "{":
+            end = lambdas.matching(body, k)
+        else:  # `V(x) => x.ino(),`: to the arm's `,` (or the match's `}`)
+            d, end = 0, k
+            while end < len(body) and end - k < 2000:
+                ch = body[end]
+                if ch in "([{":
+                    d += 1
+                elif ch in ")]}":
+                    if d == 0:
+                        break
+                    d -= 1
+                elif ch == "," and d == 0:
+                    break
+                end += 1
+        if end < 0:
+            continue
+        spec = "variant:" + (f"{m.group(1)}::" if m.group(1) else "") + m.group(2)
+        for ln_ in range(line_at(m.start()), line_at(end) + 1):
+            out.append((m.group(3), first_line + ln_ + 1, spec))
+    return out
+
+
 # `for x in xs` / `for (const x of xs)` / `foreach (var x in xs)`: x is an element of xs
 _LOOPS = {
     "rust": re.compile(r"\bfor\s+(?:&\s*)?(?:mut\s+)?([a-z_]\w*)\s+in\s+(?:&\s*(?:mut\s+)?)?"),
@@ -1400,6 +1453,11 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         _go_imports(mod, rel, text, code)
     elif ext == ".rs":
         _rs_imports(mod, rel, code)
+        # `pub static PROJECT_DIRS: Lazy<BatProjectDirs> = ...`: a module-level value of that type
+        for sm in re.finditer(r"^(?:pub(?:\([^)]*\))?\s+)?(?:static|const)\s+(?:mut\s+)?([A-Z_][A-Z0-9_]*)\s*:\s*([^=;]+?)\s*=", code, re.M):
+            t_ = type_name(sm.group(2))
+            if t_:
+                mod.bound.setdefault(sm.group(1), "type:" + t_)
         # `type Range = Match;`: another name for Match (top level, not an impl's associated type)
         for am in re.finditer(r"^(?:pub(?:\([^)]*\))?\s+)?type\s+([A-Z]\w*)\s*(?:<[^=;]*>)?\s*=\s*([^;]+);", code, re.M):
             t_ = type_name(am.group(2))
@@ -1677,6 +1735,7 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             for i in range(a_, min(b_ + 1, len(lines))):
                 inside[i] = True
         fields: dict[str, dict[str, set[str]]] = {}
+        enum_lines = {i for c in classes if c.get("kw") == "enum" and c["span"] for i in range(c["a"] + 1, c["b"] + 1)}
 
         def inside_any(i: int) -> bool:
             return inside[i]
@@ -1761,6 +1820,13 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     if m.group(1) not in _GO_KEYWORDS and m.group(2) not in _GO_KEYWORDS:
                         got_fields.setdefault(m.group(1), set()).add(m.group(2))
             elif tk == "rust" and not inside[i] and (home is not mod or i in line_class):  # (`struct Config` in config.rs too)
+                im = re.match(r"^\s*type\s+Item\s*=\s*([^;]+);", ln)
+                if im and (t := type_name(im.group(1))):  # `impl Iterator for X { type Item = Y;`: what iterating X gives
+                    got_fields.setdefault("type Item", set()).add(t)
+                if i in enum_lines:  # `Walkdir(walkdir::DirEntry),`: what that variant holds
+                    vm = re.match(r"^\s*([A-Z]\w*)\s*\(\s*([^()]+?)\s*,?\s*\)\s*,?\s*$", ln)
+                    if vm and len(lambdas.split_top(vm.group(2))) == 1 and (t := type_name(vm.group(2))):
+                        got_fields.setdefault("::" + vm.group(1), set()).add(t)
                 for m in _RS_FIELD.finditer(ln):
                     t = type_name(m.group(2))
                     if t:
@@ -1883,6 +1949,9 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 f.bound.setdefault(nm_, held)
             for nm_, held in _loop_bindings(tk, body):
                 f.bound.setdefault(nm_, held)
+            if tk == "rust":  # `Raw(ref x) => x.ino()`: x, on that arm's lines, is what the variant holds
+                for nm_, ln_, held in _rs_arms(body, sa):
+                    f.bound.setdefault(f"{nm_}@{ln_}", held)
             if fam == "js":  # `mixin(app, proto)` / `Object.assign(app, proto)`: app has proto's members
                 for mm in re.finditer(r"\b(?:Object\.assign|mixin|merge|extend|_\.extend|_\.assign)\s*\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*[,)]", body):
                     f.bound[mm.group(1)] = "expr:" + mm.group(2)

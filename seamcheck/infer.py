@@ -32,6 +32,8 @@ _MAX = 48  # how deep a chain, an `x = <expr>` or a return type may lead before 
 class Types:
     """Per-project indexes, built once after imports are resolved."""
 
+    line = 0  # the line of the call being resolved (a match arm's bindings hold on its lines only)
+
     def __init__(self, project):
         self.p = project
         self.by_type: dict[str, list[str]] = {}
@@ -117,6 +119,10 @@ class Types:
             cands = self.by_type.get(name, [])
         elif not cands:  # the plain name of a type only declared generic (`Foo` for `Foo<T>`, C#)
             cands = [mn for k, v in self.by_type.items() if k.startswith(name + "`") for mn in v]
+        if cands:  # a type is its own language family's (`Vec` in a .rs file is never a Python test's class)
+            from .core import _family
+            fam = _family(fm.file)
+            cands = [mn for mn in cands if fam & _family(p.modules[mn].file)]
         if not cands:
             return [], False, False
         exts = [mn for mn in cands if p.modules[mn].kind == "ext"]
@@ -362,6 +368,8 @@ class Types:
             return EXT if held[9:] in mod.external else None
         if held.startswith("pack:"):
             return self.pack_param(held[5:])
+        if held.startswith("variant:"):
+            return self.variant(mod, held[8:], f)
         if held.startswith("elem:"):
             return self.loop_element(mod, f, tuple(held[5:].split("\x1f")), depth)
         if held.startswith("lam:"):
@@ -370,6 +378,31 @@ class Types:
             g = self.fixture(mod, held[8:], f)
             return self.returns(g, None, depth + 1) if g is not None else None
         return None
+
+    def variant(self, mod, spec: str, f=None):
+        """What a Rust enum variant holds (`DirEntryInner::Raw(x)`: x is a
+        DirEntryRaw); without the enum named, every enum's variant of that name
+        must hold the one type."""
+        enum, _, name = spec.rpartition("::")
+        if enum == "Self":  # `Self::IoWrite(handle) =>` in the enum's own impl
+            own = self.own_class(mod, f)
+            got = self.field(list(own), "::" + name, 1) if own else None
+            return None if got is UNKNOWN else got
+        if enum:
+            mods, _, declared = self.type_modules(mod, enum)
+            got = self.field(mods, "::" + name, 1) if declared else None
+            return None if got is UNKNOWN else got
+        idx = self.cache.get("\0variants")
+        if idx is None:
+            idx = self.cache["\0variants"] = {}
+            for mn, m in self.p.modules.items():
+                for k, v in m.bound.items():
+                    if k.startswith("::"):
+                        idx.setdefault(k[2:], []).append((mn, v))
+        hits = idx.get(name, [])
+        if len({v for _, v in hits}) != 1:
+            return None
+        return self.held(self.p.modules[hits[0][0]], None, hits[0][1], 1)
 
     def loop_element(self, mod, f, chain: tuple, depth: int):
         """A for-loop variable: an element of what it iterates (a declared
@@ -392,6 +425,11 @@ class Types:
             hits = ([h for mn in v[1] for h in _in_scope(self.p, mn, name)] if v[0] == "static" else []) \
                 or self.method(list(v[1]), name)[0]
         els = {(g.module, g.relem) for g in hits if g.relem}
+        if hits and not els:  # `for seq in Offsets::new(line)`: a project iterator gives its `type Item`
+            v = self.chain(mod, f, chain, depth + 1)
+            if v is not None and not is_ext(v) and v is not UNKNOWN and v[0] == "inst":
+                got = self.field(list(v[1]), "type Item", depth)
+                return None if got is UNKNOWN else got
         if len(hits) == 0 or len({e for _, e in els}) != 1 or len(els) < len({g.id for g in hits}) and len(hits) > 1:
             return None
         gm_name, ty = els.pop()
@@ -774,6 +812,8 @@ class Types:
             return None
         if fm.bound.get(seg) == "qmlns:":
             return ("ns", (), True)
+        if f is not None and self.line and f"{seg}@{self.line}" in f.bound:  # a binding of that line only (a match arm)
+            return self.held(mod, f, f.bound[f"{seg}@{self.line}"], depth + 1, self_mods)
         if f is not None:
             held = f.bound.get(seg)
             if held and held.startswith("expr:") and held[5:].split("\x1f")[0] == seg:
