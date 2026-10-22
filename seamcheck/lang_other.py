@@ -17,6 +17,12 @@ _JS = [
     # object-literal members (`applyOp: (op) => {`): a zustand store, a handler table
     re.compile(rf"^[ \t]*({_ID})[ \t]*:[ \t]*(?:async[ \t]+)?(?:function\b|\([^()\n]*\)[ \t]*(?::[^=\n]+)?=>|{_ID}[ \t]*=>)", re.M),
     re.compile(rf"^\s*(?:(?:public|private|protected|static|async|get|set|override|readonly|export|default)\s+)*({_ID})\s*(?:<[^>\n]*>)?\s*\([^;\n]*\)\s*(?::\s*[^{{;\n]+)?\{{", re.M),
+    # class fields holding an arrow function (`private onPointerDown = (e) => {`,
+    # `static create = <T,>(\n  {a, b}: Opts,\n) => {`): a React class
+    # component's handlers, none of which were functions
+    re.compile(rf"^[ \t]*(?:(?:public|private|protected|static|readonly|override|declare)[ \t]+)*({_ID})[ \t]*[?!]?[ \t]*"
+               rf"(?::[^=\n]+)?=[ \t]*(?:async[ \t]+)?(?:<[^()]*?>[ \t]*)?"
+               rf"(?:\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=\n]+?)?=>|{_ID}[ \t]*=>)", re.M),
 ]
 _RUST = [re.compile(r"\bfn\s+([A-Za-z_]\w*)")]
 _KOTLIN = [re.compile(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?([A-Za-z_]\w*)\s*\(")]
@@ -120,7 +126,7 @@ _JSX = re.compile(r"<(?:([A-Za-z_$][\w$]*)\.)?([A-Z][\w$]*)(?=[\s/>]|$)")
 _NOT_FUNC = {"if", "for", "while", "switch", "catch", "return", "function", "else", "do", "try", "with", "new",
              "typeof", "match", "loop", "when", "sizeof", "constructor_", "super"}
 _CALL = re.compile(rf"(?:({_ID})\s*(?:\.|::|\?\.|->)\s*)?\b({_ID})\s*(?:::<[^()]*>|<[\w\s,<>\[\]]*>)?\s*\(")
-_CALL_SKIP = _NOT_FUNC | {"catch", "require", "import", "print", "println", "Some", "Ok", "Err", "Box", "Vec",
+_CALL_SKIP = _NOT_FUNC | {"async", "await", "catch", "require", "import", "print", "println", "Some", "Ok", "Err", "Box", "Vec",
                           "String", "assert", "setOf", "listOf", "mapOf"}
 
 _PY_BLOCK = re.compile(r"^(\s*)(?:async\s+)?(def|class)\s+([A-Za-z_]\w*)")
@@ -413,6 +419,28 @@ def _js_imports(mod: Module, rel: str, text: str, lines: list[str]) -> None:
             mod.aliases[default.group(1)] = where
 
 
+_JS_REEXPORT = re.compile(r"""^[ \t]*export[ \t]+(?!type\b)(\*|\{[^}]*\})[ \t]*from[ \t]*["']([^"']+)["']""", re.M)
+
+
+def _js_reexports(mod: Module, rel: str, text: str, lines: list[str]) -> None:
+    """A barrel's `export * from "./x"` and `export { a, b as c } from "./y"`:
+    a name looked up here leads on to where it is defined."""
+    d = rel.rsplit("/", 1)[0] if "/" in rel else ""
+    for m in _JS_REEXPORT.finditer(text):
+        ln = text.count("\n", 0, m.start())
+        if ln >= len(lines) or not lines[ln].strip().startswith("export"):
+            continue  # inside a comment
+        where = f"js:{d}\0{m.group(2)}"
+        if m.group(1) == "*":
+            mod.reexports.append(where)
+            continue
+        for part in m.group(1)[1:-1].split(","):
+            part = _JS_REEXPORT_SKIP.sub("", part.strip())
+            if part:
+                src, _, local = part.partition(" as ")
+                mod.imported.setdefault((local or src).strip(), (where, src.strip()))
+
+
 def _kt_imports(mod: Module, text: str, lines: list[str]) -> None:
     pm = _KT_PACKAGE.search(text)
     if pm:
@@ -502,6 +530,7 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     mod.decls = sorted({d.group(1) for d in (_GO_DECL if ext == ".go" else _DECL).finditer(code)})
     if fam == "js":
         _js_imports(mod, rel, text, lines)
+        _js_reexports(mod, rel, text, lines)
     elif fam == "kotlin" or ext == ".java":
         _kt_imports(mod, text, lines)
     elif ext == ".cs":
