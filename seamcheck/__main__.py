@@ -1,7 +1,8 @@
 """seamcheck: see the whole codebase at once, and check the rules between its
 parts. Deterministic, local, language-agnostic.
 
-  seamcheck check [--json] [--html out.html] [--only id,id] [--errors-only]
+  seamcheck init [--hook]                a first seamcheck.toml for this repo (+ the pre-commit gate)
+  seamcheck check [--format text|json|sarif|github] [--html out.html] [--only id,id] [--errors-only]
   seamcheck map --html out.html          interactive map of modules + calls + findings
   seamcheck callers NAME [--depth N]     who calls it (transitively; exact edges, --fuzzy adds guesses)
   seamcheck callees SPEC [--depth N]     what it calls (same)
@@ -51,7 +52,7 @@ import os
 import sys
 import time
 
-from . import core
+from . import __version__, core
 
 
 def _root(start: str) -> str:
@@ -94,13 +95,32 @@ def _tighten(root: str, extra: list[str]) -> int:
 
 
 def main(argv=None) -> int:
+    try:
+        rc = _main(argv)
+        sys.stdout.flush()
+        return rc
+    except BrokenPipeError:
+        # `seamcheck dead | head`: the reader left; that's not an error
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        return 0
+    except KeyboardInterrupt:
+        return 130
+
+
+def _main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="seamcheck", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["check", "map", "callers", "callees", "path", "find", "dead", "stats", "deps", "matrix", "tidy", "tests", "test-only", "unused", "dups", "split", "hotspots", "remove", "refs", "impact", "gate",
+    ap.add_argument("--version", action="version", version=f"seamcheck {__version__}")
+    ap.add_argument("cmd", choices=["init", "check", "map", "callers", "callees", "path", "find", "dead", "stats", "deps", "matrix", "tidy", "tests", "test-only", "unused", "dups", "split", "hotspots", "remove", "refs", "impact", "gate",
                                     "trace", "run", "fuzz", "tighten"])
     ap.add_argument("args", nargs="*")
     ap.add_argument("-C", dest="root", default=".")
     ap.add_argument("--config", action="append", default=[])
-    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--json", action="store_true", help="same as --format json")
+    ap.add_argument("--format", choices=["text", "json", "sarif", "github"], default="text",
+                    help="check / gate: json, sarif (code scanning) or github (Actions annotations on the diff)")
+    ap.add_argument("--hook", action="store_true", help="init: also install the pre-commit gate")
+    ap.add_argument("--force", action="store_true", help="init: overwrite an existing seamcheck.toml")
     ap.add_argument("--html")
     ap.add_argument("--only")
     ap.add_argument("--skip", help="check: leave out these rule ids")
@@ -127,6 +147,12 @@ def main(argv=None) -> int:
     tail = argv[argv.index("--") + 1:] if "--" in argv else []
     a = ap.parse_args(argv[:len(argv) - len(tail) - 1] if "--" in argv else argv)
     a.args += tail
+    if a.json:
+        a.format = "json"
+    a.json = a.format == "json"
+    if a.cmd == "init":
+        from . import init
+        return init.main(os.path.abspath(a.root), a.hook, a.force)
     root = _root(a.root) if not a.config else os.path.abspath(a.root)
     t0 = time.time()
     if a.cmd in ("trace", "run", "fuzz"):
@@ -147,8 +173,16 @@ def main(argv=None) -> int:
         if a.cmd == "map":
             print(f"map: {len(p.modules)} modules, {len(p.funcs)} functions -> {a.html or '(use --html out.html)'}")
             return 0
-        if a.json:
-            print(json.dumps([f.__dict__ for f in findings], indent=1))
+        if a.format != "text":
+            rules = {r["id"]: r for r in p.config.get("rule", [])}
+            flat = [dict(f.__dict__, why=rules.get(f.rule, {}).get("why", ""), fix=rules.get(f.rule, {}).get("fix", ""))
+                     for f in findings]
+            if a.format == "json":
+                print(json.dumps(flat, indent=1))
+            else:
+                from . import output
+                print(output.sarif(flat, {k: {"why": r.get("why", ""), "fix": r.get("fix", "")} for k, r in rules.items()})
+                      if a.format == "sarif" else output.github(flat))
         else:
             cur = None
             for f in findings:
