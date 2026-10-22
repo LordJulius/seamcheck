@@ -1207,8 +1207,12 @@ def _build_edges(project: Project) -> None:
                     else:
                         hits, on_type = types.method(list(mods_), c.name)
                     if hits:
-                        # on the type: one definition; through an interface: each implementation runs
-                        targets = [(h, ex and (len(hits) == 1 or not on_type)) for h in hits]
+                        # on the type: one definition (or one type's overloads); through an
+                        # interface: each implementation runs. Several same-named types and
+                        # only one has the method: the receiver's name settles it.
+                        sure = (ex and (len(hits) == 1 or not on_type or types.one_type(hits))) or \
+                            (on_type and types.one_type(hits))
+                        targets = [(h, sure) for h in hits]
                     elif kind != "pkg" and any(types.external_base(mn) for mn in mods_):
                         _nothing(project, f, c)  # inherited from a library supertype
                         continue
