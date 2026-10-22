@@ -723,6 +723,32 @@ def _php_imports(mod: Module, text: str, code: str) -> None:
                 mod.bound[local] = "type:" + name
 
 
+def _pack_signatures() -> list[tuple[str, list[str], re.Pattern]]:
+    """Every pack's [[param]] parameter lists (`(req, res` after an optional
+    `err`), as a function's or callback's parameters."""
+    from .config import available_packs, pack_params
+    out = []
+    for pid, entry in pack_params(available_packs()).items():
+        names = list(entry.get("names", []))
+        if names:
+            lst = r"\(\s*(?:[A-Za-z_$][\w$]*\s*,\s*)?" + r"\s*,\s*".join(map(re.escape, names)) + r"\s*(?:,[^()]*)?\)"
+            out.append((pid, names, re.compile(rf"(?:\bfunction\b[\s\w$]*{lst}|{lst}\s*=>)")))
+    return out
+
+
+_PACK_SIGS = _pack_signatures()
+
+
+def _pack_params(f: Func) -> None:
+    """Parameters a framework hands this function or a callback in it
+    (Express's `(req, res, next)`): "pack:<pack>/<id>:<name>", typed by core
+    when that pack is in force."""
+    for pid, names, rx in _PACK_SIGS:
+        if names[0] in f.code and rx.search(f.code):
+            for n in names:
+                f.bound.setdefault(n, f"pack:{pid}:{n}")
+
+
 # --- classes, return types, assignments (the type layer; see chains.py) ------------
 
 _CLASS = re.compile(
@@ -1375,6 +1401,7 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             for m_ in mods.values():
                 m_.bound = mod.bound
     go_test = go and rel.endswith("_test.go")
+    decl_pos = None
     for (hname, name), ss in sorted(spans.items(), key=lambda kv: kv[1][0]):
         a_, b_, npos, bpos = max(ss, key=lambda s_: s_[1] - s_[0])
         home, cls = owners[(hname, name)]
@@ -1388,6 +1415,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             annotated = True  # XCTest / PHPUnit `testX` methods, swift-testing `@Test`, PHPUnit `#[Test]` / `@test`
         f = Func(home.name, name, rel, a_ + 1, b_ + 1, "\n".join(lines[a_:b_ + 1]),
                  kind="test" if (a_, name) in tests or annotated else "func", recv=recv)
+        if fam == "js":
+            _pack_params(f)
         sig_end = bpos if bpos >= 0 else min(len(code), npos + 400)
         sig = code[npos + len(name):sig_end]
         if kotlin:
@@ -1419,6 +1448,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     if ch:
                         f.returns = "expr:" + "\x1f".join(ch)
         done: set[int] = set()
+        if decl_pos is None:  # where each function's name is declared: `exec(s) {` in a class is no call
+            decl_pos = {npos_ for _, _, _, npos_, _ in found}
         for sa, sb, _, _ in ss:
             name_col = max(0, lines[sa].find(name))  # the return type before it is no call (`Task<int> Run(`)
             body = "\n".join(lines[sa:sb + 1])
@@ -1438,7 +1469,7 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     f.bound[nm_] = "type:" + ty
                 for m in _CALL.finditer(ln):
                     nm = m.group(2)
-                    if i == sa and (nm == name or m.start(2) < name_col):
+                    if i == sa and (nm == name or m.start(2) < name_col) or line_start[i] + m.start(2) in decl_pos:
                         continue
                     chain = receiver(body, off + m.start(2))
                     q = m.group(1) or ("." if ln[:m.start(2)].rstrip().endswith((".", "->")) else "")

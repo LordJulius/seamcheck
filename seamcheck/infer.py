@@ -319,10 +319,37 @@ class Types:
             return ("inst", (held[4:],), True) if held[4:] in self.p.modules else None
         if held.startswith("expr:"):
             return self.chain(mod, f, tuple(held[5:].split("\x1f")), depth + 1, self_mods=self_mods)
+        if held.startswith("pack:"):
+            return self.pack_param(held[5:])
         if held.startswith("fixture:"):
             g = self.fixture(mod, held[8:], f)
             return self.returns(g, None, depth + 1) if g is not None else None
         return None
+
+    def pack_param(self, spec: str):
+        """A framework-given parameter ("express/handler:res"): the module its
+        pack names ("express:lib/response"), project code when the project is
+        that package (express itself), else the library's."""
+        pid, _, name = spec.rpartition(":")
+        entry = self.p.params.get(pid)
+        if not entry:
+            return None  # the framework isn't in use here: just a parameter
+        pkg, _, path = str(entry.get("types", {}).get(name, "")).partition(":")
+        if not pkg:
+            return None
+        if pkg == self._package_name() and path in self.p.modules:
+            return ("static", (path,), True)
+        return EXT
+
+    def _package_name(self) -> str:
+        if "\0pkgname" not in self.cache:
+            import json
+            try:
+                with open(os.path.join(self.p.root, "package.json"), encoding="utf-8") as fh:
+                    self.cache["\0pkgname"] = json.load(fh).get("name", "")
+            except (OSError, ValueError, AttributeError):
+                self.cache["\0pkgname"] = ""
+        return self.cache["\0pkgname"]
 
     def fixture(self, mod, name: str, f=None):
         """The pytest fixture a test's parameter names: its own class's, else
@@ -402,6 +429,8 @@ class Types:
             # `grep::printer::StandardBuilder::new()`: a path ending at a type the project declares starts there
             k = max((i for i, sg in enumerate(chain[:-1]) if sg[:1].isupper() and sg in self.by_type), default=0)
             chain = chain[k:]
+        if len(chain) > 1 and chain[-1] in _DOM_PROPS and mod.file.endswith(_JS_EXTS):
+            return EXT  # `el.classList`, `el.style`: the DOM's, whatever `el` is
         cur = self.first(mod, f, chain[0], depth, self_mods)
         for seg in chain[1:]:
             if cur is None or is_ext(cur):
@@ -505,6 +534,8 @@ class Types:
             return EXT  # a type or module the project doesn't declare
         if fm.file.endswith(".qml") and seg not in self.qml_names and seg not in ("parent", "model", "modelData", "index"):
             return EXT  # a name no project QML file declares: the window's / framework's
+        if seg in _JS_GLOBALS and fm.file.endswith(_JS_EXTS):
+            return EXT  # `console`, `window`, `document`: the runtime's (no project name took it)
         return self._rb_named(mod, seg)
 
     def _rb_named(self, mod, name: str):
@@ -631,6 +662,10 @@ class Types:
         return got
 
 
+_JS_EXTS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".qml")
+_JS_GLOBALS = {"console", "window", "document", "navigator", "localStorage", "sessionStorage", "globalThis",
+               "location", "history", "process", "performance", "crypto"}
+_DOM_PROPS = {"classList", "style", "dataset"}
 _EXPLICIT_SELF = (".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".php")
 _PY_BUILTIN_CALLS = {"vars", "dict", "list", "set", "frozenset", "tuple", "str", "bytes", "bytearray", "sorted",
                      "reversed", "enumerate", "zip", "map", "filter", "range", "iter", "repr", "format", "getattr",
