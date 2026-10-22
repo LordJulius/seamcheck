@@ -1,0 +1,41 @@
+# React: true for any React app. Turn on with `[project] packs = ["react"]`;
+# ids become `react/<id>`.
+
+[[rule]]
+id = "inert-control"
+kind = "lint"
+lint = "inert-control"
+in = ["**/*.tsx", "**/*.jsx"]
+skip = ["**/*.test.*", "**/*.spec.*", "**/tests/**", "**/__tests__/**", "**/examples/**", "**/*.stories.*"]
+why = "a button with no handler, or an input whose value nothing reads, looks like it works and does nothing"
+
+[[rule]]
+id = "disabled-by-data"
+kind = "lint"
+lint = "disabled-by-data"
+in = ["**/*.tsx", "**/*.jsx"]
+skip = ["**/*.test.*", "**/*.spec.*", "**/tests/**", "**/__tests__/**", "**/examples/**", "**/*.stories.*"]
+why = "a row disabled by its data (read, settled) can never be opened again; disable it only while work is in flight"
+
+[[rule]]
+id = "popup-clipped"
+kind = "lint"
+lint = "css-popup-clipped"
+why = "a popup placed outside its box under an overflow: hidden ancestor is cut off"
+
+[[rule]]
+id = "effect-not-async"
+kind = "forbid"
+pattern = '\buse(?:Layout)?Effect\(\s*async\b'
+in = ["**/*.tsx", "**/*.jsx", "**/*.ts", "**/*.js"]
+why = "an async effect returns a promise where React expects a cleanup function: the cleanup never runs"
+message = "define the async function inside the effect and call it"
+
+[[rule]]
+id = "state-not-assigned"
+kind = "forbid"
+pattern = '\bthis\.state\.[\w.\[\]]+\s*=(?!=)'
+in = ["**/*.tsx", "**/*.jsx"]
+allow = ["**:constructor"]
+why = "assigning this.state skips setState: nothing re-renders, and the next setState overwrites it"
+message = "use this.setState"

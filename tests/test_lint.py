@@ -427,6 +427,29 @@ class EtsOwner(unittest.TestCase):
     def test_tables_owned_by_a_process(self):
         self.assertEqual(lint("ets-owner", PMTILES_AFTER), [])
 
+    def test_a_callback_of_another_process_behaviour(self):
+        # plausible's Counters: a :gen_cycle process whose init_cycle makes the buffer's table
+        cycle = """
+            defmodule App.Counters do
+              @behaviour :gen_cycle
+              def child_spec(opts), do: %{id: __MODULE__, start: {:gen_cycle, :start_link, [{:local, __MODULE__}, __MODULE__, opts]}}
+
+              @impl true
+              def init_cycle(opts) do
+                App.Counters.Buffer.new(opts)
+                {:ok, opts}
+              end
+            end
+        """
+        buffer = "defmodule App.Counters.Buffer do\n  def new(o) do\n    :ets.new(:buf, [:public])\n  end\nend\n"
+        self.assertEqual(lint("ets-owner", {"lib/counters.ex": cycle, "lib/counters/buffer.ex": buffer}), [])
+
+    def test_a_table_only_test_setup_makes(self):
+        # hexpm: test_helper.exs calls Store.Memory.start(); the test run's process owns the table
+        store = "defmodule App.Store.Memory do\n  def start do\n    :ets.new(:store, [:named_table])\n  end\nend\n"
+        helper = "ExUnit.start()\nApp.Store.Memory.start()\n"
+        self.assertEqual(lint("ets-owner", {"lib/store/memory.ex": store, "test/test_helper.exs": helper}), [])
+
     def test_plug_init_is_not_a_process(self):
         plug = "defmodule App.Plug do\n  def init(o) do\n    :ets.new(:x, [:named_table])\n    o\n  end\nend\n"
         self.assertEqual(len(lint("ets-owner", {"lib/plug.ex": plug})), 1)

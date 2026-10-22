@@ -881,11 +881,13 @@ class _NamePart:
         return next(self.finditer(text), None)
 
 
-def gate(project, ref: str = "HEAD", staged: bool = False) -> dict:
+def gate(project, ref: str = "HEAD", staged: bool = False, extra: list[str] | None = None) -> dict:
     """What a change may not land with: rule errors anywhere (the repo is kept
     at zero), plus dead code, copies and do-nothing tests in the lines it
-    touched. Old debt in a touched file does not block; new debt does."""
-    from . import core
+    touched. Old debt in a touched file does not block; new debt does.
+    `exactness` (exactness.py) warns, never blocks. `extra`: the run's
+    --config files."""
+    from . import core, exactness
     lines = changed_lines(project, ref, staged)
     touched = {rel for rel in lines if rel in project.by_file or rel in project.files}
     # judged as new: changed lines minus code the change only moved
@@ -894,7 +896,8 @@ def gate(project, ref: str = "HEAD", staged: bool = False) -> dict:
     manifest_changed = sorted(r for r in lines if os.path.basename(r) in _MANIFESTS
                               and not _version_only(project.root, r, lines[r]))
     report = {"changed_files": sorted(lines), "rules": [], "forbidden": [], "unused": [], "test_only": [],
-              "dups": [], "tests": [], "moved_refs": []}
+              "dups": [], "tests": [], "moved_refs": [],
+              "exactness": exactness.drops(project, ref, set(lines), extra)}
     if not touched and not manifest_changed and not _rule_scoped(project, lines):
         return report
 

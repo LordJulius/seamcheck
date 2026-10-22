@@ -7,7 +7,7 @@ import collections
 import json
 import time
 
-from . import tidy
+from . import exactness, tidy
 
 
 def _loc(r: dict) -> str:
@@ -40,7 +40,7 @@ _FIX = {"forbidden": "retire the old path instead of naming a second one",
         "moved_refs": "point it at where the code went (or a glob), or `seamcheck: allow moved-ref`"}
 
 
-def gate_findings(p, rep: dict) -> list[dict]:
+def gate_findings(p, rep: dict, ref: str = "HEAD") -> list[dict]:
     """One flat list an agent (or a CI annotator) can act on: where, what, why
     it matters, how to fix."""
     whys = {r["id"]: r.get("why", "") for r in p.config.get("rule", [])}
@@ -57,7 +57,15 @@ def gate_findings(p, rep: dict) -> list[dict]:
     for d in rep["dups"]:
         flat.append({"kind": "dups", "rule": "dups", "severity": "error", "file": d["a"], "line": 0,
                      "message": f"copy of {d['b']} ({d['similarity']})", "why": "", "fix": _FIX["dups"]})
+    for d in rep.get("exactness", []):
+        flat.append({"kind": "exactness", "rule": "exactness", "severity": "warn", "file": d["file"], "line": 0,
+                     "message": exactness.message(d, ref), "why": exactness.WHY, "fix": exactness.FIX})
     return flat
+
+
+def gate_summary(p, rep: dict, ref: str = "HEAD") -> dict:
+    """`gate --json`: may it land, what changed, and the flat findings."""
+    return {"blocked": tidy.gate_failed(rep), "changed_files": rep["changed_files"], "findings": gate_findings(p, rep, ref)}
 
 
 def main(a, p, t0) -> int:
@@ -66,13 +74,14 @@ def main(a, p, t0) -> int:
     keep = (lambda rel: rel in only) if only is not None else (lambda rel: True)
 
     if a.cmd == "gate":
-        rep = tidy.gate(p, a.since or "HEAD", a.staged)
+        ref = a.since or "HEAD"
+        rep = tidy.gate(p, ref, a.staged, a.config)
         whys = {r["id"]: r.get("why", "") for r in p.config.get("rule", [])}
         if a.format != "text":
-            flat = gate_findings(p, rep)
+            out = gate_summary(p, rep, ref)
+            flat = out["findings"]
             if a.format == "json":
-                print(json.dumps({"blocked": tidy.gate_failed(rep), "changed_files": rep["changed_files"], "findings": flat,
-                                  "ms": int((time.time() - t0) * 1000)}, indent=1, default=list))
+                print(json.dumps(dict(out, ms=int((time.time() - t0) * 1000)), indent=1, default=list))
             else:
                 from . import output
                 print(output.sarif(flat) if a.format == "sarif" else output.github(flat))
@@ -97,6 +106,8 @@ def main(a, p, t0) -> int:
         for r in rep.get("moved_refs", []):
             print(f"  names {r['moved_from']}, which this change split up: {r['file']}:{r['line']}"
                   "  (point it at the new files or a glob)")
+        for d in rep["exactness"]:
+            print(f"  warning (not blocking): {exactness.message(d, ref)}\n      why: {exactness.WHY}; {exactness.FIX}")
         bad = tidy.gate_failed(rep)
         n = len(rep["changed_files"])
         print(f"seamcheck gate: {n} changed files; {'BLOCKED' if bad else 'clear'}"
