@@ -471,6 +471,12 @@ class Types:
         if key in self.cache:
             return self.cache[key]
         self.cache[key] = None  # (a lambda whose receiver is its own parameter)
+        if chain and name in _ELEMENT_HOFS and pi == _ELEMENT_HOFS[name]:
+            # `paths.iter().all(|p| ...)`, `xs.forEach(x => ...)`, `list.map { it }`: an element of the receiver
+            got = self.loop_element(mod, f, tuple(s_ for s_ in chain if s_ not in _ITER_SEGS) or chain, depth + 1)
+            if got is not None:
+                self.cache[key] = got
+                return got
         hits, shift = [], 0
         if chain:
             v = self.chain(mod, f, chain, depth + 1)
@@ -559,10 +565,19 @@ class Types:
                 pm = re.search(r"^\[package\][^\[]*?^name\s*=\s*\"([^\"]+)\"", text, re.M | re.S)
                 if pm:
                     own.add(pm.group(1).replace("-", "_"))
-                for sec in re.finditer(r"^\[(?:workspace\.)?(?:dev-|build-)?dependencies\]([^\[]*)", text, re.M):
-                    got |= {k.replace("-", "_") for k in re.findall(r"^([A-Za-z0-9_-]+)\s*=", sec.group(1), re.M)}
-                for sec in re.finditer(r"^\[(?:target\.[^\]]+\.)?(?:dev-|build-)?dependencies\.([A-Za-z0-9_-]+)\]", text, re.M):
-                    got.add(sec.group(1).replace("-", "_"))
+                section = ""  # (a section runs to the next `[header]` line, not the next `[`: `features = [...]`)
+                for line in text.splitlines():
+                    hm = re.match(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$", line)
+                    if hm:
+                        section = hm.group(1).strip()
+                        dm = re.match(r"^(?:workspace\.|target\.[^\]]+?\.)?(?:dev-|build-)?dependencies\.([A-Za-z0-9_-]+)$", section)
+                        if dm:
+                            got.add(dm.group(1).replace("-", "_"))
+                        continue
+                    if re.match(r"^(?:workspace\.|target\.[^\]]+?\.)?(?:dev-|build-)?dependencies$", section):
+                        km = re.match(r"^([A-Za-z0-9_-]+)\s*=", line)
+                        if km:
+                            got.add(km.group(1).replace("-", "_"))
             got -= own
             self.cache["\0rsext"] = got
         return got
@@ -744,6 +759,15 @@ class Types:
         if mod.file.endswith(".rs") and len(chain) > 1:
             # `grep::printer::StandardBuilder::new()`: a path ending at a type the project declares starts there
             k = max((i for i, sg in enumerate(chain[:-1]) if sg[:1].isupper() and sg in self.by_type), default=0)
+            path_ = [sg for sg in chain[:k] if sg not in ("crate", "self", "super")]
+            cands_ = self.by_type.get(chain[k], []) if k else []
+            if path_ and len(cands_) > 1 and start is None:
+                # `grep::regex::RegexMatcherBuilder`: of the crates declaring it, the one its path names
+                by_dir = [mn for mn in cands_ if any(f"/{sg}/" in "/" + self.p.modules[mn].file or
+                                                     f"/{sg.replace('grep_', '')}/" in "/" + self.p.modules[mn].file
+                                                     for sg in path_[-1:])]
+                if len(by_dir) == 1:
+                    return self.chain(mod, f, chain[k:], depth + 1, self_mods, start=("static", (by_dir[0],), True))
             chain = chain[k:]
         if len(chain) > 1 and chain[-1] in _DOM_PROPS and mod.file.endswith(_JS_EXTS):
             return EXT  # `el.classList`, `el.style`: the DOM's, whatever `el` is
@@ -872,6 +896,9 @@ class Types:
             target = fm.aliases[seg]
             if target.startswith("pkg:"):
                 return ("pkg", (target[4:],), True)
+            if fm.file.endswith(".rs") and target in p.modules and seg in p.modules[target].bound:
+                # `use crate::directories::PROJECT_DIRS;`: the static there, not its module
+                return self.held(p.modules[target], None, p.modules[target].bound[seg], depth + 1)
             if target in p.modules:
                 return ("static", (target,), True)
         if seg in fm.imported:
@@ -933,7 +960,7 @@ class Types:
         m = self.p.modules.get(where)
         if m is None or depth > 4:
             return None
-        if name in m.bound and not m.owner and m.file.endswith((".py",) + _JS_EXTS):
+        if name in m.bound and not m.owner and (m.file.endswith((".py",) + _JS_EXTS) or m.file.endswith(".rs") and name.isupper()):
             return m, name
         if name in m.imported:
             w, n = m.imported[name]
@@ -1134,6 +1161,17 @@ class Types:
         return got
 
 
+# collection methods whose callback gets an element (at that parameter: `fold(init, |acc, x|)` -> 1)
+_ELEMENT_HOFS = {n: 0 for n in ("map", "filter", "all", "any", "for_each", "find", "position", "flat_map", "filter_map",
+                                "take_while", "skip_while", "inspect", "max_by_key", "min_by_key", "sort_by_key",
+                                "partition", "find_map", "forEach", "some", "every", "findIndex", "findLast", "flatMap",
+                                "filterNot", "mapNotNull", "forEachIndexed", "associateBy", "groupBy", "sortedBy",
+                                "sortedByDescending", "first", "firstOrNull", "last", "lastOrNull", "count", "sumOf",
+                                "onEach", "compactMap", "contains", "allSatisfy", "removeAll", "Select", "Where",
+                                "Any", "All", "First", "FirstOrDefault", "ForEach", "SelectMany", "OrderBy")}
+_ELEMENT_HOFS.update({"fold": 1, "reduce": 1, "try_fold": 1, "mapIndexed": 1, "filterIndexed": 1})
+_ITER_SEGS = {"iter()", "iter_mut()", "into_iter()", "drain()", "asSequence()", "stream()", "lazy", "values()",
+              "copied()", "cloned()", "enumerate()", "rev()", "skip()", "take()", "peekable()", "by_ref()"}
 _ELEMENT_ACCESS = {"[]", "at()", "first()", "last()", "value()", "get()", "front()", "back()", "constFirst()",
                    "constLast()", "elementAt()", "getFirst()", "getLast()", "peek()", "poll()", "pop()", "find()"}
 _RS_PRIMS = r"u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32|f64|bool|char|str"
