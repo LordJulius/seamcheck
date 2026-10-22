@@ -22,7 +22,7 @@ _JS = [
     # class fields holding an arrow function (`private onPointerDown = (e) => {`,
     # `static create = <T,>(\n  {a, b}: Opts,\n) => {`): a React class
     # component's handlers, none of which were functions
-    re.compile(rf"^[ \t]*(?:(?:public|private|protected|static|readonly|override|declare)[ \t]+)*({_ID})[ \t]*[?!]?[ \t]*"
+    re.compile(rf"^[ \t]*(?:(?:public|private|protected|static|readonly|override|declare|export|default|const|let|var)[ \t]+)*({_ID})[ \t]*[?!]?[ \t]*"
                rf"(?::[^=\n]+)?=[ \t]*(?:async[ \t]+)?(?:<[^()]*?>[ \t]*)?"
                rf"(?:\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=\n]+?)?=>|{_ID}[ \t]*=>)", re.M),
 ]
@@ -309,10 +309,14 @@ def parse_python(path: str, rel: str, text: str, res_of=None) -> list[Module]:
 
 
 def _py_collect(f: Func, lines: list[str], a: int, b: int, first: bool) -> None:
+    body = "\n".join(lines[a:b + 1])
+    off = 0
     for i in range(a, b + 1):
         t = lines[i]
+        cut = 0
         if (first and i == a) or _PY_BLOCK.match(t):
-            t = t.split("(", 1)[1] if "(" in t else ""  # a (nested) def's own name is no call
+            cut = t.index("(") + 1 if "(" in t else len(t)  # a (nested) def's own name is no call
+            t = t[cut:]
         for m in _PY_CALL.finditer(t):
             name, q = m.group(2), m.group(1) or ""
             if not q:
@@ -323,7 +327,10 @@ def _py_collect(f: Func, lines: list[str], a: int, b: int, first: bool) -> None:
                     q = "."  # `x().name(` / `a[0].name(`: a method on something we can't name
                 elif name in _PY_SKIP:
                     continue
-            f.calls.append(Call(name, q, i + 1))
+            chain = receiver(body, off + cut + m.start(2)) if q and q != "super" else ()
+            if chain and q != ".":
+                q = chain[-1] if re.match(r"^\w+$", chain[-1]) else "."
+            f.calls.append(Call(name, q, i + 1, chain, cut + m.start(2)))
         if f.kind != "top":
             for m in _PY_NEW.finditer(t):
                 f.bound[m.group(1)] = "type:" + m.group(2)
@@ -331,6 +338,7 @@ def _py_collect(f: Func, lines: list[str], a: int, b: int, first: bool) -> None:
                 f.bound.setdefault(m.group(1), "type:" + m.group(2))
         for m in _PY_VALUE.finditer(t):
             f.refs.add(m.group(1))
+        off += len(lines[i]) + 1
 
 
 _KT_CONT_END = ("=", "+", "-", "*", "/", "%", "&&", "||", "?:", "(", "[", ",", "->", ".", "?.", "!", "<", ">", "..")
@@ -1109,7 +1117,7 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                         q = last if re.match(r"^[\w$]+$", last) else "."
                     if nm in _CALL_SKIP and (not q or (nm in _NOT_FUNC and nm != "new")):
                         continue  # (a keyword, or `String(`; `c.String()` and `Foo::new()` are calls)
-                    f.calls.append(Call(nm, q, i + 1, chain if q else ()))
+                    f.calls.append(Call(nm, q, i + 1, chain if q else (), m.start(2)))
                 if jsx:  # `<Widget ...>` renders (calls) the component Widget
                     for m in _JSX.finditer(ln):
                         f.calls.append(Call(m.group(2), m.group(1) or "", i + 1))
