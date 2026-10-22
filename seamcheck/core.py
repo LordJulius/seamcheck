@@ -1218,6 +1218,21 @@ _FAMILIES = {
 }
 
 
+# what Swift's standard types conform to (an extension of the protocol is theirs too)
+_SWIFT_SEQ = ("Sequence", "Collection", "BidirectionalCollection", "RandomAccessCollection", "Equatable", "Hashable")
+_SWIFT_CONFORMS = {
+    "String": ("StringProtocol", "RangeReplaceableCollection", "Comparable", "CustomStringConvertible") + _SWIFT_SEQ,
+    "Substring": ("StringProtocol", "RangeReplaceableCollection", "Comparable") + _SWIFT_SEQ,
+    "Array": ("MutableCollection", "RangeReplaceableCollection", "ExpressibleByArrayLiteral") + _SWIFT_SEQ,
+    "ArraySlice": ("MutableCollection", "RangeReplaceableCollection") + _SWIFT_SEQ,
+    "Range": _SWIFT_SEQ, "ClosedRange": _SWIFT_SEQ,
+    "Dictionary": ("Sequence", "Collection", "Equatable", "Hashable"),
+    "Set": ("Sequence", "Collection", "SetAlgebra", "Equatable", "Hashable"),
+    "Int": ("BinaryInteger", "FixedWidthInteger", "SignedInteger", "Numeric", "Comparable", "Equatable", "Hashable"),
+    "Double": ("BinaryFloatingPoint", "FloatingPoint", "Numeric", "Comparable", "Equatable", "Hashable"),
+    "Character": ("Comparable", "Equatable", "Hashable"),
+}
+
 # browser globals a project augments (`declare global { interface Window { h: ... } }`): what the
 # augmentation doesn't declare is the browser's
 _DOM_GLOBALS = {"Window", "Document", "Navigator", "HTMLElement", "Element", "Node", "EventTarget", "Event",
@@ -1598,6 +1613,10 @@ def _build_edges(project: Project) -> None:
                     # declares on that library type is the one exception
                     exts = (types.ext_fns.get((v[1][0], c.name), []) or
                             types.ext_fns.get((v[1][0].split("`")[0], c.name), [])) if v[1] else []
+                    if not exts and v[1] and f.file.endswith(".swift"):
+                        # `sample.wrapped(to:)` on a String: an extension of a protocol String conforms to
+                        exts = next((types.ext_fns[(pr, c.name)] for pr in _SWIFT_CONFORMS.get(v[1][0], ())
+                                     if (pr, c.name) in types.ext_fns), [])
                     if exts and f.file.endswith(".swift"):
                         exts = [g for g in exts if _swift_labels_match(project, mod, c, g)]
                     own = [g for g in exts if g.file == f.file]

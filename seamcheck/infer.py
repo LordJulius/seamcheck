@@ -564,6 +564,10 @@ class Types:
                     and name not in self._file_mod(mod).imported:
                 self.cache[key] = EXT  # `new Promise((resolve) => ...)`: what a runtime class hands its callback
                 return EXT
+            if not hits and mod.file.endswith((".swift", ".kt", ".kts")) and not self.p.by_name.get(name) \
+                    and not (name[:1].isupper() and self.type_modules(mod, name)[2]):
+                self.cache[key] = EXT  # `withCheckedContinuation { continuation in }`: no project function of that name
+                return EXT
         cands = []  # (type-parameter count, callee module, the lambda parameter's type)
         for g in hits:
             sh = shift if g.recv and g.file.endswith(".cs") else 0
@@ -950,6 +954,8 @@ class Types:
             return self._rb_named(mod, name)
         if seg == "<literal>":
             return EXT  # a string / array / number literal: the language's own type
+        if seg == "<range>":
+            return ("ext", ("Range",), True)
         if seg in ("(...)", "[]", "?", "!!"):
             return None
         if fm.bound.get(seg) == "qmlns:":
