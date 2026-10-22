@@ -494,5 +494,49 @@ class ElixirScripts(Base):
         self.assertEqual(self.exact("seeds.<top>"), {"App.Fake.start"})
 
 
+class GodotProjects(Base):
+    # godot-demo-projects: one repo, many Godot projects, each with its own OptionMenu
+    FILES = {
+        "a/project.godot": "", "b/project.godot": "",
+        "a/menu.gd": "class_name OptionMenu\nextends MenuButton\n\nfunc add_menu_item(x):\n\tpass\n",
+        "b/menu.gd": "class_name OptionMenu\nextends MenuButton\n\nfunc add_menu_item(x):\n\tpass\n",
+        "b/conductor.gd": "extends Node\nclass_name Conductor\n\nfunc play():\n\tpass\n",
+        "a/test.gd": "extends Node\n\n@onready var options: OptionMenu = $Options\n"
+                     "@onready var player := $Player as AnimationPlayer\n\n"
+                     "func _ready():\n\toptions.add_menu_item(1)\n\tplayer.play()\n",
+    }
+
+    def test_a_class_name_is_global_to_its_project(self):
+        got = self.exact("test._ready")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(self.p.funcs[next(iter(got))].file, "a/menu.gd")
+
+    def test_b_as_cast_types_a_variable(self):
+        self.assertFalse(self.guessed("test._ready"))  # player.play() is AnimationPlayer's, not Conductor's
+
+
+class QmlScope(Base):
+    FILES = {
+        "qml/main.qml": "import QtQuick\n\nItem\n{\n    id: appRoot\n    property Settings appSettings: Settings {}\n"
+                        "    function createWindow() {}\n}\n",
+        "qml/Settings.qml": "import QtQuick\n\nQtObject {\n    function load() {}\n    function toString() {}\n}\n",
+        "qml/Window.qml": "import QtQuick\nimport org.kde.app as App\n\nItem {\n    property url source\n"
+                          "    App.Phone { id: phone }\n    function go() {\n        appSettings.load()\n"
+                          "        appRoot.createWindow()\n        source.toString()\n        phone.ring()\n    }\n}\n",
+        "src/phone.h": "class PhoneImpl : public QObject {\npublic:\n    void ring();\n};\n"
+                       "class PhoneForeign {\n    Q_GADGET\n    QML_NAMED_ELEMENT(Phone)\n    QML_FOREIGN(PhoneImpl)\n};\n",
+        "src/phone.cpp": "#include \"phone.h\"\nvoid PhoneImpl::ring() {}\n",
+    }
+
+    def test_a_root_properties_and_ids_reach_child_components(self):
+        self.assertLessEqual({"qml/Settings.load", "qml/main.createWindow"}, self.exact("qml/Window.go"))
+
+    def test_b_named_foreign_element_is_its_cpp_class(self):
+        self.assertIn("src/phone.PhoneImpl.ring", self.exact("qml/Window.go"))
+
+    def test_c_value_type_property_is_qmls_own(self):
+        self.assertNotIn("qml/Settings.toString", self.exact("qml/Window.go") | self.guessed("qml/Window.go"))
+
+
 if __name__ == "__main__":
     unittest.main()
