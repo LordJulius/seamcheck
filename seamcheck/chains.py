@@ -51,6 +51,29 @@ def _ident_back(code: str, i: int) -> int:
     return k
 
 
+def _anonymous_class(code: str, i: int) -> str:
+    """code[i-1] is the `}` of `new Foo<T>(args) { ... }`: "new Foo()", else ""."""
+    k = _match_back(code, i, "}", "{")
+    if k < 0:
+        return ""
+    j = _skip_back_ws(code, k)
+    if j == 0 or code[j - 1] != ")":
+        return ""
+    k2 = _match_back(code, j, ")", "(")
+    if k2 < 0:
+        return ""
+    j2 = _skip_back_ws(code, k2)
+    if j2 > 0 and code[j2 - 1] == ">":
+        g = _match_back(code, j2, ">", "<")
+        if g < 0:
+            return ""
+        j2 = _skip_back_ws(code, g)
+    s = _ident_back(code, j2)
+    if s == j2 or not code[max(0, s - 4):s].endswith("new "):
+        return ""
+    return f"new {code[s:j2]}()"
+
+
 def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
     """The chain a call at `pos` (its name's first character) is made on, or
     () for a bare call. Segments: `name`, `name()`, `[]`, `?`, `!!`; `new X()`
@@ -91,7 +114,8 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                     j = _skip_back_ws(code, g)
             s = _ident_back(code, j)
             if s == j:  # `(expr).x`: a parenthesized expression
-                cast = re.search(r"\bas[!?]?\s+([A-Z][\w.]*)\s*[?]?\s*$", code[k + 1:i - 1])
+                cast = re.search(r"\bas[!?]?\s+([A-Z][\w.]*)\s*[?]?\s*$", code[k + 1:i - 1]) or \
+                    re.match(r"\s*\(\s*([A-Z][\w.]*)(?:<[^()]*>)?\s*\)\s*[\w$]", code[k + 1:i - 1])  # Java / C# `((Foo) x).y()`
                 segs.append(f"<as:{cast.group(1)}>" if cast else "(...)")  # `($Timer as Timer).start()`: a Timer
                 i = s
                 break
@@ -121,6 +145,9 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
             else:
                 segs.append("<literal>")  # `[1, 2].map(...)`: an array literal
                 break
+        elif ch == "}" and (anon := _anonymous_class(code, i)):
+            segs.append(anon)  # `new TypeToken<List<X>>() {}.getType()`: an instance of TypeToken
+            break
         elif ch in "\"'`":
             segs.append("<literal>")  # `"".join(...)`, `b"".join(...)`: a string's method
             break

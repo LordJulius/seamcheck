@@ -91,7 +91,7 @@ _TS_FIELD = re.compile(r"^\s*(?:(?:private|public|protected|readonly|static|decl
 _TS_CONST = re.compile(r"^\s*(?:export\s+)?(?:declare\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])", re.M)
 _TS_PARAM_FIELD = re.compile(r"\b(?:private|public|protected|readonly)\s+([a-z_$][\w$]*)\s*\??\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])")
 # `Client client(...);` at a statement start, `QString name` as a parameter
-_CPP_VALUE = re.compile(r"(?:^|[(,])\s*(?:const\s+|final\s+)?([A-Z]\w*(?:<[^;=(){}]*>)?)\s+([a-z_]\w*)\s*(?=[({;=,)]|:(?!:))", re.M)
+_CPP_VALUE = re.compile(r"(?:^|[(,])\s*(?:const\s+|final\s+)?([A-Z]\w*(?:\.[A-Z]\w*)*(?:<[^;=(){}]*>)?)\s+([a-z_]\w*)\s*(?=[({;=,)]|:(?!:))", re.M)
 _CPP_TYPED = re.compile(r"(?<![\w:>])([A-Z]\w*)\s*[\*&]+\s*([a-z_]\w*)\s*(?=[,;=)\[{]|:(?!:)|$)", re.M)
 # a C++ class member in a header: `BoardModel* m_board = nullptr;`, `Hub m_hub;`
 _CPP_FIELD = re.compile(r"^\s*(?:(?:mutable|static|const|inline)\s+)*((?:std::|[A-Z])[\w:]*(?:<[^;()]*>)?)\s*[\*&]?\s*([a-z_]\w*)\s*(?:=[^;]*|\{[^;]*\})?;")
@@ -194,7 +194,7 @@ _JS_TEST = re.compile(r"^[ \t]*(?:it|test)(?:\.(?:only|skip|todo|concurrent|each
 _JS_IMPORT = re.compile(r"""^[ \t]*import[ \t]+(?!type\b)([^;'"]*?)\s+from\s+["']([^"']+)["']""", re.M)
 _JS_REEXPORT_SKIP = re.compile(r"^\s*type\s+")
 _KT_PACKAGE = re.compile(r"^[ \t]*package[ \t]+([\w.]+)", re.M)
-_KT_IMPORT = re.compile(r"^[ \t]*import[ \t]+([\w.]+?)(\.\*)?(?:[ \t]+as[ \t]+(\w+))?[ \t]*;?[ \t]*$", re.M)
+_KT_IMPORT = re.compile(r"^[ \t]*import[ \t]+(?:static[ \t]+)?([\w.]+?)(\.\*)?(?:[ \t]+as[ \t]+(\w+))?[ \t]*;?[ \t]*$", re.M)
 _JSX = re.compile(r"<(?:([A-Za-z_$][\w$]*)\.)?([A-Z][\w$]*)(?=[\s/>]|$)")
 _NOT_FUNC = {"if", "for", "while", "switch", "catch", "return", "function", "else", "do", "try", "with", "new",
              "typeof", "match", "loop", "when", "sizeof", "constructor_", "super"}
