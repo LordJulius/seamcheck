@@ -8,7 +8,7 @@ import os
 import re
 
 from . import lambdas
-from .chains import _top_commas, expression, generic_name, receiver, type_name
+from .chains import _top_commas, elem_type, expression, generic_name, receiver, type_name
 from .model import Call, Func, Module
 from .scan import blank
 
@@ -1002,7 +1002,7 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
 
 # fields: Rust `pub name: Type,`, Swift `var name: Type` / `let name = Type(`,
 # PHP `private ?Type $name;` (and promoted constructor parameters)
-_RS_FIELD = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z_]\w*)\s*:\s*([^,]+?),?\s*$")
+_RS_FIELD = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z_]\w*)\s*:\s*([^,<]+?(?:<.*>)?[^,<]*?),?\s*$")
 _SW_FIELD = re.compile(r"^\s*(?:(?:private|public|internal|fileprivate|open|static|class|lazy|weak|unowned|final|override|nonisolated)"
                        r"(?:\([^)]*\))?\s+)*(?:let|var)\s+([A-Za-z_]\w*)\s*(?::\s*(\[[^\]=\n]*\][?!]?|[A-Z][\w.]*)|=\s*([A-Z]\w*)\s*\()")
 _PHP_FIELD = re.compile(r"(?:^\s*|[(,]\s*)(?:(?:public|private|protected|static|readonly|var)\s+)+\??([\\\w]+)\s+(\$\w+)")
@@ -1048,6 +1048,57 @@ def _returns(tk: str, prefix: str, sig: str, name: str, cls: str) -> str:
         toks = [t for t in toks if t not in _RET_MODS]
         return (generic_name(toks[-1]) if tk == "jvm" else type_name(toks[-1])) if toks else ""
     return ""
+
+
+def _return_text(tk: str, prefix: str, sig: str) -> str:
+    """The declared return type as written (`Vec<Match>`), for its element."""
+    pat = _RET_AFTER.get(tk)
+    if pat:
+        m = pat.search(sig)
+        return m.group(1).strip() if m else ""
+    if tk in ("jvm", "cpp"):
+        p = re.sub(r"\[[^\]]*\]|@\w+(?:\([^)]*\))?", " ", prefix) if tk == "jvm" else prefix
+        p = re.sub(r"\b\w+::\s*$", "", p.rstrip()).rstrip()
+        toks = re.findall(r"[\w.:]+(?:<[^;{}()]*>)?[?*&\[\]]*", p)
+        toks = [t for t in toks if t not in _RET_MODS]
+        return toks[-1] if toks else ""
+    return ""
+
+
+# `for x in xs` / `for (const x of xs)` / `foreach (var x in xs)`: x is an element of xs
+_LOOPS = {
+    "rust": re.compile(r"\bfor\s+(?:&\s*)?(?:mut\s+)?([a-z_]\w*)\s+in\s+(?:&\s*(?:mut\s+)?)?"),
+    "js": re.compile(r"\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+of\s+"),
+    "kotlin": re.compile(r"\bfor\s*\(\s*([a-z_]\w*)\s+in\s+"),
+    "swift": re.compile(r"\bfor\s+(?:case\s+let\s+|var\s+)?([a-z_]\w*)\s+in\s+"),
+    "go": re.compile(r"\bfor\s+[a-z_]\w*\s*,\s*([a-z_]\w*)\s*:=\s*range\s+"),
+    "jvm": re.compile(r"\bfor(?:each)?\s*\(\s*(?:final\s+)?var\s+([a-z_]\w*)\s*(?::|\bin\b)\s*"),
+    "cpp": re.compile(r"\bfor\s*\(\s*(?:const\s+)?auto\s*[&*]*\s*([a-z_]\w*)\s*:\s*"),
+}
+_ITER_ADAPTERS = {"iter()", "iter_mut()", "into_iter()", "drain()", "asSequence()", "asIterable()", "toList()",
+                  "toArray()", "entries()", "values()", "lazy"}
+
+
+def _loop_bindings(tk: str, text: str) -> list[tuple[str, str]]:
+    """(loop variable, "elem:<chain>") for each for-loop over a chain."""
+    pat = _LOOPS.get(tk)
+    if not pat:
+        return []
+    out = []
+    for m in pat.finditer(text):
+        if tk in ("rust", "swift", "go"):  # `for m in xs.iter() {`: the chain ends at the body's brace
+            brace = text.find("{", m.end())
+            ch = expression(text[:brace] + "\n", m.end()) if brace > 0 else ()
+        else:
+            ch = expression(text, m.end())
+        if not ch and tk in ("jvm", "cpp", "kotlin", "js"):  # (`for (x in xs)`: the chain ends at the `)`)
+            close = text.find(")", m.end())
+            ch = expression(text[:close] + "\n", m.end()) if close > 0 else ()
+        while ch and ch[-1] in _ITER_ADAPTERS:
+            ch = ch[:-1]
+        if ch:
+            out.append((m.group(1), "elem:" + "\x1f".join(ch)))
+    return out
 
 
 # `x = <expr>`: the local takes the expression's type
@@ -1349,6 +1400,11 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         _go_imports(mod, rel, text, code)
     elif ext == ".rs":
         _rs_imports(mod, rel, code)
+        # `type Range = Match;`: another name for Match (top level, not an impl's associated type)
+        for am in re.finditer(r"^(?:pub(?:\([^)]*\))?\s+)?type\s+([A-Z]\w*)\s*(?:<[^=;]*>)?\s*=\s*([^;]+);", code, re.M):
+            t_ = type_name(am.group(2))
+            if t_ and t_ != am.group(1):
+                mod.bound.setdefault(am.group(1), "type:" + t_)
     elif ext == ".swift":
         _swift_imports(mod, rel, code)
     elif ext == ".php":
@@ -1781,14 +1837,19 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             f.targs = ",".join(map(str, sorted(targs)))
             if recvs:
                 f.recv = "|".join(recvs)
-        if tk in ("jvm", "kotlin", "js", "swift"):  # each overload's parameter types (a callback's type for its lambda)
+        if tk in ("jvm", "kotlin", "js", "swift", "rust"):  # each overload's parameter types (a callback's type for its lambda)
             ovs = []
             for _sa, _sb, np_, _bp in ss:
                 k = code.find("(", np_ + len(name), np_ + len(name) + 300)
                 e = lambdas.matching(code, k) if k >= 0 else -1
                 gm_ = re.match(r"\s*<([^<>()]*(?:<[^<>()]*>[^<>()]*)*)>\s*\(", code[np_ + len(name):k + 1]) if k >= 0 else None
+                pts = lambdas.param_types(tk, code[k + 1:e]) if e > 0 else []
+                if tk == "rust" and e > 0:  # `F` -> its bound: `<F: FnMut(Match) -> bool>` / `where F: FnMut(...)`
+                    bounds = dict(re.findall(r"\b([A-Z]\w*)\s*:\s*((?:Fn|FnMut|FnOnce)\s*\([^)]*\)(?:\s*->\s*[^,{>]+)?)",
+                                             code[np_:np_ + len(name) + (k - np_ - len(name))] + code[e:e + 400].split("{")[0]))
+                    pts = [bounds.get(re.sub(r"^&\s*(?:mut\s+)?", "", t_).strip(), t_) for t_ in pts]
                 ov = (f"{1 + gm_.group(1).count(',') if gm_ else 0}{lambdas.TARGS}"  # (its type-parameter count first)
-                      + lambdas.PARAM.join(lambdas.param_types(tk, code[k + 1:e]))) if e > 0 else ""
+                      + lambdas.PARAM.join(pts)) if e > 0 else ""
                 if e > 0 and ov not in ovs:
                     ovs.append(ov)
             f.ptypes = lambdas.OV.join(ovs)
@@ -1797,6 +1858,7 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         cls_name = (cls["name"] if cls else "") or (home.decls[-1] if home is not mod or recv else "")
         if (a_, name) not in tests:
             f.returns = _returns(tk, code[line_start_pos:npos], sig, name, cls_name)
+            f.relem = elem_type(_return_text(tk, code[line_start_pos:npos], sig))
             if ext == ".cs" and len({x.split("=", 1)[1] for x in by_ov}) > 1:
                 f.returns = "byov:" + "|".join(by_ov)  # overloads that return different types
             if not f.returns and bpos >= 0 and re.search(r"\breturn\s+(?:this|self|\$this)\s*[;\n}]", f.code):
@@ -1818,6 +1880,8 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             name_col = max(0, lines[sa].find(name))  # the return type before it is no call (`Task<int> Run(`)
             body = "\n".join(lines[sa:sb + 1])
             for nm_, held in _assignments(tk, body):
+                f.bound.setdefault(nm_, held)
+            for nm_, held in _loop_bindings(tk, body):
                 f.bound.setdefault(nm_, held)
             if fam == "js":  # `mixin(app, proto)` / `Object.assign(app, proto)`: app has proto's members
                 for mm in re.finditer(r"\b(?:Object\.assign|mixin|merge|extend|_\.extend|_\.assign)\s*\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*[,)]", body):
@@ -1850,7 +1914,7 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     if nm in _CALL_SKIP and (not q or (nm in _NOT_FUNC and nm != "new")):
                         continue  # (a keyword, or `String(`; `c.String()` and `Foo::new()` are calls)
                     f.calls.append(Call(nm, q, i + 1, chain if q else (), m.start(2)))
-                    if tk in ("jvm", "kotlin", "js", "swift"):
+                    if tk in ("jvm", "kotlin", "js", "swift", "rust"):
                         ta_ = m.group(0)[m.end(2) - m.start(0):].strip()
                         _bind_lambdas(f, fam, body, off + m.end() - 1, nm, chain if q else (),
                                       1 + _top_commas(ta_[1:ta_.rindex(">")]) if ta_.startswith("<") and ">" in ta_ else -1)

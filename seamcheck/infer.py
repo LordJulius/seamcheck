@@ -136,6 +136,15 @@ class Types:
                 # an ES module sees another module's type only by importing it: not imported,
                 # `Response` is the runtime's (not client/types.ts's interface Response)
                 return [], False, False
+        if fm.file.endswith(".rs") and prim and all(p.modules[mn].bound.get(name, "").startswith("type:") for mn in prim) \
+                and len(prim) == 1 and p.modules[prim[0]].bound[name][5:] != name:
+            # `type Range = Match;` where it is declared: the type it names, read there
+            key = ("\0alias", prim[0], name)
+            if key not in self.cache:
+                self.cache[key] = ([], False, False)  # (`type Result<T> = std::result::Result<T, E>` names itself)
+                self.cache[key] = self.type_modules(p.modules[prim[0]], p.modules[prim[0]].bound[name][5:].split(".")[-1]
+                                                    if p.modules[prim[0]].bound[name][5:].split(".")[-1] != name else "\0")
+            return self.cache[key]
         prims = {self._primary(mn) for mn in prim}
         mods = list(dict.fromkeys(prim + [mn for mn in exts if mn not in prim]))
         # one type built per platform (battery-macos.cpp / battery-win.cpp, one
@@ -353,12 +362,41 @@ class Types:
             return EXT if held[9:] in mod.external else None
         if held.startswith("pack:"):
             return self.pack_param(held[5:])
+        if held.startswith("elem:"):
+            return self.loop_element(mod, f, tuple(held[5:].split("\x1f")), depth)
         if held.startswith("lam:"):
             return self.lambda_param(mod, f, held[4:], depth)
         if held.startswith("fixture:"):
             g = self.fixture(mod, held[8:], f)
             return self.returns(g, None, depth + 1) if g is not None else None
         return None
+
+    def loop_element(self, mod, f, chain: tuple, depth: int):
+        """A for-loop variable: an element of what it iterates (a declared
+        container, or a function whose return type is a sequence)."""
+        last = chain[-1]
+        if not last.endswith("()"):  # `for x in xs` / `self.items`: a declared container
+            owner = self.chain(mod, f, chain[:-1], depth + 1) if len(chain) > 1 else None
+            if len(chain) > 1 and owner is None:
+                return None
+            return self._element(mod, f, last, owner, depth)
+        name = last[:-2].split("`")[0]
+        if len(chain) == 1:
+            g = self.bare(mod, f, name)
+            hits = [g] if g is not None else []
+        else:
+            v = self.chain(mod, f, chain[:-1], depth + 1)
+            if v is None or is_ext(v) or v is UNKNOWN or v[0] not in ("inst", "static"):
+                return None
+            from .core import _in_scope
+            hits = ([h for mn in v[1] for h in _in_scope(self.p, mn, name)] if v[0] == "static" else []) \
+                or self.method(list(v[1]), name)[0]
+        els = {(g.module, g.relem) for g in hits if g.relem}
+        if len(hits) == 0 or len({e for _, e in els}) != 1 or len(els) < len({g.id for g in hits}) and len(hits) > 1:
+            return None
+        gm_name, ty = els.pop()
+        gm = self.p.modules.get(gm_name)
+        return self.instance(gm, ty) if gm is not None else None
 
     def lambda_param(self, mod, f, spec: str, depth: int):
         """A lambda's parameter: the type the called function's parameter at

@@ -314,6 +314,50 @@ _WRAPPERS = {"Promise", "Task", "ValueTask", "Future", "Box", "Rc", "Arc", "Opti
              "ContextManager", "AbstractContextManager", "AsyncContextManager", "AbstractAsyncContextManager"}
 
 
+# containers whose iteration gives their (first) type argument; a map's gives pairs
+_SEQUENCES = {"Vec", "VecDeque", "HashSet", "BTreeSet", "LinkedList", "BinaryHeap", "List", "ArrayList", "Set", "TreeSet",
+              "SortedSet", "Array", "ReadonlyArray", "Iterable", "Iterator", "IEnumerable", "ICollection", "IList",
+              "IReadOnlyList", "IReadOnlyCollection", "ISet", "HashSet", "Sequence", "MutableList", "MutableSet",
+              "Collection", "Stream", "QList", "QVector", "QSet", "QStringList", "vector", "list", "deque", "set",
+              "span", "Span", "ReadOnlySpan", "Slice", "IntoIter", "Iter", "ArraySlice", "ContiguousArray", "Deque"}
+
+
+def elem_type(text: str) -> str:
+    """What iterating a declared type gives: `Vec<Match>`, `&[Match]`,
+    `List<Foo>`, `Foo[]`, `[Foo]`, `impl Iterator<Item = &Foo>` -> the element's
+    class; "" when it is no sequence (or a map: its pairs are no one class)."""
+    t = text.strip()
+    for _ in range(4):
+        t = re.sub(r"^(?:&\s*(?:'\w+\s+)?(?:mut\s+)?|impl\s+|dyn\s+|const\s+|readonly\s+)", "", t).strip()
+        m = re.match(r"^(?:Box|Rc|Arc|Option|Optional)\s*<(.*)>\s*[?]?$", t, re.S)
+        if not m:
+            break
+        t = m.group(1).strip()
+    t = t.rstrip("?!").strip()
+    m = re.match(r"^\[([^\[\]:;]+)(?:;[^\]]*)?\]$", t)  # Rust `[Match]` / `[u8; 4]`, Swift `[Foo]`
+    if m:
+        return type_name(m.group(1))
+    m = re.match(r"^(.+?)\s*\[\s*\]$", t)  # `Foo[]`
+    if m:
+        return type_name(m.group(1))
+    m = re.match(r"^(?:[\w.:]+::|[\w.]+\.)?(\w+)\s*<(.*)>$", t, re.S)
+    if m:
+        it = re.match(r"^\s*Item\s*=\s*(.+)$", m.group(2), re.S)
+        if it:  # `Iterator<Item = &Foo>`
+            return type_name(it.group(1).lstrip("&").strip())
+        if m.group(1) in _SEQUENCES:
+            first = m.group(2)
+            depth = 0
+            for k, ch in enumerate(first):
+                depth += ch in "<([{"
+                depth -= ch in ">)]}"
+                if ch == "," and depth == 0:
+                    first = first[:k]
+                    break
+            return type_name(first.lstrip("&").strip())
+    return ""
+
+
 _TS_COMPUTED = {"ReturnType", "Parameters", "ConstructorParameters", "Pick", "Omit", "Exclude", "Extract",
                 "ThisParameterType", "OmitThisParameter", "ValueOf"}
 
