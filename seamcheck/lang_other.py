@@ -1868,6 +1868,8 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                         continue  # `create((set) => ({ applyOp }))`: a library object holding project callbacks
                     if ch:  # (a PHP property `$x` is read as `->x`)
                         expr_fields.setdefault(home.name, {}).setdefault(m.group(1).lstrip("$"), ch)
+                    elif (lit := _LITERAL.get(tk, {}).get(code[line_start[i] + m.end():line_start[i] + m.end() + 40].lstrip()[:1])):
+                        got_fields.setdefault(m.group(1).lstrip("$"), set()).add(lit)  # `let sample = """...`: a String
             if fam == "js" and not inside[i] and "{" in ln:  # `const { h } = window;` at the top of a file
                 for nm_, held in _assignments("js", ln if ln.rstrip().endswith(";") else ln + ";"):
                     if held.startswith("expr:") and len(held.split("\x1f")) > 1:
@@ -2125,7 +2127,8 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                             tch = receiver(body, off + tm.start(2))
                             if tch:
                                 _bind_closure(f, fam, body, off + tm.end() - 1, tm.group(2), tch, sa)
-                        elif not re.search(r"[\w)\]>?]\s*$", ln[:tm.start(2)]):  # `performEvent { $0... }`: a bare call
+                        elif not re.search(r"[\w)\]>?]\s*$", re.sub(r"\b(?:await|try[?!]?|return|throw)\s*$", "", ln[:tm.start(2)])):
+                            # `performEvent { $0... }`, `await withCheckedContinuation { c in }`: a bare call
                             _bind_closure(f, fam, body, off + tm.end() - 1, tm.group(2), (), sa)
                 if jsx:  # `<Widget ...>` renders (calls) the component Widget
                     for m in _JSX.finditer(ln):

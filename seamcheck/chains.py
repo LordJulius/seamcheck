@@ -141,6 +141,8 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                     segs.append(f"<as:{cast.group(1)}>")  # `($Timer as Timer).start()`: a Timer
                 elif aw:
                     segs.append(aw.group(1))  # `(await res).toString()`: what res holds
+                elif re.match(r"^\s*-?[\w.]+\s*(?:\.\.[.<=]|\.\.(?=\s*-?\w))\s*-?[\w.]+\s*$", inner):
+                    segs.append("<range>")  # `(1...9).contains(x)`, `(0..<5).map`: a range
                 elif re.search(r"[-+*/%|^~]|<<|>>", inner) and not re.search(r"[A-Za-z_$][\w$]*\s*\(|\?|=|\b(?:as|new|await)\b|['\"`]", inner):
                     segs.append("<literal>")  # `((a << 8) | b).toString(16)`: arithmetic gives a number
                 else:
