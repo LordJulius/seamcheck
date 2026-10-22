@@ -15,7 +15,12 @@ Each case was a wrong answer running seamcheck on open-source repos:
   package's `__init__` re-export was a guess), `self.x()` was a guess, pytest
   functions were not tests, and module-level code (`app = create()`, a
   decorator, `if __name__ == "__main__": main()`) called nothing; a test
-  fixture named `shop.py` won `import shop` over `src/shop/`.
+  fixture named `shop.py` won `import shop` over `src/shop/`;
+- Go: a call to a function in another file of the same package, a method
+  on a typed receiver and `doc.Gen()` across packages were name guesses,
+  `fmt.Println` guessed at the project's Println, two types' String() were
+  one function, and `func TestX(t *testing.T)` was dead code (cobra: project
+  calls exact 36%).
 """
 import os
 import sys
@@ -249,6 +254,83 @@ class TestCart:
         m = self.p.funcs["tests/test_cart.TestCart.test_get"]
         self.assertEqual(m.kind, "test")
         self.assertEqual(self.exact(m.id), {"src/shop/cart.Cart.__init__", "src/shop/cart.Cart.get"})
+
+
+class Go(Base):
+    FILES = {
+        "go.mod": "module github.com/acme/cli\n\ngo 1.22\n",
+        "command.go": """package cli
+
+import (
+	"fmt"
+
+	"github.com/acme/cli/internal/render"
+	ui "github.com/acme/cli/tui"
+)
+
+type Command struct {
+	flags *flagSet
+	win   ui.Window
+}
+
+func (c *Command) Execute() error {
+	_, err := c.ExecuteC()
+	fmt.Println(err)
+	c.flags.Parse()
+	c.win.Draw()
+	render.Page(c.String())
+	return helper(c)
+}
+
+func (c *Command) ExecuteC() (*Command, error) {
+	return c, nil
+}
+
+func (c Command) String() string { return "" }
+""",
+        "flags.go": """package cli
+
+type flagSet struct{}
+
+func (f *flagSet) Parse()         {}
+func (f flagSet) String() string { return "" }
+
+func helper(c *Command) error {
+	x := &Command{}
+	return x.Execute()
+}
+""",
+        "command_test.go": """package cli
+
+import "testing"
+
+func TestExecute(t *testing.T) {
+	c := &Command{}
+	c.Execute()
+}
+""",
+        "internal/render/page.go": "package render\n\nfunc Page(s string) {}\n",
+        "tui/window.go": "package tui\n\ntype Window struct{}\n\nfunc (w Window) Draw() {}\n",
+        "fmt/fake.go": "package fake\n\nfunc Println(a ...any) {}\n",
+    }
+
+    def test_methods_live_in_their_receivers_module(self):
+        self.assertIn("command.Command.String", self.p.funcs)
+        self.assertIn("flags.flagSet.String", self.p.funcs)
+        self.assertEqual([f.id for f in self.p.find("Command.ExecuteC")], ["command.Command.ExecuteC"])
+
+    def test_package_imports_and_typed_receivers(self):
+        got = self.exact("command.Command.Execute")
+        self.assertEqual(got, {"command.Command.ExecuteC", "flags.flagSet.Parse", "tui/window.Window.Draw",
+                               "internal/render/page.Page", "command.Command.String", "flags.helper"})
+        self.assertEqual(self.guessed("command.Command.Execute"), set())  # fmt.Println: the standard library
+        self.assertEqual(self.exact("flags.helper"), {"command.Command.Execute"})
+
+    def test_go_tests(self):
+        t = self.p.funcs["command_test.TestExecute"]
+        self.assertEqual(t.kind, "test")
+        self.assertEqual(self.exact(t.id), {"command.Command.Execute"})
+        self.assertNotIn(t, core.dead(self.p))
 
 
 if __name__ == "__main__":
