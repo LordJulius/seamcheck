@@ -2060,6 +2060,14 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             imod.kind, imod.methods = "interface", names
             mods[iname] = imod
     top = Func(mod.name, "<top>", rel, 1, len(lines), "", kind="top")
+    if fam == "js":  # module-level callbacks (`app.get('/', function (req, res) {` at the top of a file)
+        top.code = code
+        _pack_params(top)
+        top.code = ""
+        packed = {k: v for k, v in top.bound.items() if v.startswith("pack:")}
+        for g in (g for m_ in [mod, *mods.values()] for g in m_.funcs) if packed else ():
+            for k, v in packed.items():  # (`text: function(){ res.send() }` inside such a callback)
+                g.bound.setdefault(k, v)
     if ext == ".qml":
         # `Button {` instantiates Button.qml: a use of that component
         for i, ln in enumerate(lines):

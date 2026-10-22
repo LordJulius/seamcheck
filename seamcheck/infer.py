@@ -1114,6 +1114,8 @@ class Types:
 
     def step(self, mod, cur, seg: str, depth: int):
         kind, mods, exact = cur
+        if seg.startswith("new ") and seg.endswith("()"):
+            seg = seg[4:]  # `new express.Router()`: the member, constructed
         if kind == "wrap":  # a Rust Option / Result: unwrapping gives the value, any other method is std's
             if seg in UNWRAP or seg in ("unwrap_unchecked()", "unwrap_or_else()", "unwrap_or_default()"):
                 return mods

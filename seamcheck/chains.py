@@ -266,7 +266,11 @@ def expression(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
             new = False
             i = k + 1
         else:
-            if new:
+            if new and j < n and code[j] == "." and not segs:
+                segs.append(name)  # `new express.Router(...)`: the path, then the constructor called on it
+                i = j + 1
+                continue
+            if new and not (j < n and code[j] == "."):
                 return ()
             segs.append(name)
             i = j
