@@ -15,8 +15,8 @@ the project writes down about how its parts fit together.
   GitHub annotations; exit code 1 on errors; a pre-commit gate; and queries (`callers`, `impact`, `refs`) that replace grep
   loops and say how sure they are.
 - **Many languages, one graph.** Elixir, Kotlin, Java, TypeScript/JavaScript
-  (JSX), C++, QML, Python, GDScript, Rust, Go and C#. Rules work on any text
-  file.
+  (JSX), C++, QML, Python, GDScript, Rust, Go, C# and Ruby. Rules work on any
+  text file.
 - **Every check came from a real bug.** Each rule and lint was written after a
   bug it would have caught, and its test reproduces that bug (cut down) and
   its fix.
@@ -160,6 +160,13 @@ An edge is **exact** when the target is certain:
 - an object C++ hands to QML by name (`setContextProperty("continuity",
   &continuity)`), typed by that variable's declaration;
 - a C++ namespace (`veridian::api::parseClaim()` reaches the one in `api/`);
+- in Ruby (see "The Ruby adapter" below): a constant as Ruby looks it up (the
+  lexical scopes, the class's ancestors, a top-level `include`), a class
+  reopened in several files as one class, `< Base` and `include` / `extend`
+  as supertypes (a mixin's bare call reaches the classes including it),
+  `def self.x` / `class << self` / `extend self` as `A.x`, `Foo.new` as
+  `Foo#initialize`, `require` / `require_relative` for top-level methods,
+  and the types of locals, fields and return values (below);
 - a helper the calling function defines itself (`const nudge = () => ...`
   inside a component);
 - a Kotlin extension the caller's own file declares (it shadows other files'
@@ -177,7 +184,7 @@ Some calls resolve to **nothing**, on purpose:
 
 - a qualifier that names a module with no such function in the project
   (`Enum.reject`, `Repo.rollback`) is a library call;
-- in Elixir, Kotlin, Java, TypeScript, Python, Go and Rust a bare call with
+- in Elixir, Kotlin, Java, TypeScript, Python, Go, Rust and Ruby a bare call with
   nothing in scope is the language's own library (`Enum`, Compose's `Row`,
   vitest's `expect`, `len`, `append`, `println!`);
 - a call on a name imported from outside the project (`json.dumps()`,
@@ -186,7 +193,13 @@ Some calls resolve to **nothing**, on purpose:
   unless a project Kotlin extension is declared on that type;
 - in Rust, `.unwrap()`, `.len()`, `.push()` and the other everyday
   Option / Result / Vec / String / iterator methods on a receiver of unknown
-  type: they are the standard library's, not a project function of that name.
+  type: they are the standard library's, not a project function of that name;
+- in Ruby, the same for Object / Enumerable / Hash / Array / String methods
+  (`each`, `to_s`, `key?`, `merge`...) on a receiver nothing types, and any
+  call on a library's value: a literal (`"a".split`, `%w(a b).each`), a gem's
+  constant (`Liquid::Template.parse`), what a bare call reaching no project
+  method returns (Rack::Test's `last_response.body`), what Ruby's own
+  classes yield (`File.open(p) do |f|`).
 
 `seamcheck stats` prints, per language, how many call sites are exact, guessed
 or nothing, and of the calls that reach project code, how many are exact.
@@ -201,9 +214,13 @@ head that goes on to the next line, like `test "x",\n %{conn: conn} do`),
 vitest/jest `it(...)` / `test(...)`, JUnit `@Test`, pytest `test_*` functions
 and `Test*` class methods in test files, Go `TestX` / `BenchmarkX` /
 `ExampleX` / `FuzzX` in `_test.go`, Rust `#[test]` (and `#[tokio::test]`),
-and xUnit / NUnit / MSTest `[Fact]` / `[Test]` / `[TestMethod]`. So `callees 'test *'`
-says what a test exercises. ExUnit `setup` and `describe` are fixtures and
-grouping, not tests.
+xUnit / NUnit / MSTest `[Fact]` / `[Test]` / `[TestMethod]`, and Ruby's RSpec
+`it "..." do` / `specify`, Minitest `def test_x` and `test "x" do`, and
+Shoulda `should "x" do` (named `test <label>`, in the class around them).
+So `callees 'test *'` says what a test exercises. ExUnit `setup` and
+`describe`, and RSpec / Shoulda `describe`, `context`, `setup` and `before`,
+are fixtures and grouping, not tests. Ruby test files are `*_test.rb`,
+`*_spec.rb`, `test_*.rb` and anything under `test/` or `spec/`.
 
 Adapter details: a Java / C# method's parameters may span lines and its body
 may open on the next line (Allman braces), a C# body may be `=> expr;`; a
@@ -214,6 +231,50 @@ separators; QML functions, `onX:` handlers and component instances (a use of
 `X.qml`); JSX `<Card />` is a call to `Card`; an Elixir sigil (`~w(a b)`) is
 not a call. A file an adapter crashes on is a `config` error finding, never a
 silently empty file.
+
+### The Ruby adapter
+
+`.rb`, `.rake` and `.ru` files. Each file is a module and each class or
+module its own, `<file>.<A::B>` (`module A; class B` and `class A::B` both
+make `A::B`). Blocks are read off `class` / `module` / `def` / `do` /
+`begin` / `case` / `end`: an `if` / `unless` / `while` that leads a statement
+or a value (`x = if c`, `host << if c`) opens one, a modifier (`return if c`)
+does not, `while c do` is one block, `def x = expr` (endless) none; heredocs,
+`%w()` / `%r{}` literals, regexes, `?"` and `=begin` blocks are blanked
+(interpolated `#{code}` stays: its calls are calls).
+
+A call needs no parentheses: `name(`, every `.name` that isn't a setter
+(`obj.x = v`), and a bare name the method hasn't assigned before (a local, a
+parameter, a block's `|x|`, a `rescue => e` is not a call; a hash key
+`name:`, a symbol and `alias a b` aren't either). `super` calls the parent's
+method of the same name. `attr_reader` / `attr_accessor`, `def_delegators`,
+`delegate ... to:`, `define_method(:x)` and RSpec `let(:x)` / `subject` are
+methods; `Foo = Class.new(Base)` / `Struct.new` is a class.
+
+Ruby states few types, so they are read off what the code does:
+
+- `x = Foo.new(...)`, `@x = Foo.new` (or `self.x =` through an accessor) in
+  any method, including `nil` in one place and a Foo in another, and a test's
+  fields from the `setup do` / `before do` of the contexts around it;
+- a method's last expression (`Foo.new(...).tap { }`, `self`, `@x ||= ...`),
+  YARD `@return [Foo]` / `@param x [Foo]` and Sorbet `sig { params(x:
+  Foo).returns(Bar) }`;
+- a parameter that every project call site passes the same type to
+  (`Reader.new(self)` in Site makes `Reader#initialize(site)`'s `site`, and
+  the `@site` it is stored in, a Site; `Document.new(path, :site => site)`
+  types `@site = relations[:site]`). Product callers must all be typed; a
+  test's call site (often a double) only counts when it agrees. Each
+  subclass built through a shared `initialize` takes its own callers' type
+  (each Drop wraps its own object). For a method other than `initialize`
+  every call of that name in the project must resolve, its name must never be
+  a symbol (`send(:x)`, callbacks), and it must not check what it got
+  (`respond_to?`, `is_a?`, `case x`);
+- a mixin's `site` when every class including it returns the same type.
+
+A library class the project only adds to (`class Rack::Builder` with one
+method, every declaration in that form, none with a superclass or an
+`initialize`) is still a supertype for the methods added, but a value of
+that type is the library's.
 
 ### `[project.groups]`: what a node found by group is
 
@@ -778,6 +839,8 @@ before and after 0.3's adapter work, at each repo's HEAD in October 2026:
 | google/gson | Java | 80% | 89% | 5,300 -> 23,600 call sites (bodies ended at their first statement) |
 | App-vNext/Polly | C# | (0 functions) | 31% | 4,811 functions (Allman braces) |
 | plausible/analytics | Elixir + TS | 98% | 98% | (unchanged) |
+| sinatra/sinatra | Ruby | (no adapter) | 93% | the Ruby adapter |
+| jekyll/jekyll | Ruby | (no adapter) | 90% | |
 
 C#'s share stays low: most of Polly's calls are fluent chains and extension
 methods, which need type inference seamcheck doesn't do.

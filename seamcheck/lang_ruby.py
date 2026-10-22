@@ -1,16 +1,17 @@
 """Ruby adapter: one Module per file, and one per class or module
 (`<file>.<A::B>`, nested names spelled out), like Python's classes.
 
-Ruby leans on what other languages write down: a call needs no parentheses
+Ruby writes down less than other languages: a call needs no parentheses
 (`render json: x`, `site.config`), a bare name is a method call unless the
-method assigned it first, and a constant means whatever the lexical scope
-(then the superclass) finds, wherever it was defined. So the parse records
-what each file says, and `link` (run by core once every file is parsed)
-resolves it across the project: `require`s to files, constants to their
-class modules, `< Base` and `include M` to supertypes. A class reopened in
-several files is one class: its first (or `< Base`) definition is the class,
-the others `ext` modules linked both ways, so a method from any of them is
-found on it.
+method assigned it first, a constant means whatever the lexical scope (then
+the superclass) finds wherever it was defined, and no parameter has a type.
+So the parse records what each file says, and `link` (run by core once
+every file is parsed) resolves it across the project: `require`s to files,
+constants to their class modules, `< Base` and `include M` to supertypes,
+and the types of parameters and fields from what every caller passes. A
+class reopened in several files is one class: one definition (the one with
+`< Base`, else the file named after it) is the class, the others `ext`
+modules linked both ways, so a method from any of them is found on it.
 """
 from __future__ import annotations
 
@@ -40,6 +41,7 @@ _OPENS_AFTER = {"then", "else", "do", "begin", "and", "or", "not", "when", "in",
 _TEST_HEAD = re.compile(r"^\s*(?:it|specify|example|scenario|test|should|its)\b\s*\(?\s*(?:[\"':]|$|do\b)")
 _DEFINE_METHOD = re.compile(r"\bdefine_method\s*\(?\s*(?::|[\"'])(\w+[?!=]?)")
 _CLASS_NEW = re.compile(rf"^\s*([A-Z]\w*)\s*=\s*(?:(Class|Struct|Data)\.(?:new|define))\b\s*(?:\(\s*({_CONST}))?")
+_ANON_CLASS = re.compile(rf"(?<![\w:])(Class|Module)\.new\b\s*(?:\(\s*({_CONST})\s*\))?\s*$")
 _MIXIN = re.compile(rf"^\s*(include|extend|prepend)\s+((?:{_CONST})(?:\s*,\s*{_CONST})*)\s*$")
 _ATTR = re.compile(r"^\s*attr_(reader|accessor)\b\s*\(?")
 _DELEGATORS = re.compile(r"^\s*def_delegators?\s+:(@?\w+)\s*,\s*(.*)$")
@@ -64,6 +66,7 @@ _SELF_SET = re.compile(r"(?<![\w@.])self\.(\w+)\s*=(?![=~>])\s*")
 _FOR_VAR = re.compile(r"\bfor\s+([a-z_]\w*(?:\s*,\s*[a-z_]\w*)*)\s+in\b")
 _IVAR_SET = re.compile(r"(?<![\w@])(@\w+)\s*(?:\|\|)?=(?![=~>])\s*")
 _WORD = re.compile(r"(?<![\w@$])([A-Za-z_]\w*[?!]?)")
+_ALIAS = re.compile(r"alias\s+:?([\w?!=]+)\s+:?([\w?!=]+)\s*$")
 _SYMBOL = re.compile(r"(?<![:\w]):(@{0,2}[A-Za-z_]\w*[?!=]?)")
 _YARD_RET = re.compile(r"^\s*#\s*@return\s+\[([^\]]+)\]")
 _YARD_PARAM = re.compile(r"^\s*#\s*@param\s+\[?(\w+)\]?\s+\[([^\]]+)\]")
@@ -77,8 +80,9 @@ _KEYWORDS = {
     "super", "then", "true", "undef", "unless", "until", "when", "while", "yield", "__FILE__", "__LINE__",
     "__dir__", "__method__", "__ENCODING__", "__callee__", "block_given?", "BEGIN", "END",
 }
-# Ruby's own declarations, written as calls: `include M`, `attr_reader :x`,
-# `private`, `require "x"`. They define the class; they don't run project code.
+# Ruby's own declarations written as calls (`include M`, `attr_reader :x`,
+# `private`, `require "x"`) and Kernel's everyday ones (`puts`, `raise`): not
+# project code, and recording them only made noise.
 _DECLARE = {
     "require", "require_relative", "load", "autoload", "include", "extend", "prepend", "attr_reader", "attr_writer",
     "attr_accessor", "attr", "private", "public", "protected", "module_function", "private_constant",
@@ -183,15 +187,17 @@ def _blocks(code: str, line_of) -> list[dict]:
             if k < len(code) and code[k] == "(":
                 k = _match_paren(code, k) + 1
             skip_to = k
-            rest = code[k:k + 3].lstrip(" \t")
-            endless = rest.startswith("=") and not rest.startswith(("==", "=~", "=>"))
+            eq = k
+            while eq < len(code) and code[eq] in " \t":
+                eq += 1
+            endless = code.startswith("=", eq) and not code.startswith(("==", "=~", "=>"), eq)
             b = {"kind": "def", "name": dm.group(2), "on": dm.group(1) or "", "pos": pos, "params": (params_at, k),
                  "name_span": (dm.start(2), dm.end(2))}
             if endless:
                 b["a"] = line
                 e = code.find("\n", k)
                 b["b"] = line
-                b["endless"] = k + rest.index("=") + (len(code[k:k + 3]) - len(rest)) + 1
+                b["endless"] = eq + 1  # where the body expression starts
                 b["end_pos"] = len(code) if e < 0 else e
                 b["parent"] = stack[-1]["i"] if stack else -1
                 b["i"] = len(out)
@@ -272,6 +278,9 @@ def _do_block(code: str, pos: int) -> dict:
     if cm:
         base = cm.group(3) or ("" if cm.group(2) == "Class" else cm.group(2))
         return {"kind": "class", "name": cm.group(1), "base": base}
+    am = _ANON_CLASS.search(head)
+    if am:  # `Class.new(Base) do def call(env) ... end end`: a class of its own, not the enclosing one's methods
+        return {"kind": "class", "name": f"{am.group(1)}.new@{code.count(chr(10), 0, pos) + 1}", "base": am.group(2) or ""}
     return {"kind": "do", "setup": bool(re.match(r"\s*(?:setup|before)\b", head))}
 
 
@@ -686,14 +695,17 @@ def _normalize(segs: list[str], is_local, pos: int) -> tuple[str, ...]:
     return tuple(out)
 
 
-_SAME = {"tap()", "dup()", "clone()", "freeze()", "itself()"}
+_SAME = {"tap()", "dup()", "clone()", "freeze()", "itself()"}  # `x.tap { }`, `x.dup`: x itself
 _DO_END = re.compile(r"\bdo\s*(?:\|[^|]*\|)?\s*$")
 _EXPR_HEAD = re.compile(rf"(@@?\w+|\$\w+|{_CONST}|{_ID}[?!]?)")
+_EXPR_NAME = re.compile(rf"\s*({_ID}[?!]?)")
+_NUMBER = re.compile(r"[\d_]+(\.\d+)?")
+_SYM_LIT = re.compile(r":\w+[?!=]?")
+_PCT_LIT = re.compile(r"%([qQwWiIrsx]?)([(\[{<|!/^])")
 
 
 def _literal(code: str, i: int) -> tuple[str, int] | None:
     """A literal starting at i (contents blanked): its class and its end."""
-    n = len(code)
     ch = code[i:i + 1]
     if not ch:
         return None
@@ -703,12 +715,12 @@ def _literal(code: str, i: int) -> tuple[str, int] | None:
     if ch in "[{":
         return ("Array" if ch == "[" else "Hash", _match_paren(code, i) + 1)
     if ch.isdigit():
-        m = re.compile(r"[\d_]+(\.\d+)?").match(code, i)
+        m = _NUMBER.match(code, i)
         return ("Float" if m.group(1) else "Integer", m.end())
     if ch == ":" and re.match(r"[A-Za-z_]", code[i + 1:i + 2]):
-        m = re.compile(r":\w+[?!=]?").match(code, i)
+        m = _SYM_LIT.match(code, i)
         return ("Symbol", m.end())
-    m = re.compile(r"%([qQwWiIrsx]?)([(\[{<|!/^])").match(code, i)
+    m = _PCT_LIT.match(code, i)
     if m:
         close = {"(": ")", "[": "]", "{": "}", "<": ">"}.get(m.group(2), m.group(2))
         e = code.find(close, m.end()) if close in (m.group(2), ">") else _match_paren(code, m.end() - 1)
@@ -755,7 +767,7 @@ def expression(code: str, pos: int, is_local) -> tuple[str, ...]:
             nl += 1
         if code.startswith("&.", nl) or (code.startswith(".", nl) and not code.startswith("..", nl)):
             i = nl + (2 if code[nl] == "&" else 1)
-            mm = re.compile(rf"\s*({_ID}[?!]?)").match(code, i)
+            mm = _EXPR_NAME.match(code, i)
             if not mm:
                 return ()
             i = mm.end()
@@ -791,20 +803,15 @@ def _collect(f: Func, b, code: str, starts: list[int], idx: list[int], lines: li
         return p is not None and p <= pos  # (`output, warnings = ...`: the target itself is no call)
 
     skip: tuple[int, int] = (-1, -1)
-    head_line = -1
-    if b is not None and b["kind"] == "def":
-        if b.get("name_span"):
-            skip = (b["pos"], b["name_span"][1])  # `def site.process`: neither name is a call
-        head_line = b["a"]
-    if b is not None and b["kind"] == "test":
-        head_line = b["a"]
+    if b is not None and b["kind"] == "def" and b.get("name_span"):
+        skip = (b["pos"], b["name_span"][1])  # `def site.process`: neither name is a call
     for i in idx:
         a = starts[i]
         ln = lines[i]
         if not ln.strip():
             continue
         lead = ln.lstrip()
-        am_ = re.match(r"alias\s+:?([\w?!=]+)\s+:?([\w?!=]+)\s*$", lead)
+        am_ = _ALIAS.match(lead)
         if am_:  # `alias stop! quit!`: two method names, not calls
             f.refs.update(am_.groups())
             continue
@@ -829,15 +836,10 @@ def _collect(f: Func, b, code: str, starts: list[int], idx: list[int], lines: li
             after = code[e:e + 4].lstrip(" \t")
             assigns = after.startswith("=") and not after.startswith(("==", "=~", "=>"))
             col = m.start(1)
-            if prev == "." or prev2 == "::":
-                if prev == "." and prev2 == "..":
-                    pass  # a range `a..b`: b is a plain name
-                else:
-                    if assigns:
-                        continue  # `obj.x = v`: a setter
-                    chain = receiver(code, p, is_local)
-                    _add(f, name, chain, i + 1, col)
-                    continue
+            if (prev == "." and prev2 != "..") or prev2 == "::":  # (`a..b`: b is a plain name)
+                if not assigns:  # (`obj.x = v`: a setter)
+                    _add(f, name, receiver(code, p, is_local), i + 1, col)
+                continue
             if name in _KEYWORDS:
                 if name == "super" and b is not None and b["kind"] == "def":
                     f.calls.append(Call(b["name"], "super", i + 1, (), col))
@@ -849,8 +851,6 @@ def _collect(f: Func, b, code: str, starts: list[int], idx: list[int], lines: li
             if name in _DSL_BLOCKS and lead.startswith(name) and _DO_END.search(ln):
                 continue  # `context "x" do`, `setup do`: the test framework's
             if code[e:e + 1] != "(" and is_local(name, p):
-                continue
-            if nxt[:1] in "?" and name.endswith("?") is False and code[e:e + 2] == "?:":
                 continue
             f.calls.append(Call(name, "", i + 1, (), col))
         for m in _SYMBOL.finditer(ln):
@@ -1049,11 +1049,21 @@ def _params_of(f: Func) -> set[str]:
 # --- linking (core calls this once every file is parsed) ---------------------------
 
 def link(project) -> None:
-    """Requires to files, constants to class modules, supertypes to modules."""
+    """Requires to files, constants to class modules, supertypes to modules,
+    then the types of parameters and fields from their callers."""
     rb = [m for m in project.modules.values() if m.file.endswith(EXT)]
     if not rb:
         return
     _link_requires(project, rb)
+    r = _link_classes(project, rb)
+    _bare_calls_on_self(project, rb)
+    _rewrite_constants(rb, r)
+    _infer_types(project, rb, r)
+
+
+def _link_classes(project, rb: list) -> "_Resolver":
+    """Each constant's class (one of its reopenings), its supertypes and
+    mixins as modules; the reopenings linked to it both ways."""
     idx: dict[str, list[str]] = {}
     for m in rb:
         if m.owner and m.decls:
@@ -1100,9 +1110,14 @@ def link(project) -> None:
         for mn in idx[full]:
             r.full_of[mn] = full
             project.modules[mn].decls = []
-    # a bare call is `self.x`: the class, its ancestors, and (a mixin calling
-    # its includer's method, a base class its subclasses') the classes below
-    # it; a top-level `def` (a method of every object) keeps the file's scope
+    return r
+
+
+def _bare_calls_on_self(project, rb: list) -> None:
+    """A bare call in a class is `self.x`: the class, its ancestors, and (a
+    mixin calling its includer's method, a base class its subclasses') the
+    classes below it. A top-level `def` the file can reach (a method of
+    every object) keeps the file's scope."""
     top_defs = _top_defs_seen(project, rb)
     for m in rb:
         if not m.owner:
@@ -1112,6 +1127,12 @@ def link(project) -> None:
             for c in f.calls:
                 if not c.chain and not c.qual and c.name not in seen:
                     c.chain, c.qual = ("self",), "self"
+
+
+def _rewrite_constants(rb: list, r: "_Resolver") -> None:
+    """Every constant in a chain, a binding or a return type as the full name
+    of the class it means (`Site` in module Jekyll is `Jekyll::Site`); a gem's
+    stays as written (infer reads an undeclared constant as a library's)."""
     for m in rb:
         nest = r.nesting(m)
         for k, v in list(m.bound.items()):
@@ -1135,8 +1156,13 @@ def link(project) -> None:
                     c.qual = c.chain[-1].replace("::", ".")
                     if c.name == "new" and len(c.chain) == 1:
                         c.name = r.constructor(c.chain[0])
-    # the type work below sees each class's subclasses and includers (core
-    # fills project.children for real once linking is done)
+
+
+def _infer_types(project, rb: list, r: "_Resolver") -> None:
+    """Parameters and fields typed from their callers, then the calls whose
+    receiver is a library's value marked so."""
+    # the type work sees each class's subclasses and includers (core fills
+    # project.children for real once linking is done)
     from collections import defaultdict
     from .infer import Types
     saved, project.children = project.children, defaultdict(list)
@@ -1295,7 +1321,7 @@ class _Resolver:
         parts = full.split("::")
         return ["::".join(parts[:k]) for k in range(len(parts), 0, -1)]
 
-    def _ancestors_full(self, full: str, depth: int = 0) -> list[str]:
+    def _ancestors_full(self, full: str) -> list[str]:
         out, todo = [], [full]
         while todo and len(out) < 20:
             cur = todo.pop(0)
