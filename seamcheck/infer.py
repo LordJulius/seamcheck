@@ -360,8 +360,8 @@ class Types:
         pkg, _, path = str(entry.get("types", {}).get(name, "")).partition(":")
         if not pkg:
             return None
-        if pkg == self._package_name() and path in self.p.modules:
-            return ("static", (path,), True)
+        if pkg == self._package_name() and path in self.p.modules:  # (a class's file: an instance of it)
+            return ("inst" if self.p.modules[path].kind == "class" else "static", (path,), True)
         return EXT
 
     def _package_name(self) -> str:
@@ -587,7 +587,7 @@ class Types:
         m = self.p.modules.get(where)
         if m is None or depth > 4:
             return None
-        if name in m.bound and not m.owner and m.file.endswith(".py"):
+        if name in m.bound and not m.owner and m.file.endswith((".py",) + _JS_EXTS):
             return m, name
         if name in m.imported:
             w, n = m.imported[name]
@@ -614,6 +614,20 @@ class Types:
         if not hits and fm.package:
             hits = _in_scope(self.p, "pkg:" + fm.package, name)
         return hits[0] if len(hits) == 1 else None
+
+    def _getter(self, mods: list[str], name: str, depth: int):
+        """`c.req` read through a getter (`get req(): HonoRequest`, Python's
+        `@property`, Kotlin's `val x get()`): what the getter returns."""
+        hits, on_type = self.method(mods, name)
+        if not hits or not on_type:
+            return None
+        g = hits[0]
+        raw = self.p.modules[g.module].raw
+        head = " ".join(raw[max(0, g.start - 3):g.start])
+        if re.search(r"\bget\s+" + re.escape(name) + r"\s*\(", head) or "@property" in head or \
+                "@cached_property" in head or "@functools.cached_property" in head:
+            return self.returns(g, mods, depth + 1)
+        return None
 
     def _py_classes(self, mods, name: str) -> list[str]:
         """Python: the class a module (or package `__init__`) makes available
@@ -676,6 +690,8 @@ class Types:
                     return self.held(m, None, held, depth + 1, self_mods=[mn])
             return None
         got = self.field(list(mods), seg, depth)
+        if got is None:
+            got = self._getter(list(mods), seg, depth)
         if got is UNKNOWN:
             return None
         if got is None and seg.startswith("__") and seg.endswith("__") and mod.file.endswith(".py"):
@@ -690,7 +706,8 @@ class Types:
 _ES_MODULE = (".ts", ".tsx", ".mts", ".cts")
 _JS_EXTS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".qml")
 _JS_GLOBALS = {"console", "window", "document", "navigator", "localStorage", "sessionStorage", "globalThis",
-               "location", "history", "process", "performance", "crypto"}
+               "location", "history", "process", "performance", "crypto",
+               "vi", "jest", "expect", "cy"}  # (test runners' globals: vitest / jest `globals`, cypress)
 _DOM_PROPS = {"classList", "style", "dataset"}
 _EXPLICIT_SELF = (".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".php")
 _PY_BUILTIN_CALLS = {"vars", "dict", "list", "set", "frozenset", "tuple", "str", "bytes", "bytearray", "sorted",

@@ -1481,8 +1481,11 @@ def _build_edges(project: Project) -> None:
                     # x.f() reaches a module-level Python function only through
                     # the module's own name (resolved above), never `session.get()`
                     mine = [g for g in mine if project.modules[g.module].owner]
-                if q and f.file.endswith((".rb", ".rake", ".ru")):
-                    mine = []  # an untyped Ruby receiver (`@app.call`) can hold anything: a unique name is no proof
+                if q:
+                    # an untyped receiver can hold anything: a name only one module in scope
+                    # has is no proof (`res.json()` on a fetch Response is not Context.json,
+                    # `@app.call` not Logger#call); the receiver's type is what settles it
+                    mine = []
                 own = [g for g in cands if g.file == f.file and g.recv]
                 if targets:
                     pass

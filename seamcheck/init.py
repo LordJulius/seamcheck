@@ -103,7 +103,7 @@ def detect_packs(root: str, files: list[str]) -> list[str]:
         except OSError:
             continue
         if base == "package.json":
-            found |= {p for p in ("react", "express") if _uses(text, p)}
+            found |= {p for p in ("react", "express", "hono") if _uses(text, p)}
         for pack, (names, rx) in _FRAMEWORKS.items():
             if base in names and rx.search(text):
                 found.add(pack)

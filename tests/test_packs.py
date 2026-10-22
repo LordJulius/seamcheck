@@ -36,6 +36,8 @@ GOOD = {
     "express": {"package.json": '{"name": "shop", "dependencies": {"express": "^5"}}',
                 "app.js": "const express = require('express')\nconst app = express()\n"
                           "app.get('/', function (req, res) {\n  res.send('hi')\n})\n"},
+    "hono": {"package.json": '{"name": "api", "dependencies": {"hono": "^4"}}',
+             "src/index.ts": "import { Hono } from 'hono'\nconst app = new Hono()\napp.get('/', (c) => c.text('hi'))\n"},
     "compose": {"app/src/main/java/LauncherViewModel.kt": VM_AFTER,
                 "app/src/main/java/Sync.kt": "class Sync(val vm: VM) {\n  fun start() {\n    vm.viewModelScope.launch { run() }\n  }\n}\n",
                 "app/src/test/java/SyncTest.kt": "fun go() {\n  GlobalScope.launch { }\n}\n"},
@@ -170,6 +172,22 @@ class ExpressParams(unittest.TestCase):
                        "lib/response.js": "var res = module.exports = {}\nres.send = function send(body) {}\n",
                        "test/res.send.js": "function t() {\n  app.use(function (req, res) {\n    res.send(1)\n  })\n}\n"})
         self.assertEqual([(d, ex) for d, _, ex in p.edges.get("test/res.send.t", [])], [("lib/response.send", True)])
+
+
+class HonoParams(ExpressParams):
+    def test_in_an_app_route_context_is_the_librarys(self):
+        p = self.load({"package.json": '{"name": "api", "dependencies": {"hono": "^4"}}',
+                       "src/util.ts": "export function json(x: unknown) { return x }\n",
+                       "src/routes.ts": "export function routes(app: any) {\n  app.get('/', (c) => c.json({}))\n"
+                                        "  return [1].map((c) => c.json)\n}\n"})
+        self.assertEqual(p.edges.get("src/routes.routes", []), [])  # c.json is hono's, not util.json
+
+    def test_in_hono_itself_c_is_src_context(self):
+        p = self.load({"package.json": '{"name": "hono"}',
+                       "src/context.ts": "export class Context {\n  json(o: object) { return o }\n}\n",
+                       "src/mw.ts": "export function mw() {\n  return async function mw(c, next) {\n    c.json({})\n  }\n}\n"})
+        got = [(d, ex) for f in p.funcs if f.startswith("src/mw.") for d, _, ex in p.edges.get(f, [])]
+        self.assertEqual(got, [("src/context.json", True)])
 
 
 if __name__ == "__main__":
