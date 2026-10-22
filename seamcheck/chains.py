@@ -140,7 +140,7 @@ def expression(code: str, pos: int, max_segs: int = 8) -> tuple[str, ...]:
     () when the expression is not a plain chain (arithmetic, a literal...)."""
     n = len(code)
     i = pos
-    while i < n and code[i] in " \t":
+    while i < n and code[i] in " \t\r\n":  # (the value may start on the next line: `val x =\n  a.b()`)
         i += 1
     for kw in ("await ", "try ", "try! ", "try? ", "yield "):
         if code.startswith(kw, i):
