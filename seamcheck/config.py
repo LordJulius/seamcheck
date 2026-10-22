@@ -33,7 +33,7 @@ KEYS = {
     "bridge": {"id", "from", "to", "match", "sep", "wildcard", "normalize", "why"},
 }
 SEVERITIES = {"error", "warn", "info"}
-TABLES = ("project", "runtime", "deps", "tidy", "gate")
+TABLES = ("project", "runtime", "deps", "tidy", "gate", "precise")
 # keys whose lists add up across files instead of the last file winning
 ADDITIVE = ("include", "exclude", "packs")
 PACKS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "packs")
