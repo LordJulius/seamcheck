@@ -1222,6 +1222,8 @@ def _assignments(tk: str, text: str) -> list[tuple[str, str]]:
             out.append((m.group(1), "type:" + lit))  # `x = []`, `x = ""`: the language's own value
             continue
         ch = expression(text, m.end())
+        if ch and ch[0] in ("null", "nil", "None", "undefined", "NULL", "nullptr") and len(ch) == 1:
+            continue  # `$stats = null;`: no type yet; a later assignment says it
         if ch:
             out.append((m.group(1), "expr:" + "\x1f".join(ch)))
     if tk == "js":  # `const template = <p>Hello</p>`: an element of the JSX runtime
