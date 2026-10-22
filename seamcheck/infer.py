@@ -508,6 +508,11 @@ class Types:
                 and argi == 1 and is_ext(self.chain(mod, f, chain, depth + 1) or (None,)):
             self.cache[key] = EXT  # `el.addEventListener('click', (e) => ...)`: a DOM event
             return EXT
+        if chain and name in ("let", "also", "takeIf", "takeUnless") and pi == 0 and mod.file.endswith((".kt", ".kts")):
+            got = self.chain(mod, f, chain, depth + 1)  # `x.let { it.go() }`: it is x
+            if got is not None and got is not UNKNOWN and got[0] != "wrap":
+                self.cache[key] = got
+                return got
         if chain and name in _ELEMENT_HOFS and pi == _ELEMENT_HOFS[name]:
             # `paths.iter().all(|p| ...)`, `xs.forEach(x => ...)`, `list.map { it }`: an element of the receiver
             got = self.loop_element(mod, f, tuple(s_ for s_ in chain if s_ not in _ITER_SEGS) or chain, depth + 1)
@@ -1196,6 +1201,8 @@ class Types:
             if hits and len({g.returns for g in hits}) == 1 and hits[0].returns:
                 # overloads that all return the same type: whichever runs, that is the value
                 return self.returns(hits[0], list(mods) if kind == "inst" else None, depth + 1, targs)
+            if hits and kind == "inst" and {g.returns for g in hits if g.returns} == {"Self"} and mod.file.endswith(".swift"):
+                return cur  # `request.validate()`: each overload declared returns `Self` (the rest unread)
             if not hits and kind == "static" and mod.file.endswith(_JS_EXTS) and depth < _MAX:
                 alt = self._js_default_reexport(mods)
                 if alt:  # `require('express')` is index.js, `module.exports = require('./lib/express')`

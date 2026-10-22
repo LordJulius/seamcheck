@@ -1414,6 +1414,31 @@ def _bind_lambdas(f: Func, fam: str, body: str, open_: int, name: str, chain: tu
                 f.bound[nm_] = "lam:?"  # (one name, two lambdas: neither says)
 
 
+_TRAILING_SKIP = {"get", "set", "init", "apply", "run", "with", "use", "synchronized", "async", "launch",
+                  # keywords before a block
+                  "if", "else", "for", "while", "guard", "switch", "do", "catch", "defer", "repeat", "when", "try",
+                  "func", "fun", "willSet", "didSet", "return", "in", "class", "struct", "enum", "extension",
+                  "protocol", "object", "companion", "interface", "finally", "lazy", "inline", "where", "throws",
+                  "rethrows", "async", "await", "some", "any", "private", "public", "internal", "open", "val", "var",
+                  "let", "is", "as", "init", "deinit", "subscript", "operator", "actor", "mutating", "nonmutating",
+                  "override", "static", "final", "unowned", "weak", "convenience", "required", "dynamic", "indirect"}
+
+
+def _bind_closure(f: Func, fam: str, body: str, brace: int, name: str, chain: tuple) -> None:
+    """`xs.map { x -> ... }`: the closure's parameters, as the callee's sole
+    (last) argument hands them."""
+    names = lambdas.brace_lambda(fam, body[brace:brace + 400])
+    for pi, nm_ in enumerate(names):
+        if not nm_ or nm_ == "_":
+            continue
+        spec = f"lam:0/{pi}/{len(names)}/-1\x1e{name}\x1e" + "\x1f".join(chain)
+        held = f.bound.get(nm_)
+        if held is None:
+            f.bound[nm_] = spec
+        elif held.startswith("lam:") and held != spec:
+            f.bound[nm_] = "lam:?"
+
+
 def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     from . import chains
     chains.CALL_TARGS = rel.endswith(".cs")
@@ -1430,6 +1455,8 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     if ext == ".cs":  # preprocessor lines (`#pragma warning disable` between a signature and its `=>`)
         code = re.sub(r"(?m)^[ \t]*#[ \t]*(?:pragma|region|endregion|nullable|if|elif|else|endif|define|undef|warning|error|line)\b[^\n]*",
                       lambda m: " " * len(m.group()), code)
+    if ext in (".swift", ".kt", ".kts"):  # `default`, `is`: a quoted identifier is the identifier
+        code = re.sub(r"`([A-Za-z_]\w*)`", r" \1 ", code)
     raw, lines = text.split("\n"), code.split("\n")
     mod = Module(_modname(rel), rel, len(raw), raw, lines)
     line_start = [0]
@@ -2051,6 +2078,16 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     if ext == ".cs":
                         ta = m.group(0)[m.end(2) - m.start(0):].strip()
                         f.calls[-1].targs = 1 + _top_commas(ta[1:ta.rindex(">")]) if ta.startswith("<") else 0
+                if tk in ("kotlin", "swift"):  # `xs.map { $0.name }`, `x.let { it.go() }`: a trailing closure, no parentheses
+                    for tm in re.finditer(r"(\.)?\b([A-Za-z_]\w*)[ \t]*\{", ln):
+                        if tm.group(2) in _TRAILING_SKIP or tm.group(2)[:1].isupper():
+                            continue
+                        if tm.group(1):
+                            tch = receiver(body, off + tm.start(2))
+                            if tch:
+                                _bind_closure(f, fam, body, off + tm.end() - 1, tm.group(2), tch)
+                        elif not re.search(r"[\w)\]>?]\s*$", ln[:tm.start(2)]):  # `performEvent { $0... }`: a bare call
+                            _bind_closure(f, fam, body, off + tm.end() - 1, tm.group(2), ())
                 if jsx:  # `<Widget ...>` renders (calls) the component Widget
                     for m in _JSX.finditer(ln):
                         f.calls.append(Call(m.group(2), m.group(1) or "", i + 1))

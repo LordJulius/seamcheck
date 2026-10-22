@@ -192,6 +192,10 @@ def brace_lambda(fam: str, text: str) -> list[str]:
     m = _BRACE_LAMBDA.match(text)
     if m and ((m.group(3) == "->") == (fam == "kotlin")):
         return _names(m.group(1) or m.group(2))
+    if fam == "swift":  # `{ $0.name < $1.name }`: shorthand parameters, as many as it uses
+        body = text[:matching(text, 0)] if text.startswith("{") and matching(text, 0) > 0 else text
+        used = [int(n) for n in re.findall(r"\$(\d)", body)]
+        return [f"${i}" for i in range(max(used) + 1)] if used else []
     return ["it"] if fam == "kotlin" else []
 
 
