@@ -37,8 +37,8 @@ def _code_version() -> str:
     if _CODE is None:
         h = hashlib.sha1(str(CACHE_VERSION).encode())
         here = os.path.dirname(os.path.abspath(__file__))
-        for name in sorted(os.listdir(here)):
-            if name.endswith((".py", ".txt")):
+        for name in sorted(os.listdir(here)) + sorted("packs/" + n for n in os.listdir(os.path.join(here, "packs"))):
+            if name.endswith((".py", ".txt", ".toml")):
                 with open(os.path.join(here, name), "rb") as fh:
                     h.update(name.encode() + b"\0" + fh.read())
         _CODE = f"{CACHE_VERSION}-{h.hexdigest()[:12]}"
@@ -145,6 +145,7 @@ class Project:
     parse_ms: int = 0
     config_problems: list[str] = field(default_factory=list)
     precise: dict = field(default_factory=dict)  # what the language servers settled (precise.py), when asked
+    params: dict = field(default_factory=dict)  # the packs' [[param]] entries in force ("<pack>/<id>" -> entry)
 
     # ---- lookups
     def module_of_file(self, rel: str) -> Module | None:
@@ -284,6 +285,11 @@ def load(root: str, config_path: str | list[str] | None = None, use_cache: bool 
         precise = bool(config.get("precise", {}).get("enabled"))
     project = Project(root, config, files=files)
     project.config_problems = problems
+    # what the frameworks in use hand the functions they call (packs' [[param]]):
+    # type knowledge, so a detected framework's applies without being listed
+    from . import init as init_mod
+    project.params = config_mod.pack_params(sorted(set(proj_cfg.get("packs", []) or [])
+                                                   | set(init_mod.detect_packs(root, files))))
     res = _res_map(files)
     # caches are keyed by content and shared by every checkout of the repo (a
     # lane's worktree reuses the main checkout's parse, graph and command runs)

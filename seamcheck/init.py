@@ -78,12 +78,14 @@ _FRAMEWORKS = {
 }
 
 
-def _uses_react(text: str) -> bool:
+def _uses(text: str, dep: str) -> bool:
+    """A package.json depends on `dep` (or is it)."""
     try:
         pkg = json.loads(text)
     except ValueError:
         return False
-    return isinstance(pkg, dict) and any("react" in (pkg.get(k) or {}) for k in ("dependencies", "devDependencies", "peerDependencies"))
+    return isinstance(pkg, dict) and (pkg.get("name") == dep or any(
+        dep in (pkg.get(k) or {}) for k in ("dependencies", "devDependencies", "peerDependencies")))
 
 
 def detect_packs(root: str, files: list[str]) -> list[str]:
@@ -100,8 +102,8 @@ def detect_packs(root: str, files: list[str]) -> list[str]:
                 text = fh.read()
         except OSError:
             continue
-        if base == "package.json" and _uses_react(text):
-            found.add("react")
+        if base == "package.json":
+            found |= {p for p in ("react", "express") if _uses(text, p)}
         for pack, (names, rx) in _FRAMEWORKS.items():
             if base in names and rx.search(text):
                 found.add(pack)

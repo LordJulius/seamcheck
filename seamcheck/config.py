@@ -117,6 +117,21 @@ def available_packs() -> list[str]:
     return sorted(n[:-5] for n in os.listdir(PACKS_DIR) if n.endswith(".toml"))
 
 
+def pack_params(names) -> dict[str, dict]:
+    """The `[[param]]` entries of these packs, as {"<pack>/<id>": entry}: what
+    a framework hands the functions it calls (Express's `req`, `res`)."""
+    out = {}
+    for name in names:
+        path = os.path.join(PACKS_DIR, f"{name}.toml")
+        if not os.path.exists(path):
+            continue
+        with open(path, "rb") as fh:
+            pack = tomllib.load(fh)
+        for entry in pack.get("param", []):
+            out[f"{name}/{entry.get('id', '')}"] = entry
+    return out
+
+
 def _apply_packs(merged: dict, listed: dict[str, str], problems: list[str]) -> None:
     """Pack rules go first, as `<pack>/<id>`, named after the config file that
     listed the pack (where a project goes to change them). A project rule with

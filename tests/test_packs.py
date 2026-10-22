@@ -33,6 +33,9 @@ GOOD = {
                                   "    return this.state.n == 1;\n  }\n}\n")},
     "qml": {**QML_FILES, "qml/Spotify.qml": SPOTIFY_AFTER,
             "qml/VButton.qml": "import QtQuick\nimport VeridianOsd\nRectangle {\n  radius: Tokens.gap\n}\n"},
+    "express": {"package.json": '{"name": "shop", "dependencies": {"express": "^5"}}',
+                "app.js": "const express = require('express')\nconst app = express()\n"
+                          "app.get('/', function (req, res) {\n  res.send('hi')\n})\n"},
     "compose": {"app/src/main/java/LauncherViewModel.kt": VM_AFTER,
                 "app/src/main/java/Sync.kt": "class Sync(val vm: VM) {\n  fun start() {\n    vm.viewModelScope.launch { run() }\n  }\n}\n",
                 "app/src/test/java/SyncTest.kt": "fun go() {\n  GlobalScope.launch { }\n}\n"},
@@ -138,6 +141,35 @@ class InitDetectsPacks(unittest.TestCase):
             cfg, problems = config.load(root)
             self.assertEqual(problems, [])
             self.assertIn("phoenix/ets-owner", {r["id"] for r in cfg["rule"]})
+
+
+class ExpressParams(unittest.TestCase):
+    """The express pack's [[param]]: a handler's `res` is express's response,
+    detected from package.json without being listed."""
+
+    def load(self, files):
+        from seamcheck import core
+        d = tempfile.TemporaryDirectory()
+        for name, body in files.items():
+            path = os.path.join(d.name, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write(body)
+        self.addCleanup(d.cleanup)
+        return core.load(d.name, use_cache=False)
+
+    def test_in_an_app_res_send_is_the_librarys(self):
+        p = self.load({"package.json": '{"name": "shop", "dependencies": {"express": "^5"}}',
+                       "mail.js": "function send(to) {}\nmodule.exports = { send }\n",
+                       "app.js": "const app = require('express')()\n"
+                                 "function routes() {\n  app.get('/', (req, res, next) => {\n    res.send('hi')\n  })\n}\n"})
+        self.assertEqual(p.edges.get("app.routes", []), [])  # not a guess at mail.send
+
+    def test_in_express_itself_res_is_lib_response(self):
+        p = self.load({"package.json": '{"name": "express"}',
+                       "lib/response.js": "var res = module.exports = {}\nres.send = function send(body) {}\n",
+                       "test/res.send.js": "function t() {\n  app.use(function (req, res) {\n    res.send(1)\n  })\n}\n"})
+        self.assertEqual([(d, ex) for d, _, ex in p.edges.get("test/res.send.t", [])], [("lib/response.send", True)])
 
 
 if __name__ == "__main__":
