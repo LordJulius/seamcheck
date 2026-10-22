@@ -176,6 +176,8 @@ def lambda_args(fam: str, args: list[str]) -> list[tuple[int, list[str]]]:
             if m:
                 out.append((i, _names(m.group(1), typed_ok=True)))
                 continue
+        if fam == "swift":  # `upload(multipartFormData: { form in ... })`
+            a = re.sub(r"^[A-Za-z_]\w*\s*:\s*(?=\{)", "", a)
         if fam in ("kotlin", "swift") and a.startswith("{"):
             out.append((i, brace_lambda(fam, a)))
         if fam == "rust":

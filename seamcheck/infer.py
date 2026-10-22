@@ -880,6 +880,10 @@ class Types:
                     and not self.p.by_name.get(seg[:-2]):
                 cur = EXT  # `el.getElementsByTagName('a')`: whatever el is, that finds DOM nodes
                 continue
+            if cur is None and seg in _SWIFT_SEQ_OPS and mod.file.endswith(".swift") and not any(
+                    g.file.endswith(".swift") for g in self.p.by_name.get(seg[:-2], ())):
+                cur = EXT  # `xs.map { ... }`: whatever xs is, the standard library's Array
+                continue
             if cur is None or is_ext(cur):
                 if cur is not None and "[]" in chain[chain.index(seg):] and not (
                         mod.file.endswith(_JS_EXTS[:-1]) and set(chain) & _DOM_QUERIES):
@@ -964,7 +968,11 @@ class Types:
             return self.held(mod, f, f.bound[f"{seg}@{self.line}"], depth + 1, self_mods)
         if f is not None:
             held = f.bound.get(seg)
-            if held and held.startswith("expr:") and held[5:].split("\x1f")[0] == seg:
+            if held and held.startswith("expr:") and held[5:].split("\x1f")[0] == seg and self.line \
+                    and 0 < self.line <= len(fm.raw) and re.search(
+                        rf"\b{re.escape(seg)}\s*=\s*(?:try[!?]?\s+|await\s+)*{re.escape(seg)}\b", fm.raw[self.line - 1]):
+                held = None  # the rebinding's own line: `guard let x = x.read()` reads the outer x
+            elif held and held.startswith("expr:") and held[5:].split("\x1f")[0] == seg:
                 # `client = client.newBuilder().build()`: rebuilt from the field (or outer
                 # value) of that name, so the chain starts there
                 base = self.first(mod, None, seg, depth + 1, self_mods or self.own_class(mod, f))
@@ -1320,6 +1328,10 @@ class Types:
 
 
 # collection methods whose callback gets an element (at that parameter: `fold(init, |acc, x|)` -> 1)
+# Swift Sequence operations: they build a standard-library Array (or String) from any receiver
+_SWIFT_SEQ_OPS = {"map()", "filter()", "compactMap()", "flatMap()", "sorted()", "reversed()", "enumerated()",
+                  "joined()", "split()", "dropFirst()", "dropLast()", "prefix()", "suffix()", "lowercased()",
+                  "uppercased()", "trimmingCharacters()", "components()", "replacingOccurrences()"}
 _ELEMENT_HOFS = {n: 0 for n in ("map", "filter", "all", "any", "for_each", "find", "position", "flat_map", "filter_map",
                                 "take_while", "skip_while", "inspect", "max_by_key", "min_by_key", "sort_by_key",
                                 "partition", "find_map", "forEach", "some", "every", "findIndex", "findLast", "flatMap",

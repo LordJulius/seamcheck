@@ -1375,6 +1375,26 @@ def _params(sig: str) -> list[tuple[str, str]]:
 from . import infer as infer_mod  # noqa: E402
 
 
+def _overload_starts(raw: list[str], g: Func) -> list[int]:
+    """The lines of every `func name(` in the type block `g` is in: overloads
+    share one Func (`add(name:value:)`, `add(_ header:)`)."""
+    def owner(i):  # the top-level declaration line i sits under
+        while i >= 0 and not re.match(r"(?:\w+\s+)*(?:struct|class|enum|extension|protocol|actor)\s", raw[i]):
+            i -= 1
+        return i
+    top = owner(g.start - 1)
+    pat = re.compile(r"\s*(?:@\w+\s+)*(?:\w+\s+)*func\s+" + re.escape(g.name) + r"\s*[(<]")
+    starts = [g.start]
+    if top < 0:
+        return starts
+    for i in range(top + 1, len(raw)):
+        if re.match(r"(?:\w+\s+)*(?:struct|class|enum|extension|protocol|actor)\s", raw[i]):
+            break
+        if i + 1 != g.start and pat.match(raw[i]):
+            starts.append(i + 1)
+    return starts
+
+
 def _param_type(project: Project, types, mod, text: str, k: int, label: str, index: int = 0,
                 f: Func | None = None, line_no: int = 0) -> str:
     """The declared type of the parameter `label` (or the first, unlabelled
@@ -1412,11 +1432,12 @@ def _param_type(project: Project, types, mod, text: str, k: int, label: str, ind
         gm = project.modules.get(g.module)
         if gm is None:
             continue
-        sig = " ".join(gm.raw[g.start - 1:g.start + 6])
-        ps = _params(sig[sig.find(g.name):] if g.name in sig else sig)
-        hit = [t for lab, t in ps if lab == label] if label else ([ps[index][1]] if index < len(ps) and ps[index][0] == "_" else [])
-        if hit:
-            found.add(hit[0])
+        for start in _overload_starts(gm.raw, g):
+            sig = " ".join(gm.raw[start - 1:start + 6])
+            ps = _params(sig[sig.find(g.name):] if g.name in sig else sig)
+            hit = [t for lab, t in ps if lab == label] if label else ([ps[index][1]] if index < len(ps) and ps[index][0] == "_" else [])
+            if hit:
+                found.add(hit[0])
     if not found and label and (name == "init" or name[:1].isupper()) and mod is not None:
         # a struct's memberwise init (`Element(value: .option(x))`, `self.init(base: .message(t))`):
         # the parameter is the stored property of that name
@@ -1677,6 +1698,10 @@ def _build_edges(project: Project) -> None:
                     targets = [(hits[0], True)]
                 elif c.name[:1].isupper() and not _in_scope(project, (project.modules.get(mod.owner, mod) if mod.owner else mod).name, c.name):
                     tmods, ex, declared = types.type_modules(mod, c.name)
+                    if declared and not _is_test_file(project, f.file):
+                        # product code never builds a test's type (a test target's `extension URL`)
+                        tmods = [m for m in tmods if not _is_test_file(project, project.modules[m].file)]
+                        declared = bool(tmods)
                     if declared:
                         ctor, _ = types.method([m for m in tmods if types.searchable(m) or project.modules[m].kind],
                                                c.name) if tmods else ([], False)

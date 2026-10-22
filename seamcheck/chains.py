@@ -209,6 +209,19 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
     return _bare_first(segs)
 
 
+def _close(code: str, i: int) -> int:
+    """The index of the bracket closing the one at code[i]; -1 when none."""
+    depth = 0
+    for k in range(i, len(code)):
+        if code[k] in "([{":
+            depth += 1
+        elif code[k] in ")]}":
+            depth -= 1
+            if depth == 0:
+                return k
+    return -1
+
+
 def expression(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
     """The chain an expression starting at `pos` builds (the right side of
     `x = <expr>`): `repo.find(id).first()` -> ("repo", "find()", "first()");
@@ -225,6 +238,8 @@ def expression(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
         i += 1
     segs: list[str] = []
     new = False
+    # `if let x = f() {`: that brace opens the block, not a trailing closure
+    cond = TRAILING_CLOSURES and re.search(r"\b(?:if|guard|while)\b|^\s*,", code[code.rfind("\n", 0, pos) + 1:pos]) is not None
     if code.startswith("new ", i):
         new = True
         i += 4
@@ -306,6 +321,15 @@ def expression(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                 segs.append("[]")
                 i = k + 1
                 continue
+            if TRAILING_CLOSURES and i < n and code[i] == "{" and segs and not segs[-1].startswith("new ") \
+                    and not cond and segs[-1][:1].islower():  # `x.response { _ in ... }`: the closure is an argument
+                k = _close(code, i)
+                if k < 0:
+                    return ()
+                if not segs[-1].endswith("()"):
+                    segs[-1] += "()"
+                i = k + 1
+                continue
             if code.startswith("!!", i) or (i < n and code[i] == "!" and code[i + 1:i + 2] in (".", "")):
                 segs.append("!!")
                 i += 2 if code.startswith("!!", i) else 1
@@ -323,6 +347,8 @@ def expression(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                 break
         else:
             end = code[i:i + 1]
+            if cond and (end == "{" or code[i:].lstrip(" \t").startswith("else")):
+                return _bare_first(segs)  # `if let x = f() {`, `guard let x = f() else {`
             if end and end not in ";,)\n\r}]" and not code[i:].lstrip(" \t").startswith(("//", "#", "as ", "?:", "??", "||", "or ")):
                 return ()  # more expression follows: `a.b() + 1`, a ternary...
             return _bare_first(segs)

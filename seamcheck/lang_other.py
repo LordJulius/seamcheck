@@ -1034,6 +1034,16 @@ _RET_MODS = {"public", "private", "protected", "internal", "static", "final", "a
              "fn", "func", "fun", "def", "function", "operator", "infix", "suspend", "tailrec", "open", "export"}
 
 
+def _after_params(sig: str) -> int:
+    """Where the parameter list ends (its `)`): a parameter's own function type
+    (`handler: () -> Void`) is no return type."""
+    k = sig.find("(")
+    if k < 0 or sig[:k].strip(" \t\n<>,:?\w") != "":
+        return 0
+    close = lambdas.matching(sig, k)
+    return close if close > 0 else 0
+
+
 def _returns(tk: str, prefix: str, sig: str, name: str, cls: str) -> str:
     """The return type's class: `Foo bar(` (Java, C#, C++: the words before
     the name), `): Foo` (TS, Kotlin, PHP), `-> Foo` (Rust, Swift), Go's result
@@ -1049,7 +1059,7 @@ def _returns(tk: str, prefix: str, sig: str, name: str, cls: str) -> str:
         return type_name(res.lstrip("*"))
     pat = _RET_AFTER.get(tk)
     if pat:
-        m = pat.search(sig)
+        m = pat.search(sig, _after_params(sig))
         return type_name(m.group(1)) if m else ""
     if tk in ("jvm", "cpp"):
         p = re.sub(r"\[[^\]]*\]|@\w+(?:\([^)]*\))?", " ", prefix)  # attributes / annotations
@@ -1070,7 +1080,7 @@ def _return_text(tk: str, prefix: str, sig: str) -> str:
         return res[1:].split(",")[0].strip().split()[-1] if res.startswith("(") and res[1:].strip() else res
     pat = _RET_AFTER.get(tk)
     if pat:
-        m = pat.search(sig)
+        m = pat.search(sig, _after_params(sig))
         return m.group(1).strip() if m else ""
     if tk in ("jvm", "cpp"):
         p = re.sub(r"\[[^\]]*\]|@\w+(?:\([^)]*\))?", " ", prefix) if tk == "jvm" else prefix
