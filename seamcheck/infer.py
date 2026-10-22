@@ -290,6 +290,8 @@ class Types:
             g = self.bare(mod, f, name)
             if g is not None:
                 return self.returns(g, None, depth + 1)
+            if mod.file.endswith(".rb") and len(got := {self.returns(h, [h.module], depth + 1) for h in self.method(self.own_class(mod, f) or [], name)[0]}) == 1:
+                return got.pop()  # Ruby: a mixin's `site` that every includer's `site` returns alike (lang_ruby.py)
             if name in fm.external:
                 return EXT
             if name[:1].isupper():
