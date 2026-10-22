@@ -97,14 +97,23 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
             k = _match_back(code, i, "]", "[")
             if k < 0:
                 return ()
-            segs.append("[]")
-            i = _skip_back_ws(code, k)
-            if i > 0 and code[i - 1] in _IDENT_CH:
-                s = _ident_back(code, i)
-                segs.append(code[s:i])
-                i = s
+            j = _skip_back_ws(code, k)
+            if j > 0 and (code[j - 1] in _IDENT_CH or code[j - 1] in ")]"):
+                segs.append("[]")
+                i = j
+                if code[j - 1] in _IDENT_CH:
+                    s = _ident_back(code, j)
+                    segs.append(code[s:j])
+                    i = s
+                else:
+                    segs.append("(...)")
+                    break
             else:
+                segs.append("<literal>")  # `[1, 2].map(...)`: an array literal
                 break
+        elif ch in "\"'`":
+            segs.append("<literal>")  # `"".join(...)`, `b"".join(...)`: a string's method
+            break
         elif ch in _IDENT_CH:
             s = _ident_back(code, i)
             name = code[s:i]

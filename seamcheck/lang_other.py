@@ -282,10 +282,18 @@ def parse_python(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         elif b - a > f.end - f.start:  # `@property x` and its `@x.setter`: one function, the longest span
             f.start, f.end, f.code = a + 1, b + 1, "\n".join(lines[a:b + 1])
         _py_collect(f, lines, a, b, first=True)
+        _py_types(f, lines, a, b, test_file, fixture=any(
+            re.match(r"\s*@(?:pytest\.)?fixture\b", lines[j]) for j in range(max(0, a - 3), a)))
     top = Func(fm.name, "<top>", rel, 1, len(lines), "", kind="top")
     for i, ln in enumerate(lines):
         if not inside[i] and ln.strip() and not ln.lstrip().startswith(("class ", "import ", "from ")):
             _py_collect(top, lines, i, i, first=False)
+            if not ln[:1].isspace():  # a module-level variable (`app = Flask(__name__)`, `current_app: Flask = ...`)
+                am = re.match(r"([A-Za-z_]\w*)\s*:\s*([^=]+?)\s*(?:=|$)", ln)
+                if am and type_name(am.group(2)):
+                    fm.bound.setdefault(am.group(1), "type:" + type_name(am.group(2)))
+                for nm_, held in _assignments("py", ln):
+                    fm.bound.setdefault(nm_, held)
     fm.funcs.append(top)
     # declared types: the class's `self.x = Foo()` / `self.x: Foo` for its methods
     for k, (a, b, ind, kind, name) in enumerate(blocks):
@@ -301,11 +309,60 @@ def parse_python(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         for nm, tys in seen.items():
             if len(tys) == 1:
                 cm.bound.setdefault(nm, "type:" + next(iter(tys)))
+        # `self.app = app` with `app: Flask` a parameter, `self.x = self.make()`
+        for g in cm.funcs:
+            for m in re.finditer(r"\bself\.([A-Za-z_]\w*)\s*(?::[^=\n]*)?=(?!=)", g.code):
+                ch = expression(g.code, m.end())
+                if not ch or m.group(1) in cm.bound:
+                    continue
+                held = g.bound.get(ch[0], "") if len(ch) == 1 else ""
+                if held.startswith("type:"):
+                    cm.bound[m.group(1)] = held
+                elif ch[0] in ("self", "cls") or ch[0][:1].isupper() or ch[0].endswith("()") or \
+                        ch[0] in fm.aliases or ch[0] in fm.imported:
+                    cm.bound[m.group(1)] = "expr:" + "\x1f".join(ch)
     for cm in mods.values():
         if cm is not fm:
             # bare names in a class resolve through its file: share its imports
             cm.aliases, cm.imported, cm.uses = fm.aliases, fm.imported, fm.uses
     return [fm] + [m for m in mods.values() if m is not fm]
+
+
+def _py_types(f: Func, lines: list[str], a: int, b: int, test_file: bool, fixture: bool) -> None:
+    """What a Python function returns (`-> Foo`, else its last `return` /
+    a fixture's `yield`), what its locals are assigned, and in a test file
+    each plain parameter: the pytest fixture of that name."""
+    head, k = lines[a], a
+    while "):" not in head and ")->" not in head.replace(" ", "") and k < b:
+        k += 1
+        head += " " + lines[k].strip()
+    rm = re.search(r"\)\s*->\s*([^:]+?)\s*:\s*$", head)
+    if rm and type_name(rm.group(1)):
+        f.returns = type_name(rm.group(1))
+    body = "\n".join(lines[a:b + 1])
+    if not f.returns:
+        rets = re.findall(r"^[ \t]*(?:return|yield)[ \t]+(.+)$", body, re.M) if fixture else \
+            re.findall(r"^[ \t]*return[ \t]+(.+)$", body, re.M)
+        if rets:
+            if all(r.strip() in ("self", "cls") for r in rets):
+                f.returns = "Self"  # a builder step
+            else:
+                ch = expression(rets[-1], 0)
+                if ch:
+                    f.returns = "expr:" + "\x1f".join(ch)
+    for nm_, held in _assignments("py", body):
+        if nm_ != f.name:
+            f.bound.setdefault(nm_, held)
+    for m in re.finditer(r"\bwith[ \t]+(.+?)[ \t]+as[ \t]+([A-Za-z_]\w*)[ \t]*[:,)]", body):
+        ch = expression(m.group(1) + "\n", 0)  # `with httpx.Client() as client:` (a context manager gives itself)
+        if ch:
+            f.bound.setdefault(m.group(2), "expr:" + "\x1f".join(ch))
+    if test_file:
+        pm = re.search(r"\(([^)]*)\)", head)
+        for prm in (pm.group(1).split(",") if pm else []):
+            prm = prm.strip()
+            if re.match(r"^[a-z_]\w*$", prm) and prm not in ("self", "cls", "request"):
+                f.bound.setdefault(prm, "fixture:" + prm)
 
 
 def _py_collect(f: Func, lines: list[str], a: int, b: int, first: bool) -> None:

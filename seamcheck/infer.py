@@ -294,6 +294,21 @@ class Types:
             return self.instance(mod, held[5:], self_mods)
         if held.startswith("expr:"):
             return self.chain(mod, f, tuple(held[5:].split("\x1f")), depth + 1, self_mods=self_mods)
+        if held.startswith("fixture:"):
+            g = self.fixture(mod, held[8:])
+            return self.returns(g, None, depth + 1) if g is not None else None
+        return None
+
+    def fixture(self, mod, name: str):
+        """The pytest fixture a test's parameter names: in its own file, else
+        the nearest conftest.py up the tree."""
+        d = os.path.dirname(mod.file)
+        for rel in [mod.file] + [os.path.join(d2, "conftest.py") for d2 in _parents(d)]:
+            for m in self.p.by_file.get(rel, ()):
+                g = self.p.funcs.get(f"{m.name}.{name}")
+                if g is not None and any(re.match(r"\s*@(?:pytest\.)?fixture\b", m.raw[j])
+                                         for j in range(max(0, g.start - 4), g.start - 1)):
+                    return g
         return None
 
     def instance(self, mod, ty: str, self_mods=None):
@@ -394,6 +409,8 @@ class Types:
                 got = self.instance(mod, name, self_mods)  # `Foo(...)`: a constructor
                 return got
             return None
+        if seg == "<literal>":
+            return EXT  # a string / array / number literal: the language's own type
         if seg in ("(...)", "[]", "?", "!!"):
             return None
         if fm.bound.get(seg) == "qmlns:":
@@ -429,6 +446,9 @@ class Types:
         if seg in fm.imported:
             from .core import _defining_module
             w, n = fm.imported[seg]
+            vm = self._var_module(w, n)
+            if vm is not None:  # an imported module-level variable (`from flask import current_app`)
+                return self.held(vm[0], None, vm[0].bound[vm[1]], depth + 1)
             dm = _defining_module(p, w, n)
             if dm:
                 inner = f"{dm}.{n}"
@@ -446,6 +466,18 @@ class Types:
             return EXT  # a type or module the project doesn't declare
         if fm.file.endswith(".qml") and seg not in self.qml_names and seg not in ("parent", "model", "modelData", "index"):
             return EXT  # a name no project QML file declares: the window's / framework's
+        return None
+
+    def _var_module(self, where: str, name: str, depth: int = 0):
+        """(module, its name there) for a module-level variable, through re-exports."""
+        m = self.p.modules.get(where)
+        if m is None or depth > 4:
+            return None
+        if name in m.bound and not m.owner and m.file.endswith(".py"):
+            return m, name
+        if name in m.imported:
+            w, n = m.imported[name]
+            return self._var_module(w, n, depth + 1)
         return None
 
     def bare(self, mod, f, name: str):
@@ -532,6 +564,14 @@ class Types:
 
 _GO_BUILTIN = {"string", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64",
                "float32", "float64", "bool", "byte", "rune", "error", "any", "uintptr", "complex64", "complex128"}
+
+
+def _parents(d: str) -> list[str]:
+    out = [d]
+    while d:
+        d = d.rsplit("/", 1)[0] if "/" in d else ""
+        out.append(d)
+    return out
 
 
 def resolve_bases(project) -> None:
