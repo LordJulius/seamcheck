@@ -62,6 +62,43 @@ public partial class Pool
 }
 """,
     "src/Other.cs": "namespace P;\npublic class Other\n{\n    public void TryGet(string k)\n    {\n    }\n    public void Get()\n    {\n    }\n}\n",
+    "src/Services.cs": """namespace P;
+
+public static class Services
+{
+    public static void AddPipeline(this IServiceCollection services, string key, Action<Builder> configure)
+    {
+    }
+
+    public static void AddPipeline<TResult>(this IServiceCollection services, string key, Action<Builder<TResult>> configure)
+    {
+    }
+
+    public static void AddPipeline(this IServiceCollection services, string key, Action<Plain, Typed> configure)
+    {
+    }
+}
+""",
+    "src/Wire.cs": """namespace P;
+
+public class Wire
+{
+    public void One(IServiceCollection services)
+    {
+        services.AddPipeline("a", b => b.Make());
+    }
+
+    public void Two(IServiceCollection services)
+    {
+        services.AddPipeline("a", (p, t) => p.Run());
+    }
+
+    public void Generic(IServiceCollection services)
+    {
+        services.AddPipeline<int>("a", g => g.Make());
+    }
+}
+""",
     "src/Use.cs": """namespace P;
 
 public class Use
@@ -127,6 +164,11 @@ class CSharp(unittest.TestCase):
 
     def test_new_then_chain_is_the_chain_end(self):
         self.assertEqual(_to(self.p, "src/Use.Chained", "Run"), {("src/Plain.Run", True)})
+
+    def test_lambda_parameter_from_callee(self):
+        self.assertEqual(_to(self.p, "src/Wire.One", "Make"), {("src/Builder.Make", True)})
+        self.assertEqual(_to(self.p, "src/Wire.Two", "Run"), {("src/Plain.Run", True)})
+        self.assertEqual(_to(self.p, "src/Wire.Generic", "Make"), {("src/Builder.Builder`1.Make", True)})
 
 
 if __name__ == "__main__":

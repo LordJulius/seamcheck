@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import re
 
-from .chains import UNWRAP
+from .chains import UNWRAP, generic_name, type_name
 
 UNKNOWN = ("unknown", (), False)  # declared, of a type the code doesn't say (a QML `property var`)
 EXT = ("ext", (), True)  # a library value: every call on it is the library's (("ext", (type,), True) when named)
@@ -351,10 +351,76 @@ class Types:
             return self.chain(mod, f, tuple(held[5:].split("\x1f")), depth + 1, self_mods=self_mods)
         if held.startswith("pack:"):
             return self.pack_param(held[5:])
+        if held.startswith("lam:"):
+            return self.lambda_param(mod, f, held[4:], depth)
         if held.startswith("fixture:"):
             g = self.fixture(mod, held[8:], f)
             return self.returns(g, None, depth + 1) if g is not None else None
         return None
+
+    def lambda_param(self, mod, f, spec: str, depth: int):
+        """A lambda's parameter: the type the called function's parameter at
+        that place hands its callback (`AddPipeline(k, b => ...)` with
+        `Action<Builder> configure`: a Builder). None unless every overload
+        that takes a function there agrees."""
+        from . import lambdas
+        from .core import _in_scope
+        parts = spec.split("\x1e")
+        if len(parts) != 3:
+            return None
+        argi, pi, nparams, targs = map(int, parts[0].split("/"))
+        name, chain = parts[1], tuple(s_ for s_ in parts[2].split("\x1f") if s_)
+        key = ("\0lam", mod.name, f.id if f else "", spec)
+        if key in self.cache:
+            return self.cache[key]
+        self.cache[key] = None  # (a lambda whose receiver is its own parameter)
+        hits, shift = [], 0
+        if chain:
+            v = self.chain(mod, f, chain, depth + 1)
+            if v is None or v is UNKNOWN:
+                return None
+            if v[0] == "ext":
+                hits = (self.ext_fns.get((v[1][0], name)) or self.ext_fns.get((v[1][0].split("`")[0], name), [])) if v[1] else []
+                shift = 1  # (C#: `this T x` is the first parameter)
+            elif v[0] == "static":
+                hits = [h for mn in v[1] for h in _in_scope(self.p, mn, name)] or self.method(list(v[1]), name)[0]
+            elif v[0] == "inst":
+                hits = self.method(list(v[1]), name)[0]
+        else:
+            g = self.bare(mod, f, name)
+            hits = [g] if g is not None else []
+        cands = []  # (type-parameter count, callee module, the lambda parameter's type)
+        for g in hits:
+            sh = shift if g.recv and g.file.endswith(".cs") else 0
+            if g.file.endswith(".cs") and chain and v[0] == "inst" and g.recv:
+                sh = 1  # an extension method called on its receiver
+            for ov in g.ptypes.split(lambdas.OV) if g.ptypes else []:
+                tc, _, ov = ov.partition(lambdas.TARGS)
+                ps = ov.split(lambdas.PARAM) if ov else []
+                if argi + sh < len(ps):
+                    lp = lambdas.lambda_params(ps[argi + sh])
+                    if len(lp) == nparams and lp[pi]:  # (a two-parameter lambda fits `Action<A, B>`, not `Action<A>`)
+                        cands.append((int(tc or 0), g.module, lp[pi]))
+        if targs >= 0:  # `Add<T>(b => ...)`: the overloads taking that many type arguments
+            cands = [c_ for c_ in cands if c_[0] == targs]
+        elif len({c_[2] for c_ in cands}) > 1:
+            # none given: a type parameter only a lambda's parameter mentions can't be
+            # inferred (C# picks `Add<TKey>` over `Add<TKey, TResult>`)
+            low = min(c_[0] for c_ in cands)
+            cands = [c_ for c_ in cands if c_[0] == low]
+        tys = {(c_[1], c_[2]) for c_ in cands}
+        if len({t for _, t in tys}) != 1:
+            return None
+        gm_name, ty = tys.pop()
+        gm = self.p.modules.get(gm_name)
+        if gm is None or lambdas.generic_param(ty):
+            return None
+        ty = generic_name(ty) if gm.file.endswith(".cs") else type_name(ty)
+        if not ty:
+            return None
+        got = self.instance(gm, ty)
+        self.cache[key] = got
+        return got
 
     def _lib_results(self) -> set:
         got = self.cache.get("\0libres")
