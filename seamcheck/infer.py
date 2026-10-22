@@ -228,6 +228,9 @@ class Types:
             return found, True
         impls = []
         for mn in mods:
+            m = self.p.modules.get(mn)
+            if m is not None and m.methods and m.file.endswith(".go") and name in m.methods:
+                impls += [g for g in self._go_impls(m, name) if g not in impls]
             for sub in self.p.children.get(mn, ()):
                 for part in [sub] + self.parts(self.p.modules[sub]):  # (a C++ subclass's .cpp half)
                     g = self.p.funcs.get(f"{part}.{name}")
@@ -245,6 +248,24 @@ class Types:
     def one_type(self, funcs) -> bool:
         """These functions are one type's (overloads, or its parts)."""
         return len({self._primary(g.module) for g in funcs}) == 1
+
+    def _go_impls(self, iface, name: str) -> list:
+        """A Go interface's implementations: every project type whose methods
+        (across its files) cover the interface's method set."""
+        key = ("\0goimpl", iface.name)
+        types_ = self.cache.get(key)
+        if types_ is None:
+            have: dict[tuple[str, str], set[str]] = {}
+            where: dict[tuple[str, str], list[str]] = {}
+            for m in self.p.modules.values():
+                if m.owner and m.file.endswith(".go") and m.kind != "interface" and m.decls:
+                    k = (self._pkg_of(m.name), m.decls[0])
+                    have.setdefault(k, set()).update(f.name for f in m.funcs)
+                    where.setdefault(k, []).append(m.name)
+            need = set(iface.methods)
+            types_ = [mods for k, mods in where.items() if need <= have[k]]
+            self.cache[key] = types_
+        return [g for mods in types_ for mn in mods if (g := self.p.funcs.get(f"{mn}.{name}"))]
 
     def field(self, mods: list[str], name: str, depth: int):
         """A field's value; UNKNOWN when the class declares it without a type

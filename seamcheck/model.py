@@ -83,6 +83,9 @@ class Module:
     # file, a C# `partial`, C++ `Foo::bar` bodies in a .cpp)
     kind: str = ""
     unresolved: bool = False  # a supertype the project doesn't declare (core sets it)
+    # an interface's declared methods (Go: its implementations are the types
+    # whose methods cover them; nothing says `implements`)
+    methods: list[str] = field(default_factory=list)
     # Modules whose names this one re-exports whole (JS `export * from`,
     # Python `from x import *`): a lookup that misses here follows them.
     reexports: list[str] = field(default_factory=list)

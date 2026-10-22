@@ -1334,7 +1334,11 @@ def _build_edges(project: Project) -> None:
                     elif cls:
                         _nothing(project, f, c)  # a project class with no __init__ of its own: no function runs
                         continue
-                targets = [(t, len(hits) == 1) for t in hits]
+                # Go: two functions of one name in one package are build variants
+                # (`_windows.go` / `_unix.go`): the call reaches whichever is built
+                variants = f.file.endswith(".go") and len({t.module for t in hits}) == len(hits) and \
+                    len({(project.modules[t.module].owner or t.module) and project.modules.get(project.modules[t.module].owner or t.module, project.modules[t.module]).package for t in hits}) == 1
+                targets = [(t, len(hits) == 1 or variants) for t in hits]
                 if not targets and c.name in mod.external:
                     _nothing(project, f, c)
                     continue
