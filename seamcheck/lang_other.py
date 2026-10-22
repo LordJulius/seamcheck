@@ -34,7 +34,7 @@ _JS = [
     # `static create = <T,>(\n  {a, b}: Opts,\n) => {`): a React class
     # component's handlers, none of which were functions
     re.compile(rf"^[ \t]*(?:(?:public|private|protected|static|readonly|override|declare|export|default|const|let|var)[ \t]+)*({_ID})[ \t]*[?!]?[ \t]*"
-               rf"(?::[^=\n]+)?=[ \t]*(?:async[ \t]+)?(?:<[^()]*?>[ \t]*)?"
+               rf"(?::[^=\n<]*(?:<[^;]{{0,800}}?>[^=\n]*)?)?=[ \t]*(?:async[ \t]+)?(?:<[^()]*?>[ \t]*)?"
                rf"(?:\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=;]+?)?=>|{_ID}[ \t]*=>)", re.M),
     # a method's start only (`static createElement<T extends X>(\n  {a}: {b?: number;} = {},\n): R & {...} {`):
     # the body scan below matches the brackets, and without a body it is a call
@@ -98,13 +98,13 @@ _KT_FIELD = re.compile(r"\b(?:val|var)\s+([a-z_]\w*)\s*:\s*([A-Z]\w*(?:\.[A-Z]\w
 _KT_NEW = re.compile(r"\b(?:val|var)\s+([a-z_]\w*)\s*=\s*([A-Z]\w*)\s*\(")
 _TS_NEW = re.compile(r"(?:\b(?:const|let|var)\s+|^\s*(?:(?:private|public|protected|readonly|static)\s+)*)"
                      r"([A-Za-z_$][\w$]*)\s*=\s*new\s+([A-Z][\w$]*)\s*[(<]", re.M)
-_TS_TYPED = re.compile(r"(?:\b(?:const|let|var)\s+|[(,]\s*|^\s*)([A-Za-z_$][\w$]*)\s*\??\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])", re.M)
-_TS_FIELD = re.compile(r"^\s*(?:(?:private|public|protected|readonly|static|declare)\s+)*([a-z_$][\w$]*)\s*[?!]?\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])\s*[;=]", re.M)
+_TS_TYPED = re.compile(r"(?:\b(?:const|let|var)\s+|[(,]\s*|^\s*)([A-Za-z_$][\w$]*)\s*\??\s*:\s*([A-Z][\w$]*(?:<[^<>\n]*(?:<[^<>\n]*>[^<>\n]*)*>)?)(?![\w$.<\[])", re.M)
+_TS_FIELD = re.compile(r"^\s*(?:(?:private|public|protected|readonly|static|declare)\s+)*([a-z_$][\w$]*)\s*[?!]?\s*:\s*([A-Z][\w$]*(?:<[^<>\n]*(?:<[^<>\n]*>[^<>\n]*)*>)?)(?![\w$.<\[])\s*[;=]", re.M)
 # a module-level `export const utf8Encoder: TextEncoder = new TextEncoder()`
-_TS_CONST = re.compile(r"^\s*(?:export\s+)?(?:declare\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])", re.M)
+_TS_CONST = re.compile(r"^\s*(?:export\s+)?(?:declare\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*:\s*([A-Z][\w$]*(?:<[^<>\n]*(?:<[^<>\n]*>[^<>\n]*)*>)?)(?![\w$.<\[])", re.M)
 _TS_INSTANCE_TYPE = re.compile(r"^\s*(?:(?:private|public|protected|readonly|static|declare)\s+)*([a-z_$][\w$]*)\s*[?!]?\s*:\s*"
                                r"InstanceType\s*<\s*typeof\s+([A-Z][\w$]*)\s*>\s*[;,]?\s*$", re.M)
-_TS_PARAM_FIELD = re.compile(r"\b(?:private|public|protected|readonly)\s+([a-z_$][\w$]*)\s*\??\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])")
+_TS_PARAM_FIELD = re.compile(r"\b(?:private|public|protected|readonly)\s+([a-z_$][\w$]*)\s*\??\s*:\s*([A-Z][\w$]*(?:<[^<>\n]*(?:<[^<>\n]*>[^<>\n]*)*>)?)(?![\w$.<\[])")
 # `Client client(...);` at a statement start, `QString name` as a parameter
 _CPP_VALUE = re.compile(r"(?:^|[(,])\s*(?:(?:const|final|this|using|await\s+using|out|ref|in|params|scoped|readonly)\s+)*"
                         r"([A-Z]\w*(?:\.[A-Z]\w*)*(?:<[^;=(){}]*>)?)\s+([a-z_]\w*)\s*(?=[({;=,)]|:(?!:)|in\s)", re.M)
@@ -176,7 +176,8 @@ def _typed(tk: str, text: str) -> list[tuple[str, str]]:
     if tk == "kotlin":
         return [(m.group(1), m.group(2)) for pat in (_KT_TYPED, _KT_NEW) for m in pat.finditer(text)]
     if tk == "js":
-        return [(m.group(1), m.group(2)) for pat in (_TS_TYPED, _TS_NEW) for m in pat.finditer(text)]
+        return [(m.group(1), t) for pat in (_TS_TYPED, _TS_NEW) for m in pat.finditer(text)
+                if (t := type_name(m.group(2)) if "<" in m.group(2) else m.group(2))]  # (`Router<string>`: a Router)
     if tk in ("cpp", "jvm"):
         out = [(m.group(2), t) for pat in ((_CPP_TYPED, _CPP_VALUE) if tk == "cpp" else (_CPP_VALUE,))
                for m in pat.finditer(text) if not _ALLCAPS.match(m.group(1))
@@ -1383,7 +1384,7 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 elif ch in ")]":
                     depth -= 1
                 elif depth <= 0 and ch == "{":
-                    if fam == "js" and code[:k].rstrip()[-1:] in (":", "&", "|", ",", "<"):
+                    if fam == "js" and not qml and code[:k].rstrip()[-1:] in (":", "&", "|", ",", "<") and ")" in code[m.end() - 1:k]:
                         e_ = lambdas.matching(code, k)  # a type literal (`): R & { get(): R } {`), not the body
                         if e_ > 0:
                             k = e_ + 1
@@ -1688,7 +1689,9 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                         got_fields.setdefault(m.group(2), set()).add(t)
             for pat_ in pats_:
                 for m in pat_.finditer(ln):
-                    got_fields.setdefault(m.group(1), set()).add(m.group(2))
+                    t_ = type_name(m.group(2)) if "<" in m.group(2) else m.group(2)
+                    if t_:
+                        got_fields.setdefault(m.group(1), set()).add(t_)
         for mname, fl in fields.items():
             target = mod if mname == mod.name else mods.get(mname)
             if target is not None:

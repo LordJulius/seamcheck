@@ -309,8 +309,13 @@ _WRAPPERS = {"Promise", "Task", "ValueTask", "Future", "Box", "Rc", "Arc", "Opti
              "Coroutine", "Observable", "Single", "Maybe", "NotRequired", "Required", "Final", "ClassVar",
              "Annotated", "ReadOnly", "Readonly", "WeakReference", "Nullable", "QPointer", "QSharedPointer",
              "QScopedPointer", "QWeakPointer", "unique_ptr", "shared_ptr", "weak_ptr", "optional", "Ptr",
+             "Partial", "NonNullable", "Awaited", "DeepReadonly", "Mutable",
              # what a `with` gives
              "ContextManager", "AbstractContextManager", "AsyncContextManager", "AbstractAsyncContextManager"}
+
+
+_TS_COMPUTED = {"ReturnType", "Parameters", "ConstructorParameters", "Pick", "Omit", "Exclude", "Extract",
+                "ThisParameterType", "OmitThisParameter", "ValueOf"}
 
 
 def generic_name(text: str) -> str:
@@ -358,6 +363,11 @@ def type_name(text: str) -> str:
         m = re.match(r"^([\w.:$\\]+)\s*[<\[](.*)[>\]]\s*[?!*&]*$", t, re.S)
         if m:
             head = m.group(1).split("::")[-1].split(".")[-1]
+            if head in _TS_COMPUTED:
+                return ""  # `ReturnType<typeof f>`, `Pick<T, K>`: a type computed from another, no class
+            if head == "InstanceType":  # `InstanceType<typeof App>`: an App
+                t = re.sub(r"^\s*typeof\s+", "", m.group(2)).strip()
+                continue
             if head in _WRAPPERS:
                 inner = m.group(2)
                 depth, cut = 0, len(inner)
