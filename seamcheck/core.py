@@ -891,6 +891,20 @@ def _is_test_file(project: Project, rel: str) -> bool:
     return cache[rel]
 
 
+def _jvm_member_home(project: Project, path: str) -> str:
+    """`okhttp3.TestUtil` / `okhttp3.CipherSuite.Companion`: the module of type
+    TestUtil (CipherSuite) in package okhttp3, or ""."""
+    pkg, _, typ = path.rpartition(".")
+    if typ == "Companion":
+        pkg, _, typ = pkg.rpartition(".")
+    for mn in project.packages.get(pkg, []):
+        m = project.modules[mn]
+        if typ in m.decls:
+            inner = f"{mn}.{typ}"
+            return inner if inner in project.modules else mn
+    return ""
+
+
 def _resolve_imports(project: Project) -> None:
     cache: dict = {}
     lang_ruby.link(project)  # Ruby: requires, constants and supertypes, across files (lang_ruby.py)
@@ -912,8 +926,13 @@ def _resolve_imports(project: Project) -> None:
                 if v.startswith("go?:") and r.startswith("pkg:"):
                     k = r.rpartition("#")[2]  # imported without a name: the package's own name
                 aliases[k] = r
+        jvm = m.file.endswith((".kt", ".kts", ".java"))
         for k, (v, n) in m.imported.items():
             r = res(v)
+            if jvm and r.startswith("pkg:") and r[4:] not in project.packages:
+                # `import okhttp3.TestUtil.headerEntries`: a member of object TestUtil in package
+                # okhttp3 (or of a companion); a package the project doesn't have: a library's
+                r = _jvm_member_home(project, r[4:]) or EXTERNAL
             if r == EXTERNAL:
                 ext.add(k)
             elif r:
