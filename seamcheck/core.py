@@ -969,6 +969,15 @@ def _python_names(project: Project) -> None:
                 m.aliases, m.imported, m.uses, m.reexports, m.external = fm.aliases, fm.imported, fm.uses, fm.reexports, fm.external
         if m.parent.startswith("py:"):
             m.parent = _py_class(project, m, m.parent[3:])
+        if m.bases and m.bases[0].startswith("py:"):
+            # every base (`class FlaskProxy(ProxyMixin[Flask], Flask)`); one from a
+            # library (`werkzeug.test.Client`) means an inherited method may be its
+            fm = project.modules.get(m.owner, m)
+            got = [c for b in m.bases if (c := _py_class(project, m, b[3:]))]
+            if any(not _py_class(project, m, b[3:]) and b[3:].split(".")[0] in fm.external for b in m.bases):
+                m.unresolved = True
+            m.bases = got
+            m.parent = m.parent or (got[0] if got else "")
 
 
 def _in_scope(project: Project, where: str, name: str, depth: int = 0) -> list[Func]:

@@ -320,20 +320,26 @@ class Types:
         if held.startswith("expr:"):
             return self.chain(mod, f, tuple(held[5:].split("\x1f")), depth + 1, self_mods=self_mods)
         if held.startswith("fixture:"):
-            g = self.fixture(mod, held[8:])
+            g = self.fixture(mod, held[8:], f)
             return self.returns(g, None, depth + 1) if g is not None else None
         return None
 
-    def fixture(self, mod, name: str):
-        """The pytest fixture a test's parameter names: in its own file, else
-        the nearest conftest.py up the tree."""
+    def fixture(self, mod, name: str, f=None):
+        """The pytest fixture a test's parameter names: its own class's, else
+        its file's (module level), else the nearest conftest.py up the tree.
+        A fixture's parameter of its own name is the one it overrides."""
         d = os.path.dirname(mod.file)
-        for rel in [mod.file] + [os.path.join(d2, "conftest.py") for d2 in _parents(d)]:
-            for m in self.p.by_file.get(rel, ()):
-                g = self.p.funcs.get(f"{m.name}.{name}")
-                if g is not None and any(re.match(r"\s*@(?:pytest\.)?fixture\b", m.raw[j])
-                                         for j in range(max(0, g.start - 4), g.start - 1)):
-                    return g
+        fm = self._file_mod(mod)
+        scopes = ([mod.name] if mod.owner else []) + [fm.name]
+        for rel in [os.path.join(d2, "conftest.py") for d2 in _parents(d)]:
+            scopes += [m.name for m in self.p.by_file.get(rel, ()) if not m.owner]
+        for mn in scopes:
+            m = self.p.modules.get(mn)
+            g = self.p.funcs.get(f"{mn}.{name}")
+            if g is None or g is f or m is None:
+                continue
+            if any(re.match(r"\s*@(?:pytest\.)?fixture\b", m.raw[j]) for j in range(max(0, g.start - 4), g.start - 1)):
+                return g
         return None
 
     def instance(self, mod, ty: str, self_mods=None):
@@ -348,7 +354,8 @@ class Types:
         if not declared:
             if mod.file.endswith(_DYNAMIC) and ty in self.extended:
                 return None  # `n: Node` in GDScript / Python: any project script that extends Node may be it
-            return ("ext", (ty,), True) if ty[:1].isupper() or "." in ty or mod.file.endswith((".rs", ".swift")) else None
+            return ("ext", (ty,), True) if ty[:1].isupper() or "." in ty or mod.file.endswith((".rs", ".swift")) or \
+                (mod.file.endswith(".py") and ty in _PY_BUILTIN) else None
         return ("inst", tuple(mods), exact)
 
     def _go_type(self, mod, ty: str):
@@ -410,7 +417,7 @@ class Types:
             if not own:
                 return None
             return ("static" if seg in ("Self", "static") else "inst", tuple(own), True)
-        if seg in ("super", "parent", "base"):
+        if seg in ("super", "parent", "base", "super()"):  # (Python's `super().x()`)
             own = self.own_class(mod, f)
             if not own:
                 return None
@@ -429,8 +436,8 @@ class Types:
                 return got if got is not None else self._rb_named(mod, name)
             if mod.file.endswith(".rb") and len(got := {self.returns(h, [h.module], depth + 1) for h in self.method(self.own_class(mod, f) or [], name)[0]}) == 1:
                 return got.pop()  # Ruby: a mixin's `site` that every includer's `site` returns alike (lang_ruby.py)
-            if name in fm.external:
-                return EXT
+            if name in fm.external or (fm.file.endswith(".py") and name in _PY_BUILTIN_CALLS):
+                return EXT  # (Python's `vars(x)`, `sorted(x)`: the language's own values)
             own = self.own_class(mod, f)
             if own and not fm.file.endswith(".py") and any(self.external_base(o) for o in own) \
                     and not self.method(own, name)[0]:
@@ -449,7 +456,9 @@ class Types:
             held = f.bound.get(seg)
             if held:
                 return self.held(mod, f, held, depth + 1, self_mods)
-        own = self_mods or self.own_class(mod, f)
+        # a bare name is a field only where `this` is implicit: never in Python,
+        # JS/TS or PHP (`cli` in a Flask method is the module, not self.cli)
+        own = self_mods or (None if fm.file.endswith(_EXPLICIT_SELF) else self.own_class(mod, f))
         if own:
             got = self.field(list(own), seg, depth)
             if got is UNKNOWN:
@@ -550,6 +559,13 @@ class Types:
             hits = _in_scope(self.p, "pkg:" + fm.package, name)
         return hits[0] if len(hits) == 1 else None
 
+    def _py_classes(self, mods, name: str) -> list[str]:
+        """Python: the class a module (or package `__init__`) makes available
+        as `name`, through its imports and `from x import *` re-exports."""
+        from .core import _py_class
+        return [c for mn in mods if mn in self.p.modules and self.p.modules[mn].file.endswith(".py")
+                and not self.p.modules[mn].owner and (c := _py_class(self.p, self.p.modules[mn], name))]
+
     def step(self, mod, cur, seg: str, depth: int):
         kind, mods, exact = cur
         if seg in ("?", "!!"):
@@ -571,8 +587,8 @@ class Types:
             name = seg[:-2]
             if kind == "static":
                 from .core import _in_scope
-                nested = [f"{mn}.{name}" for mn in mods if f"{mn}.{name}" in self.p.modules]
-                if nested:  # `Request.Builder()`: builds the nested class
+                nested = [f"{mn}.{name}" for mn in mods if f"{mn}.{name}" in self.p.modules] or self._py_classes(mods, name)
+                if nested:  # `Request.Builder()`: builds the nested class (`httpx.Client()`: the class the package exports)
                     return ("inst", tuple(nested), len(nested) == 1)
                 hits = [h for mn in mods for h in _in_scope(self.p, mn, name)]
                 if not hits:
@@ -594,7 +610,7 @@ class Types:
             return None
         # a field / property / nested type
         if kind == "static":
-            inner = [f"{mn}.{seg}" for mn in mods if f"{mn}.{seg}" in self.p.modules]
+            inner = [f"{mn}.{seg}" for mn in mods if f"{mn}.{seg}" in self.p.modules] or self._py_classes(mods, seg)
             if inner:
                 return ("static", tuple(inner), len(inner) == 1)
             for mn in mods:
@@ -606,6 +622,8 @@ class Types:
         got = self.field(list(mods), seg, depth)
         if got is UNKNOWN:
             return None
+        if got is None and seg.startswith("__") and seg.endswith("__") and mod.file.endswith(".py"):
+            return EXT  # `self.__dict__`, `cls.__name__`: Python's own attributes
         if got is None and seg in UNWRAP:
             return cur
         if got is None and any(self.external_base(mn) for mn in mods):
@@ -613,6 +631,12 @@ class Types:
         return got
 
 
+_EXPLICIT_SELF = (".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".php")
+_PY_BUILTIN_CALLS = {"vars", "dict", "list", "set", "frozenset", "tuple", "str", "bytes", "bytearray", "sorted",
+                     "reversed", "enumerate", "zip", "map", "filter", "range", "iter", "repr", "format", "getattr",
+                     "type", "open", "globals", "locals", "dir", "int", "float", "bool", "len", "id", "hash"}
+_PY_BUILTIN = {"dict", "list", "set", "frozenset", "tuple", "str", "bytes", "bytearray", "int", "float", "bool",
+               "defaultdict", "deque", "OrderedDict", "Counter"}
 _DYNAMIC = (".gd", ".py", ".js", ".mjs", ".cjs", ".rb", ".php", ".qml")
 _GO_BUILTIN = {"string", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64",
                "float32", "float64", "bool", "byte", "rune", "error", "any", "uintptr", "complex64", "complex128"}
@@ -635,7 +659,7 @@ def resolve_bases(project) -> None:
         if m.parent and not m.bases and m.parent not in project.modules and m.parent[:1].isupper() \
                 and not m.file.endswith((".ex", ".exs", ".rb", ".rake", ".ru")):
             m.unresolved = True  # GDScript `extends CharacterBody3D`: an engine class
-        if not m.bases or m.file.endswith((".rb", ".rake", ".ru")):  # Ruby: lang_ruby.link resolved them
+        if not m.bases or m.file.endswith((".rb", ".rake", ".ru", ".py")):  # Ruby, Python: resolved by their adapters
             continue
         got, missing = [], False
         fm = project.modules.get(m.owner, m) if m.owner else m
