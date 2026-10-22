@@ -1262,7 +1262,7 @@ def _build_edges(project: Project) -> None:
                     elif kind != "pkg" and any(types.external_base(mn) for mn in mods_):
                         _nothing(project, f, c)  # inherited from a library supertype
                         continue
-            if not q and mod and not f.file.endswith((".py", ".ex", ".exs", ".gd")) and not targets:
+            if not q and mod and not f.file.endswith((".py", ".ex", ".exs")) and not targets:
                 # a bare call in a class: its own (or an inherited) method first;
                 # `Foo(...)` / `new Foo(...)` / `: Base(args)`: Foo's constructor
                 own = types.own_class(mod, f) if (mod.owner or mod.kind) else None
@@ -1324,8 +1324,8 @@ def _build_edges(project: Project) -> None:
                         hits = own  # a file's own (private) extension shadows the others'
                     if hits:
                         targets = [(t, len(hits) == 1) for t in hits]
-                    elif not in_project:
-                        _nothing(project, f, c)
+                    elif not in_project and not (f.file.endswith(infer._DYNAMIC) and held[5:] in types.extended):
+                        _nothing(project, f, c)  # (`n: Node` in GDScript may hold a project script: not this)
                         continue
                 if not targets and mod and q in mod.aliases:
                     hits = _in_scope(project, mod.aliases[q], c.name)  # (through a package's re-exports)
