@@ -396,12 +396,12 @@ export class App {
     def test_class_field_arrow_functions(self):
         f = self.p.funcs["packages/app/App.onPointerDown"]
         self.assertEqual((f.start, f.end), (7, 13))
-        self.assertIn("packages/app/helpers.createElement", self.p.funcs)
+        self.assertIn("packages/app/helpers.API.createElement", self.p.funcs)
 
     def test_barrels_paths_workspaces_and_named_import_objects(self):
         self.assertEqual(self.exact("packages/app/App.onPointerDown"),
                          {"packages/common/src/math.clamp", "packages/common/src/fmt.fmt",
-                          "packages/ui/src/index.paint", "packages/app/helpers.createElement"})
+                          "packages/ui/src/index.paint", "packages/app/helpers.API.createElement"})
 
     def test_package_import_is_a_library(self):
         self.assertEqual(self.guessed("packages/app/App.onPointerDown"), set())
@@ -467,15 +467,15 @@ impl Searcher {
 
     def test_use_across_crates_and_modules(self):
         got = self.exact("crates/core/main.main")
-        self.assertEqual(got, {"crates/core/flags/parse.low", "crates/searcher/src/lib.new",
-                               "crates/searcher/src/lib.search", "crates/searcher/src/sink.collect",
+        self.assertEqual(got, {"crates/core/flags/parse.low", "crates/searcher/src/lib.Searcher.new",
+                               "crates/searcher/src/lib.Searcher.search", "crates/searcher/src/sink.collect",
                                "crates/core/flags/mod.run"})
         # `.len()` / `.unwrap()` on a Vec: the standard library, not lib.len or sink.unwrap
         self.assertEqual(self.guessed("crates/core/main.main"), set())
 
     def test_super_crate_and_self(self):
         self.assertEqual(self.exact("crates/core/flags/mod.run"), {"crates/core/main.helper"})
-        self.assertEqual(self.exact("crates/searcher/src/lib.search"), {"crates/searcher/src/lib.reset"})
+        self.assertEqual(self.exact("crates/searcher/src/lib.Searcher.search"), {"crates/searcher/src/lib.Searcher.reset"})
 
     def test_rust_tests(self):
         t = self.p.funcs["crates/core/flags/parse.parses"]

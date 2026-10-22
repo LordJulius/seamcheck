@@ -4,8 +4,10 @@ indentation (Python) or brace matching (the rest), on blanked code.
 """
 from __future__ import annotations
 
+import os
 import re
 
+from .chains import expression, receiver, type_name
 from .model import Call, Func, Module
 from .scan import blank
 
@@ -430,10 +432,21 @@ def _js_imports(mod: Module, rel: str, text: str, lines: list[str]) -> None:
 _JS_REEXPORT = re.compile(r"""^[ \t]*export[ \t]+(?!type\b)(\*|\{[^}]*\})[ \t]*from[ \t]*["']([^"']+)["']""", re.M)
 
 
+_JS_EXPORT_AS = re.compile(r"^[ \t]*export[ \t]*\{([^}]*)\}[ \t]*;?[ \t]*$", re.M)
+
+
 def _js_reexports(mod: Module, rel: str, text: str, lines: list[str]) -> None:
     """A barrel's `export * from "./x"` and `export { a, b as c } from "./y"`:
-    a name looked up here leads on to where it is defined."""
+    a name looked up here leads on to where it is defined. A file's own
+    `export { Hono as HonoBase }` too (here, under another name)."""
     d = rel.rsplit("/", 1)[0] if "/" in rel else ""
+    for m in _JS_EXPORT_AS.finditer(text):
+        ln = text.count("\n", 0, m.start())
+        if ln < len(lines) and lines[ln].strip().startswith("export"):
+            for part in m.group(1).split(","):
+                src, _, local = _JS_REEXPORT_SKIP.sub("", part.strip()).partition(" as ")
+                if local.strip() and src.strip() and local.strip() != "default":
+                    mod.imported.setdefault(local.strip(), (f"js:{d}\0./{os.path.basename(rel)}", src.strip()))
     for m in _JS_REEXPORT.finditer(text):
         ln = text.count("\n", 0, m.start())
         if ln >= len(lines) or not lines[ln].strip().startswith("export"):
@@ -523,6 +536,7 @@ def _kt_imports(mod: Module, text: str, lines: list[str]) -> None:
 
 
 _CS_NAMESPACE = re.compile(r"^[ \t]*namespace[ \t]+([\w.]+)", re.M)
+_CS_USING_ALIAS = re.compile(r"^[ \t]*(?:global[ \t]+)?using[ \t]+([A-Za-z_]\w*)[ \t]*=[ \t]*([\w.]+)[ \t]*;", re.M)
 _CS_USING = re.compile(r"^[ \t]*(?:global[ \t]+)?using[ \t]+(?:static[ \t]+)?([\w.]+)[ \t]*;", re.M)
 
 
@@ -534,6 +548,171 @@ def _cs_imports(mod: Module, code: str) -> None:
         mod.package = nm.group(1)
     for m in _CS_USING.finditer(code):
         mod.uses.append(f"pkg:{m.group(1)}")
+    for m in _CS_USING_ALIAS.finditer(code):  # `using Assert = Tests.XUnitAssert;`: that type, by another name
+        mod.bound[m.group(1)] = "type:" + m.group(2).rsplit(".", 1)[-1]
+
+
+# --- classes, return types, assignments (the type layer; see chains.py) ------------
+
+_CLASS = re.compile(
+    r"(?<![\w.$@])(?:(?:data|sealed|abstract|open|inner|value|enum|annotation|final|public|private|protected|internal"
+    r"|static|partial|export|default|readonly|ref|unsafe|pub(?:\([^)]*\))?|fileprivate|indirect|declare|fun)\s+)*"
+    r"(class|interface|struct|record|object|trait|protocol|extension|union)\s+([A-Za-z_$][\w$]*)")
+_COMPANION = re.compile(r"\bcompanion\s+object\b(?:\s+\w+)?")
+_RS_IMPL = re.compile(r"\bimpl\s*(?:<[^{}]*?>)?\s*(?:([\w:]+)(?:<[^{}]*?>)?\s+for\s+)?([\w:]+)")
+_BASE_SKIP = {"public", "private", "protected", "virtual", "internal", "extends", "implements", "where", "class",
+              "struct", "new", "final", "sealed", "open", "abstract", "override", "in", "out", "reified", "const",
+              "Sendable", "Equatable", "Hashable", "Codable", "Identifiable", "CustomStringConvertible"}
+_CPP_EXTS = (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h")
+
+
+def _classes(code: str, ext: str, fam: str) -> list[dict]:
+    """Class-like declarations: name, bases as written, header text, and the
+    body's character span (None for a body-less `class Foo(val a: A)`)."""
+    out = []
+    n = len(code)
+    if fam == "rust":
+        matches = [(m, "impl") for m in _RS_IMPL.finditer(code)]
+        matches += [(m, "type") for m in re.finditer(r"(?<![\w.])(?:pub(?:\([^)]*\))?\s+)?(struct|enum|trait|union)\s+([A-Za-z_]\w*)", code)]
+    else:
+        matches = [(m, "type") for m in _CLASS.finditer(code)]
+        if fam == "kotlin":
+            matches += [(m, "companion") for m in _COMPANION.finditer(code)]
+    for m, how in matches:
+        if how == "impl":
+            name, bases, kw = m.group(2).split("::")[-1], ([m.group(1).split("::")[-1]] if m.group(1) else []), "impl"
+        elif how == "companion":
+            name, bases, kw = "", [], "companion"
+        else:
+            kw, name = m.group(1), m.group(2)
+            if kw == "object" and fam not in ("kotlin",):
+                continue
+            if kw == "protocol" and ext not in (".swift",):
+                continue
+            bases = []
+        # header: to the body's `{` at depth 0, or to the end of the declaration
+        k, depth, body = m.end(), 0, None
+        while k < n and k - m.end() < 3000:
+            ch = code[k]
+            if ch in "(<[":
+                depth += 1
+            elif ch in ")>]":
+                depth -= 1 if not (ch == ">" and code[k - 1] == "-") else 0
+            elif depth <= 0 and ch == "{":
+                body = k
+                break
+            elif depth <= 0 and ch == ";":
+                break
+            elif depth <= 0 and ch == "\n" and fam in ("kotlin", "js") and code[k + 1:k + 200].lstrip()[:1] not in ("{", ":", ",", ""):
+                if not code[:k].rstrip().endswith((",", ":", "(")):
+                    break
+            elif ch == "=" and depth <= 0 and fam in ("js", "c") and how == "type":
+                break  # `type X = ...` / a declaration, not a class body
+            k += 1
+        hdr = code[m.end():body if body is not None else k]
+        if how == "type":
+            h = re.sub(r"\bwhere\b.*", "", hdr, flags=re.S)
+            h = re.sub(r"<[^<>]*(?:<[^<>]*>[^<>]*)*>", "", h)  # generic arguments
+            h2 = re.sub(r"\([^()]*(?:\([^()]*\)[^()]*)*\)", "", h)  # Kotlin primary constructors, `Bar()` calls
+            tail = re.split(r"\bextends\b|\bimplements\b|:", h2, maxsplit=1)
+            if len(tail) == 2:
+                bases = [b.split("::")[-1].split(".")[-1].split("\\")[-1] for b in re.findall(r"[A-Za-z_$][\w$.:\\]*", tail[1])]
+                bases = [b for b in bases if b not in _BASE_SKIP]
+        span = None
+        if body is not None:
+            d, j = 0, body
+            while j < n:
+                if code[j] == "{":
+                    d += 1
+                elif code[j] == "}":
+                    d -= 1
+                    if d == 0:
+                        break
+                j += 1
+            span = (body, j)
+        kind = "ext" if kw in ("extension", "impl") or (kw == "class" and "partial" in code[max(0, m.start() - 40):m.start()]) else "class"
+        if kw in ("interface", "protocol", "trait"):
+            kind = "interface"
+        out.append({"name": name, "kw": kw, "bases": bases, "hdr": hdr, "pos": m.start(), "span": span, "kind": kind})
+    return out
+
+
+# fields: Rust `pub name: Type,`, Swift `var name: Type` / `let name = Type(`,
+# PHP `private ?Type $name;` (and promoted constructor parameters)
+_RS_FIELD = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z_]\w*)\s*:\s*([^,]+?),?\s*$")
+_SW_FIELD = re.compile(r"^\s*(?:(?:private|public|internal|fileprivate|open|static|class|lazy|weak|unowned|final|override|nonisolated)"
+                       r"(?:\([^)]*\))?\s+)*(?:let|var)\s+([A-Za-z_]\w*)\s*(?::\s*([A-Z][\w.]*)|=\s*([A-Z]\w*)\s*\()")
+_PHP_FIELD = re.compile(r"(?:^\s*|[(,]\s*)(?:(?:public|private|protected|static|readonly|var)\s+)+\??([\\\w]+)\s+(\$\w+)")
+
+
+# a function's declared return type, from its signature
+_RET_AFTER = {
+    "js": re.compile(r"\)\s*:\s*([^={;]+?)\s*(?:=>|\{|;|$)", re.S),
+    "kotlin": re.compile(r"\)\s*:\s*([^={]+?)\s*(?:=|\{|\bwhere\b|$)", re.S),
+    "rust": re.compile(r"->\s*([^{;]+?)\s*(?:\bwhere\b|\{|;|$)", re.S),
+    "swift": re.compile(r"->\s*([^{]+?)\s*(?:\bwhere\b|\{|$)", re.S),
+    "php": re.compile(r"\)\s*:\s*\??\s*([\\\w|?]+)", re.S),
+}
+_RET_MODS = {"public", "private", "protected", "internal", "static", "final", "abstract", "virtual", "override",
+             "async", "sealed", "extern", "unsafe", "new", "readonly", "synchronized", "native", "default", "inline",
+             "constexpr", "explicit", "friend", "volatile", "Q_INVOKABLE", "transient", "strictfp", "partial", "const",
+             "fn", "func", "fun", "def", "function", "operator", "infix", "suspend", "tailrec", "open", "export"}
+
+
+def _returns(tk: str, prefix: str, sig: str, name: str, cls: str) -> str:
+    """The return type's class: `Foo bar(` (Java, C#, C++: the words before
+    the name), `): Foo` (TS, Kotlin, PHP), `-> Foo` (Rust, Swift), Go's result
+    list; a constructor returns its class."""
+    if name in (cls, "constructor", "__construct", "init") and cls:
+        return "Self"
+    if tk == "go":
+        m = re.match(r"\s*(?:\[[^\]]*\])?\s*\((?:[^()]|\([^()]*\))*\)\s*(.*)$", sig, re.S)
+        res = (m.group(1) if m else "").strip().rstrip("{").strip()
+        if res.startswith("("):
+            res = res[1:].split(",")[0].strip()
+            res = res.split()[-1] if len(res.split()) == 2 else res  # `(n int, err error)`
+        return type_name(res.lstrip("*"))
+    pat = _RET_AFTER.get(tk)
+    if pat:
+        m = pat.search(sig)
+        return type_name(m.group(1)) if m else ""
+    if tk in ("jvm", "cpp"):
+        p = re.sub(r"\[[^\]]*\]|@\w+(?:\([^)]*\))?", " ", prefix)  # attributes / annotations
+        p = re.sub(r"\b\w+::\s*$", "", p.rstrip()).rstrip()  # `Foo* Class::` -> `Foo*`
+        toks = re.findall(r"[\w.:]+(?:<[^;{}()]*>)?[?*&\[\]]*", p)
+        toks = [t for t in toks if t not in _RET_MODS]
+        return type_name(toks[-1]) if toks else ""
+    return ""
+
+
+# `x = <expr>`: the local takes the expression's type
+_ASSIGN = {
+    "js": re.compile(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]+)?=(?!=)"),
+    "kotlin": re.compile(r"\b(?:val|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)"),
+    "swift": re.compile(r"\b(?:let|var)\s+([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)"),
+    "rust": re.compile(r"\blet\s+(?:mut\s+)?([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)"),
+    "go": re.compile(r"(?:^|[;{]|\bvar\b)\s*([A-Za-z_]\w*)\s*(?:,\s*[A-Za-z_]\w*\s*)*(?::=|=(?!=))", re.M),
+    "jvm": re.compile(r"\bvar\s+([A-Za-z_]\w*)\s*=(?!=)"),
+    "cpp": re.compile(r"\bauto\s*[&*]*\s+([A-Za-z_]\w*)\s*=(?!=)"),
+    "php": re.compile(r"(\$[A-Za-z_]\w*)\s*=(?![=>])"),
+    "py": re.compile(r"^[ \t]*([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)", re.M),
+}
+
+
+def _assignments(tk: str, text: str) -> list[tuple[str, tuple]]:
+    pat = _ASSIGN.get(tk)
+    if not pat:
+        return []
+    out = []
+    for m in pat.finditer(text):
+        ch = expression(text, m.end())
+        if ch:
+            out.append((m.group(1), ch))
+    return out
+
+
+def _stem_key(s: str) -> str:
+    return re.sub(r"[-_.]", "", s).lower()
 
 
 _GO_RECV = re.compile(r"^func\s*\(\s*(?:\w+\s+)?\*?\s*([A-Za-z_]\w*)")
@@ -677,7 +856,7 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 body_end = n - 1 if body_end < 0 else body_end
             if body_end is None:
                 body_end = min(n - 1, m.end() + 200)
-            found.append((start_line, line_of(body_end), name))
+            found.append((start_line, line_of(body_end), name, m.start(1), body_start if body_start is not None else -1))
     tests: set[tuple[int, str]] = set()
     if fam == "js":
         # it("...") / test("...") blocks (vitest, jest, node:test): anonymous
@@ -700,36 +879,135 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                         break
                 k += 1
             name = f"test {label}"
-            found.append((start_line, line_of(k), name))
+            found.append((start_line, line_of(k), name, m.start(), -1))
             tests.add((start_line, name))
     jsx = ext in (".tsx", ".jsx")
-    # One function per name (ids are module.name). Same-named spans merge: the
-    # longest is the span (a type member `applyOp: (op: Op) => void;` loses to
-    # its implementation), and the calls of every span are kept.
-    # Go: methods are keyed by their receiver type too (two types' String()
-    # are two functions), each type's in a module of its own, `<file>.<Type>`
     go = ext == ".go"
-    spans: dict[tuple[str, str], list[tuple[int, int]]] = {}
-    for a, b, name in sorted(found):
-        rm = _GO_RECV.match(lines[a]) if go else None
-        spans.setdefault((rm.group(1) if rm else "", name), []).append((a, b))
-    # declared types: per line (a function takes the ones on its lines), and
-    # file-level ones from the lines outside every function (+ TS constructor
-    # parameter properties)
+    swift, php = ext == ".swift", ext == ".php"
+    tk = ("cpp" if cpp else "jvm" if ext in (".java", ".cs") else "go" if go else "swift" if swift
+          else "php" if php else fam)
+    # --- which class each function belongs to --------------------------------
+    # A function directly inside a class body is that class's method; a class
+    # is a module of its own, `<file>.<Class>` (the file's module when the
+    # class is named like the file: Java / Kotlin / C# / Swift convention).
+    # Go methods go by their receiver, C++ `Foo::bar` bodies by their class.
+    classes = [] if go or qml else _classes(code, ext, fam)
+    for c in classes:
+        if c["span"]:
+            c["a"], c["b"] = line_of(c["span"][0]), line_of(c["span"][1])
+        else:
+            c["a"] = c["b"] = line_of(c["pos"])
+    fspans = sorted(((a_, b_, nm, npos) for a_, b_, nm, npos, _ in found), key=lambda x: (x[0], -x[1]))
+    stem = _stem_key(os.path.splitext(os.path.basename(rel))[0])
+    mods: dict[str, Module] = {}
+
+    def enclosing_classes(pos: int) -> list[dict]:
+        return sorted((c for c in classes if c["span"] and c["span"][0] < pos <= c["span"][1]), key=lambda c: c["span"][0])
+
+    def class_module(chain: list[dict]) -> Module:
+        names = [c["name"] for c in chain if c["name"]]
+        if not names:
+            return mod
+        if len(names) == 1 and _stem_key(names[0]) == stem:
+            home = mod
+        else:
+            mname = f"{mod.name}.{'.'.join(names)}"
+            home = mods.get(mname)
+            if home is None:
+                home = mods[mname] = Module(mname, rel, len(raw), raw, lines, owner=mod.name, decls=[names[-1]],
+                                            aliases=mod.aliases, uses=mod.uses, imported=mod.imported)
+        last = chain[-1] if chain[-1]["name"] else (chain[-2] if len(chain) > 1 else chain[-1])
+        if last["kw"] == "companion":
+            last = chain[-2] if len(chain) > 1 else last
+        for b in last["bases"]:
+            if b not in home.bases and b != names[-1]:
+                home.bases.append(b)
+        if home is not mod and last["kind"] == "ext" and not any(c["name"] == names[-1] and c["kind"] != "ext" for c in classes):
+            home.kind = "ext"
+        elif home is not mod:
+            home.kind = home.kind or ("interface" if last["kind"] == "interface" else "class")
+        else:
+            mod.kind = mod.kind or "class"
+            if names[-1] not in mod.decls:
+                mod.decls.append(names[-1])
+        return home
+
+    def home_of(npos: int, a_: int) -> tuple[Module, dict | None]:
+        """The module a function at `npos` belongs to: its innermost class,
+        unless a function between them holds it (a lambda in a method)."""
+        chain = enclosing_classes(npos)
+        if not chain:
+            return mod, None
+        inner = chain[-1]
+        for fa, fb, _, fp in fspans:
+            if fp < npos and fa <= a_ <= fb and fp > inner["span"][0] and (fa, fp) != (a_, npos):
+                return mod, None  # inside a method: a local function
+        return class_module(chain), inner
+    for c in classes:  # every class gets its module, methods or not (fields, an interface)
+        if c["name"] and (c["kw"] != "companion"):
+            outer = enclosing_classes(c["pos"])
+            class_module(outer + [c])
+    # Go: methods are keyed by their receiver type (two types' String() are
+    # two functions), each type's in a module of its own, `<file>.<Type>`
+    spans: dict[tuple[str, str], list[tuple[int, int, int, int]]] = {}
+    owners: dict[tuple[str, str], tuple[Module, dict | None]] = {}
+    for a_, b_, name, npos, bpos in sorted(found):
+        recv = ""
+        home, cls = mod, None
+        if go:
+            rm = _GO_RECV.match(lines[a_])
+            recv = rm.group(1) if rm else ""
+        elif cpp:
+            cm = re.search(r"\b([A-Za-z_]\w*)\s*(?:<[^<>]*>)?\s*::\s*~?" + re.escape(name) + r"\s*\(", lines[a_])
+            if cm and not enclosing_classes(npos):
+                recv = cm.group(1)  # `Foo::bar(` outside a class body
+        if recv and cpp and _stem_key(recv) == stem:
+            home = mod  # `Foo::bar` in Foo.cpp: the file is the class
+            if recv not in mod.decls:
+                mod.decls.append(recv)
+            mod.kind = mod.kind or "class"
+        elif recv:
+            home = mods.get(f"{mod.name}.{recv}")
+            if home is None:
+                home = mods[f"{mod.name}.{recv}"] = Module(f"{mod.name}.{recv}", rel, len(raw), raw, lines, owner=mod.name,
+                                                           decls=[recv], aliases=mod.aliases, uses=mod.uses,
+                                                           imported=mod.imported, kind="ext" if cpp else "")
+        elif (a_, name) not in tests:
+            home, cls = home_of(npos, a_)
+            if fam == "js" and home.kind == "interface" and bpos < 0:
+                continue  # an interface's member `applyOp: (op: Op) => void;` is a type, not a function
+        key = (home.name, name)
+        spans.setdefault(key, []).append((a_, b_, npos, bpos))
+        owners[key] = (home, cls)
+    # --- declared types: per line (a function takes the ones on its lines),
+    # and fields from the lines outside every function (+ TS constructor
+    # parameter properties), each in the class whose body holds them
     typed_by_line: dict[int, list[tuple[str, str]]] = {}
-    tk = "cpp" if cpp else "jvm" if ext in (".java", ".cs") else "go" if ext == ".go" else fam
-    if tk in ("kotlin", "js", "cpp", "jvm", "go", "rust"):
+    if tk in ("kotlin", "js", "cpp", "jvm", "go", "rust", "swift", "php"):
         for i, ln in enumerate(lines):
             if ":" in ln or tk != fam or "=" in ln:  # `x: T`, or `val x = T(...)` / `new T(...)`
                 got = _typed(tk, ln)
                 if got:
                     typed_by_line[i] = got
         inside = [False] * len(lines)
-        for a, b, _ in found:
-            for i in range(a, min(b + 1, len(lines))):
+        for a_, b_, _, _, _ in found:
+            for i in range(a_, min(b_ + 1, len(lines))):
                 inside[i] = True
-        fields: dict[str, set[str]] = {}
+        fields: dict[str, dict[str, set[str]]] = {}
+        line_class: dict[int, Module] = {}
+        for c in classes:
+            if c["name"] and c["span"]:
+                home = class_module(enclosing_classes(c["pos"]) + [c])
+                for i in range(c["a"], c["b"] + 1):
+                    line_class[i] = home  # (nested classes come later and win)
+        for c in classes:  # Kotlin primary constructors: `class Foo(private val repo: Repo)`
+            if c["name"] and fam == "kotlin":
+                home = class_module(enclosing_classes(c["pos"]) + [c])
+                for m in _KT_FIELD.finditer(c["hdr"]):
+                    fields.setdefault(home.name, {}).setdefault(m.group(1), set()).add(m.group(2))
         for i, ln in enumerate(lines):
+            home = line_class.get(i, mod)
+            got_fields = fields.setdefault(home.name, {})
             pats_ = []
             if fam == "kotlin":
                 pats_ = [] if inside[i] else [_KT_FIELD, _KT_NEW]
@@ -737,61 +1015,105 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 pats_ = [_TS_PARAM_FIELD] + ([] if inside[i] else [_TS_FIELD, _TS_NEW])
             elif tk == "jvm" and not inside[i]:
                 for m in _JV_FIELD.finditer(ln):
-                    fields.setdefault(m.group(2), set()).add(m.group(1))
+                    got_fields.setdefault(m.group(2), set()).add(m.group(1))
+            elif swift and not inside[i]:
+                for m in _SW_FIELD.finditer(ln):
+                    t = type_name(m.group(2) or m.group(3) or "")
+                    if t:
+                        got_fields.setdefault(m.group(1), set()).add(t)
+            elif php:
+                for m in _PHP_FIELD.finditer(ln):
+                    t = type_name(m.group(1).replace("\\", "."))
+                    if t and (not inside[i] or "__construct" in ln):
+                        got_fields.setdefault(m.group(2), set()).add(t)
             elif tk == "go" and not inside[i]:
                 for m in _GO_FIELD.finditer(ln):
                     if m.group(1) not in _GO_KEYWORDS and m.group(2) not in _GO_KEYWORDS:
-                        fields.setdefault(m.group(1), set()).add(m.group(2))
+                        got_fields.setdefault(m.group(1), set()).add(m.group(2))
+            elif tk == "rust" and not inside[i] and home is not mod:
+                for m in _RS_FIELD.finditer(ln):
+                    t = type_name(m.group(2))
+                    if t:
+                        got_fields.setdefault(m.group(1), set()).add(t)
             elif cpp and not inside[i]:
                 for m in _CPP_FIELD.finditer(ln):
                     if not _ALLCAPS.match(m.group(1)) and m.group(1) not in ("Q_OBJECT", "Q_PROPERTY"):
-                        fields.setdefault(m.group(2), set()).add(m.group(1))
+                        got_fields.setdefault(m.group(2), set()).add(m.group(1))
             for pat_ in pats_:
                 for m in pat_.finditer(ln):
-                    fields.setdefault(m.group(1), set()).add(m.group(2))
-        mod.bound = {k: "type:" + next(iter(v)) for k, v in fields.items() if len(v) == 1}
-    subs: dict[str, Module] = {}
+                    got_fields.setdefault(m.group(1), set()).add(m.group(2))
+        for mname, fl in fields.items():
+            target = mod if mname == mod.name else mods.get(mname)
+            if target is not None:
+                target.bound = {**target.bound, **{k: "type:" + next(iter(v)) for k, v in fl.items() if len(v) == 1}}
+        # Go: a type's methods see the fields of its struct
+        if go:
+            for m_ in mods.values():
+                m_.bound = mod.bound
     go_test = go and rel.endswith("_test.go")
-    for (recv, name), ss in sorted(spans.items(), key=lambda kv: kv[1][0]):
-        a, b = max(ss, key=lambda s: s[1] - s[0])
-        home = mod
-        if recv:
-            home = subs.get(recv)
-            if home is None:
-                home = subs[recv] = Module(f"{mod.name}.{recv}", rel, len(raw), raw, lines, owner=mod.name,
-                                           decls=[recv], aliases=mod.aliases, uses=mod.uses, bound=mod.bound)
+    for (hname, name), ss in sorted(spans.items(), key=lambda kv: kv[1][0]):
+        a_, b_, npos, bpos = max(ss, key=lambda s_: s_[1] - s_[0])
+        home, cls = owners[(hname, name)]
+        recv = home.decls[0] if (go or (cpp and home.kind == "ext")) and home is not mod else ""
         # JUnit / kotlin.test `@Test`, xUnit / NUnit / MSTest `[Fact]`, Rust `#[test]`
-        annotated = fam in ("kotlin", "c", "rust") and any(_TEST_ATTR.search(raw[j]) for j in range(max(0, a - 3), a + 1))
+        annotated = fam in ("kotlin", "c", "rust") and any(_TEST_ATTR.search(raw[j]) for j in range(max(0, a_ - 3), a_ + 1))
         if go_test and not recv and _GO_TEST.match(name):
             annotated = True  # func TestX(t *testing.T), BenchmarkX, ExampleX, FuzzX
-        f = Func(home.name, name, rel, a + 1, b + 1, "\n".join(lines[a:b + 1]),
-                 kind="test" if (a, name) in tests or annotated else "func", recv=recv)
+        f = Func(home.name, name, rel, a_ + 1, b_ + 1, "\n".join(lines[a_:b_ + 1]),
+                 kind="test" if (a_, name) in tests or annotated else "func", recv=recv)
         if kotlin:
-            rm = re.search(_KT_RECV % re.escape(name), lines[a])
+            rm = re.search(_KT_RECV % re.escape(name), lines[a_])
             if rm:
                 f.recv = rm.group(1)
-        seen_lines: set[int] = set()
-        for sa, sb in ss:
+        elif ext == ".cs":  # an extension method: `static bool IsPrimitive(this Type t)`
+            rm = re.match(r"\s*(?:<[^>]*>)?\s*\(\s*this\s+([\w.<>\[\]?]+)\s+\w+", code[npos + len(name):npos + len(name) + 300])
+            if rm:
+                f.recv = type_name(rm.group(1)).rsplit(".", 1)[-1]
+        # the declared return type
+        line_start_pos = line_start[a_]
+        sig_end = bpos if bpos >= 0 else min(len(code), npos + 400)
+        sig = code[npos + len(name):sig_end]
+        cls_name = (cls["name"] if cls else "") or (home.decls[-1] if home is not mod or recv else "")
+        if (a_, name) not in tests:
+            f.returns = _returns(tk, code[line_start_pos:npos], sig, name, cls_name)
+            if not f.returns and bpos >= 0 and re.search(r"\breturn\s+(?:this|self|\$this)\s*[;\n}]", f.code):
+                f.returns = "Self"  # a builder step: `return this`
+            if not f.returns and tk == "kotlin" and bpos < 0:
+                em = re.search(r"\)\s*=\s*", sig)
+                ch = expression(sig, em.end()) if em else ()
+                if ch:
+                    f.returns = "expr:" + "\x1f".join(ch)
+        done: set[int] = set()
+        for sa, sb, _, _ in ss:
             name_col = max(0, lines[sa].find(name))  # the return type before it is no call (`Task<int> Run(`)
+            body = "\n".join(lines[sa:sb + 1])
+            for nm_, ch in _assignments(tk, body):
+                f.bound.setdefault(nm_, "expr:" + "\x1f".join(ch))
+            off = 0
             for i in range(sa, sb + 1):
-                if i in seen_lines:
+                ln = lines[i]
+                if i in done:  # (a merged span's lines count once)
+                    off += len(ln) + 1
                     continue
-                seen_lines.add(i)
+                done.add(i)
                 for nm_, ty in typed_by_line.get(i, ()):
                     f.bound[nm_] = "type:" + ty
-                for m in _CALL.finditer(lines[i]):
+                for m in _CALL.finditer(ln):
                     nm = m.group(2)
                     if i == sa and (nm == name or m.start(2) < name_col):
                         continue
-                    # `x().name(` / `a?.b.name(`: a method on something we can't
-                    # name, qualified "." (not unqualified: that means in scope)
-                    q = m.group(1) or ("." if lines[i][:m.start(2)].rstrip().endswith((".", "->")) else "")
+                    chain = receiver(body, off + m.start(2))
+                    q = m.group(1) or ("." if ln[:m.start(2)].rstrip().endswith((".", "->")) else "")
+                    if chain and q and q != ".":
+                        last = chain[-1]
+                        q = last if re.match(r"^[\w$]+$", last) else "."
                     if nm in _CALL_SKIP and (not q or (nm in _NOT_FUNC and nm != "new")):
                         continue  # (a keyword, or `String(`; `c.String()` and `Foo::new()` are calls)
-                    f.calls.append(Call(nm, q, i + 1))
+                    f.calls.append(Call(nm, q, i + 1, chain if q else ()))
                 if jsx:  # `<Widget ...>` renders (calls) the component Widget
-                    for m in _JSX.finditer(lines[i]):
+                    for m in _JSX.finditer(ln):
                         f.calls.append(Call(m.group(2), m.group(1) or "", i + 1))
+                off += len(ln) + 1
         home.funcs.append(f)
     top = Func(mod.name, "<top>", rel, 1, len(lines), "", kind="top")
     if ext == ".qml":
@@ -802,4 +1124,5 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 top.calls.append(Call(cm.group(1), cm.group(1), i + 1))
                 top.refs.add(cm.group(1))
     mod.funcs.append(top)
-    return [mod, *subs.values()]
+    mod.decls = sorted(set(mod.decls) - {d for m_ in mods.values() for d in m_.decls if m_.kind != "ext"}) if not go else mod.decls
+    return [mod, *mods.values()]
