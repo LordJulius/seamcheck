@@ -45,6 +45,9 @@ class Types:
         # bare name in QML is the framework's (Kirigami's `pageStack`)
         self.qml_names = {k for m in project.modules.values() if m.file.endswith(".qml") for k in m.bound} | \
             {f.name for m in project.modules.values() if m.file.endswith(".qml") for f in m.funcs}
+        # library types project classes extend (GDScript's Node, Python's dict)
+        self.extended = {m.parent for m in project.modules.values() if m.parent and m.parent not in project.modules} | \
+            {b for m in project.modules.values() for b in m.bases if b not in project.modules}
         self.cache: dict = {}
         self.ext_fns: dict[tuple[str, str], list] = {}
         for g in project.funcs.values():
@@ -321,6 +324,8 @@ class Types:
             return ("inst", tuple(mods), True) if mods else None
         mods, exact, declared = self.type_modules(mod, ty)
         if not declared:
+            if mod.file.endswith(_DYNAMIC) and ty in self.extended:
+                return None  # `n: Node` in GDScript / Python: any project script that extends Node may be it
             return ("ext", (ty,), True) if ty[:1].isupper() or "." in ty or mod.file.endswith((".rs", ".swift")) else None
         return ("inst", tuple(mods), exact)
 
@@ -536,6 +541,8 @@ class Types:
                 # overloads that all return the same type: whichever runs, that is the value
                 return self.returns(hits[0], list(mods) if kind == "inst" else None, depth + 1)
             if not hits:
+                if kind == "static" and name == "new":
+                    return ("inst", mods, exact)  # `Foo.new()` (GDScript, Ruby): an instance
                 if seg in UNWRAP:
                     return cur  # `.unwrap()` / `.get()` on an Option: the value inside
                 if any(self.external_base(mn) for mn in mods):
@@ -562,6 +569,7 @@ class Types:
         return got
 
 
+_DYNAMIC = (".gd", ".py", ".js", ".mjs", ".cjs", ".rb", ".php", ".qml")
 _GO_BUILTIN = {"string", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64",
                "float32", "float64", "bool", "byte", "rune", "error", "any", "uintptr", "complex64", "complex128"}
 
@@ -580,6 +588,9 @@ def resolve_bases(project) -> None:
     inherited method may be the library's)."""
     t = Types(project)
     for m in list(project.modules.values()):
+        if m.parent and not m.bases and m.parent not in project.modules and m.parent[:1].isupper() \
+                and not m.file.endswith((".ex", ".exs")):
+            m.unresolved = True  # GDScript `extends CharacterBody3D`: an engine class
         if not m.bases:
             continue
         got, missing = [], False

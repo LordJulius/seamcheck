@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 
+from .chains import expression, receiver, type_name
 from .model import Call, Func, Module
 from .scan import blank
 
@@ -35,6 +36,22 @@ _KEYWORDS = {
     "Time", "OS", "Engine", "self", "lerp_angle", "smoothstep", "is_equal_approx", "is_zero_approx",
 }
 _INDIRECT = {"rpc", "rpc_id", "call", "call_deferred", "callv", "bind"}
+# declared types: `var x: Timer`, `var x := Foo.new()`, `x: Foo` parameters, `-> Foo`
+_TYPED_VAR = re.compile(r"\bvar\s+([A-Za-z_]\w*)\s*:\s*([A-Z][\w.]*(?:\[[^\]]*\])?)")
+_INFER_VAR = re.compile(r"\bvar\s+([A-Za-z_]\w*)\s*:?=(?!=)")
+_PARAM = re.compile(r"[(,]\s*([A-Za-z_]\w*)\s*:\s*([A-Z][\w.]*)")
+_RETURNS = re.compile(r"\)\s*->\s*([A-Z][\w.]*)\s*:")
+
+
+def _types(held: dict, text: str) -> None:
+    for m in _TYPED_VAR.finditer(text):
+        t = type_name(m.group(2))
+        if t and not held.get(m.group(1), "").startswith("group:"):  # (a group binding says more than `Node`)
+            held[m.group(1)] = "type:" + t
+    for m in _INFER_VAR.finditer(text):
+        ch = expression(text, m.end())
+        if ch and m.group(1) not in held:
+            held[m.group(1)] = "expr:" + "\x1f".join(ch)
 
 
 def _module_name(path: str, text: str) -> str:
@@ -47,7 +64,9 @@ def parse(path: str, rel: str, text: str, res_of) -> list[Module]:
     code, strings = blank(text, "gdscript")
     raw = text.split("\n")
     lines = code.split("\n")
-    mod = Module(_module_name(path, text), rel, len(raw), raw, lines)
+    mod = Module(_module_name(path, text), rel, len(raw), raw, lines, kind="class")
+    if _CLASS_NAME.search(text):
+        mod.decls = [mod.name]  # `class_name Player`: a type other scripts name
     ext = _EXTENDS.search(text)
     if ext:
         mod.parent = res_of(ext.group(1)) if ext.group(1) else ext.group(2)
@@ -81,9 +100,16 @@ def parse(path: str, rel: str, text: str, res_of) -> list[Module]:
             end -= 1
         f = Func(mod.name, name, rel, idx + 1, end + 1, "\n".join(lines[idx:end + 1]))
         _collect(f, lines, idx, end, str_by_line)
+        for m in _PARAM.finditer(lines[idx]):
+            f.bound["" + m.group(1)] = "type:" + m.group(2)
+        _types(f.bound, f.code)
+        rm = _RETURNS.search(lines[idx])
+        if rm:
+            f.returns = type_name(rm.group(1))
         mod.funcs.append(f)
         covered.update(range(idx, end + 1))
     top_lines = [ln if i not in covered else "" for i, ln in enumerate(lines)]
+    _types(mod.bound, "\n".join(top_lines))  # the script's own variables, for its every function
     top = Func(mod.name, "<top>", rel, 1, len(lines), "\n".join(top_lines), kind="top")
     _collect(top, top_lines, 0, len(lines) - 1, str_by_line, skip=covered)
     mod.funcs.append(top)
@@ -97,6 +123,7 @@ def _collect(f: Func, lines, a: int, b: int, str_by_line, skip=None) -> None:
         t = lines[i]
         if i == a and f.kind != "top":
             t = t.split("(", 1)[1] if "(" in t else ""  # skip the def itself
+        cut = len(lines[i]) - len(t)
         for m in _CALL.finditer(t):
             qual, name = m.group(1) or "", m.group(2)
             if name in _INDIRECT and qual:
@@ -104,7 +131,10 @@ def _collect(f: Func, lines, a: int, b: int, str_by_line, skip=None) -> None:
                 continue
             if not qual and name in _KEYWORDS:
                 continue
-            f.calls.append(Call(name, qual, i + 1))
+            chain = receiver(lines[i], cut + m.start(2)) if qual or t[:m.start(2)].rstrip().endswith(".") else ()
+            if chain and not qual:
+                qual = "."
+            f.calls.append(Call(name, qual, i + 1, chain, cut + m.start(2)))
         if f.kind != "top":
             g = _GROUP_VAR.search(t)
             if g and str_by_line.get(i + 1):
