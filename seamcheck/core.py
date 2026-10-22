@@ -828,7 +828,7 @@ def _qml_context(project: Project) -> None:
     is then a call on ContinuityClient, not a guess."""
     names: dict[str, set[str]] = {}
     for rel, mods in project.by_file.items():
-        if rel.endswith((".h", ".hpp", ".hh", ".cpp", ".cc", ".cxx")) and mods and "QML_NAMED_ELEMENT" in "\n".join(mods[0].raw):
+        if rel.endswith((".h", ".hpp", ".hh", ".cpp", ".cc", ".cxx", ".c")) and mods and "QML_NAMED_ELEMENT" in "\n".join(mods[0].raw):
             # `class FooForeign { QML_NAMED_ELEMENT(Foo) QML_FOREIGN(FooImpl) }`: QML's `Foo` is FooImpl
             raw = "\n".join(mods[0].raw)
             for body in re.split(r"\b(?:class|struct)\s+(?=\w+[^;]*\{)", raw)[1:]:
@@ -1206,7 +1206,7 @@ _FAMILIES = {
     ".ex": {"ex"}, ".exs": {"ex"},
     ".kt": {"jvm"}, ".kts": {"jvm"}, ".java": {"jvm"},
     ".ts": {"web"}, ".tsx": {"web"}, ".jsx": {"web"}, ".mjs": {"web"}, ".cjs": {"web"}, ".js": {"web", "qt"},
-    ".qml": {"qt"}, ".cpp": {"qt"}, ".cc": {"qt"}, ".cxx": {"qt"}, ".h": {"qt"}, ".hpp": {"qt"}, ".hh": {"qt"},
+    ".qml": {"qt"}, ".c": {"qt"}, ".cpp": {"qt"}, ".cc": {"qt"}, ".cxx": {"qt"}, ".h": {"qt"}, ".hpp": {"qt"}, ".hh": {"qt"},
     ".py": {"py"}, ".gd": {"gd"}, ".rs": {"rs"}, ".go": {"go"}, ".cs": {"cs"},
     ".rb": {"rb"}, ".rake": {"rb"}, ".ru": {"rb"},
 }
@@ -1417,6 +1417,15 @@ def _enum_case(m: Module, name: str) -> bool:
     return False
 
 
+def _c_static(project: Project, g: Func) -> bool:
+    """A C function declared `static` (file-local)."""
+    m = project.modules.get(g.module)
+    if not m:
+        return False
+    head = " ".join(m.raw[max(0, g.start - 2):g.start])
+    return bool(re.search(r"\bstatic\b", head))
+
+
 def _is_static(project: Project, g: Func) -> bool:
     """A function declared `static` / `class func` (callable as `.name(...)`)."""
     m = project.modules.get(g.module)
@@ -1507,7 +1516,7 @@ def _build_edges(project: Project) -> None:
     # use them (`m_board->indexOf()`): the header's fields count for the .cpp.
     for rel, mods in project.by_file.items():
         stem, ext = os.path.splitext(rel)
-        if ext in (".cpp", ".cc", ".cxx") and mods:
+        if ext in (".cpp", ".cc", ".cxx", ".c") and mods:
             for hext in (".h", ".hpp", ".hh"):
                 for hm in project.by_file.get(stem + hext, []):
                     for k, v in hm.bound.items():
@@ -1742,6 +1751,20 @@ def _build_edges(project: Project) -> None:
                 # Option / Result / Vec / String, not a project function of that name
                 _nothing(project, f, c)
                 continue
+            if not targets and not q and f.file.endswith((".c", ".h")):
+                # C: no imports, the linker's rule. A `static` function is its file's;
+                # any other is global to the program: the call reaches the file's own
+                # definition, else the project's one non-static definition of that name
+                cfuncs = [g for g in project.by_name.get(c.name, []) if g.kind != "top" and g.file.endswith((".c", ".h"))]
+                own = [g for g in cfuncs if g.file == f.file or g.file == os.path.splitext(f.file)[0] + ".h"]
+                glob_ = [g for g in cfuncs if not _c_static(project, g) or g.file.endswith(".h")]  # (a header's static inline: its includers')
+                if own:
+                    targets = [(g, True) for g in own[:1]]
+                elif len({g.file for g in glob_}) == 1 and glob_:
+                    targets = [(glob_[0], True)]
+                elif not cfuncs:
+                    _nothing(project, f, c)  # libc, a macro, a library's: no project function runs
+                    continue
             if not targets:
                 # A method on some object, or an import we can't see: every
                 # function with that name is a candidate (a "fuzzy" edge).

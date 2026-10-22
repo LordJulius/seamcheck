@@ -27,6 +27,7 @@ CORPUS = {
     "C#": ([".cs"], ["App-vNext/Polly", "JamesNK/Newtonsoft.Json"]),
     "Elixir": ([".ex", ".exs"], ["plausible/analytics", "hexpm/hexpm", "phoenixframework/phoenix"]),
     "GDScript": ([".gd"], ["godotengine/godot-demo-projects", "godotengine/tps-demo"]),
+    "C": ([".c"], ["jqlang/jq", "redis/redis"]),
     "C++": ([".cpp", ".cc", ".h", ".hpp"], ["flameshot-org/flameshot", "KDE/kdeconnect-kde"]),
     "QML": ([".qml"], ["KDE/kdeconnect-kde", "Swordfish90/cool-retro-term", "KDE/neochat"]),
     "Swift": ([".swift"], ["Alamofire/Alamofire", "apple/swift-argument-parser"]),

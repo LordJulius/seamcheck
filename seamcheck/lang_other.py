@@ -70,7 +70,7 @@ LANGS = {
     ".ts": ("js", _JS), ".tsx": ("js", _JS), ".mts": ("js", _JS),
     ".rs": ("rust", _RUST), ".kt": ("kotlin", _KOTLIN), ".kts": ("kotlin", _KOTLIN),
     ".java": ("c", _JAVA), ".cs": ("c", _CS), ".go": ("c", _GO),
-    ".cpp": ("c", _CPP), ".cc": ("c", _CPP), ".cxx": ("c", _CPP), ".hpp": ("c", _CPP), ".hh": ("c", _CPP),
+    ".c": ("c", _CPP), ".cpp": ("c", _CPP), ".cc": ("c", _CPP), ".cxx": ("c", _CPP), ".hpp": ("c", _CPP), ".hh": ("c", _CPP),
     ".h": ("c", _CPP), ".qml": ("js", _QML), ".swift": ("swift", _SWIFT), ".php": ("php", _PHP),
 }
 # type declarations (Kotlin, Java, C#, TS, Rust, Go): their names qualify calls
@@ -842,7 +842,7 @@ _RS_IMPL = re.compile(r"\bimpl\s*(?:<[^{}]*?>)?\s*(?:([\w:]+)(?:<[^{}]*?>)?\s+fo
 _BASE_SKIP = {"public", "private", "protected", "virtual", "internal", "extends", "implements", "where", "class",
               "struct", "new", "final", "sealed", "open", "abstract", "override", "in", "out", "reified", "const",
               "Sendable", "Equatable", "Hashable", "Codable", "Identifiable", "CustomStringConvertible"}
-_CPP_EXTS = (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h")
+_CPP_EXTS = (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h", ".c")
 
 
 def _classes(code: str, ext: str, fam: str) -> list[dict]:
@@ -1207,7 +1207,7 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     seen: set[tuple[int, str]] = set()
     found = []
     kotlin = fam == "kotlin"
-    cpp = ext in (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h")
+    cpp = ext in (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h", ".c")
     qml = ext == ".qml"
     for pat in pats:
         for m in pat.finditer(code):
@@ -1279,6 +1279,12 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 body_end = k
             if cpp and body_start is None:
                 continue  # a declaration, prototype or `Type var(args);`: not a function
+            if cpp:
+                ls = code.rfind("\n", 0, m.start(1)) + 1
+                prev = code[:ls].rstrip()
+                if code[ls:m.start(1)].rstrip().endswith(",") or prev.endswith((",", "(", "&&", "||", "=")) \
+                        and not prev.endswith(("==", "!=", "<=", ">=")):
+                    continue  # `    channel, sdslen(channel))`: an argument line of a call, not a definition
             if qml and name.startswith("on") and body_start is None:
                 body_end = code.find("\n", m.end())  # `onX: expr` on one line
                 body_end = n - 1 if body_end < 0 else body_end

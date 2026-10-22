@@ -672,5 +672,22 @@ class VendoredCode(unittest.TestCase):
         self.assertEqual(sorted(p.by_file), ["assets/vendor/lib.js", "src/app.js"])
 
 
+class PlainC(Base):
+    FILES = {
+        "src/sds.h": "static inline size_t sdslen(const char *s) {\n    return 0;\n}\n",
+        "src/sds.c": "#include \"sds.h\"\nchar *sdsnew(const char *s) {\n    return 0;\n}\n",
+        "src/a.c": "#include \"sds.h\"\nstatic void helper(void) {\n}\nvoid run(void) {\n    helper();\n    char *s = sdsnew(\"x\");\n"
+                   "    if (match(s,\n          sdslen(s), 0)) {\n    }\n    printf(\"%s\", s);\n}\n",
+        "src/b.c": "static void helper(void) {\n}\n",
+    }
+
+    def test_a_the_linkers_rule(self):
+        self.assertEqual(self.exact("src/a.run"), {"src/a.helper", "src/sds.sdsnew", "src/sds@src/sds.h.sdslen"})
+        self.assertFalse(self.guessed("src/a.run"))
+
+    def test_b_an_argument_line_is_no_definition(self):
+        self.assertNotIn("src/a.sdslen", self.p.funcs)
+
+
 if __name__ == "__main__":
     unittest.main()
