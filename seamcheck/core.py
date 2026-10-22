@@ -450,6 +450,8 @@ def _resolve_where(project: Project, where: str, cache: dict) -> str:
     names a package from outside the project (node_modules, the stdlib)."""
     if where.startswith("py:"):
         return _resolve_py(project, where, cache)
+    if where.startswith("rs:"):
+        return _resolve_rs(project, where, cache)
     if where.startswith(("go:", "go?:")):
         return _resolve_go(project, where.split(":", 1)[1], cache)
     if not where.startswith("js:"):
@@ -536,6 +538,94 @@ def _resolve_go(project: Project, path: str, cache: dict) -> str:
             keys = [k for k in cache["\0godirs"].get(d, []) if not k.endswith("_test")]
             return f"pkg:{keys[0]}" if len(keys) == 1 else ""
     return EXTERNAL
+
+
+def _rs_crates(project: Project, cache: dict) -> tuple[list[tuple[str, str]], dict[str, str]]:
+    """Rust crates: [(crate dir, src dir)] deepest first, and name -> src dir."""
+    got = cache.get("\0rs")
+    if got is None:
+        dirs, names = [], {}
+        for rel in project.files:
+            if rel != "Cargo.toml" and not rel.endswith("/Cargo.toml"):
+                continue
+            d = rel.rsplit("/", 1)[0] if "/" in rel else ""
+            src = f"{d}/src" if d else "src"
+            try:
+                with open(os.path.join(project.root, rel), encoding="utf-8") as fh:
+                    txt = fh.read()
+            except OSError:
+                txt = ""
+            # `[lib] path = "x/lib.rs"` / `[[bin]] path = "crates/core/main.rs"`: the crate root is there
+            roots = re.findall(r'(?ms)^\[\[?(?:lib|bin)\]\]?[^\[]*?^\s*path\s*=\s*"([^"]+)"', txt)
+            for r in roots:
+                rd = os.path.normpath(os.path.join(d, os.path.dirname(r)))
+                dirs.append((rd, rd))
+            dirs.append((d, src))
+            for sect in ("package", "lib"):
+                mm = re.search(rf"(?ms)^\[{sect}\][^\[]*?^\s*name\s*=\s*\"([^\"]+)\"", txt)
+                if mm:
+                    lib = re.search(r'(?ms)^\[lib\][^\[]*?^\s*path\s*=\s*"([^"]+)"', txt)
+                    names[mm.group(1).replace("-", "_")] = os.path.normpath(os.path.join(d, os.path.dirname(lib.group(1)))) if lib else src
+        dirs.sort(key=lambda x: -len(x[0]))
+        got = cache["\0rs"] = (dirs, names)
+    return got
+
+
+def _rs_module(project: Project, src: str, parts: list[str]) -> str:
+    """The file module for a module path in a crate ("" when there is none)."""
+    if not parts:
+        for root in ("lib", "main"):
+            if f"{src}/{root}" in project.modules:
+                return f"{src}/{root}"
+        return ""
+    base = f"{src}/{'/'.join(parts)}"
+    for cand in (base, base + "/mod"):
+        if cand in project.modules:
+            return cand
+    return ""
+
+
+def _resolve_rs(project: Project, where: str, cache: dict) -> str:
+    """A Rust `use` path -> the module it names, or the module holding the item
+    it names. `crate::` / `self::` / `super::` / a workspace crate's name; any
+    other first segment is a child module, else another crate (EXTERNAL)."""
+    rel, _, path = where[3:].partition("\0")
+    segs = path.split("::") if path else []
+    dirs, names = _rs_crates(project, cache)
+    src = next((s for d, s in dirs if rel.startswith(s + "/")), "")
+    cur: list[str] = []
+    if src:
+        p = rel[len(src) + 1:-3]  # (.rs)
+        cur = [] if p in ("lib", "main") else (p[:-4].split("/") if p.endswith("/mod") else p.split("/"))
+        if p.endswith("/mod") and p[:-4] in ("", "lib"):
+            cur = []
+    if not segs:
+        return ""
+    if segs[0] == "crate":
+        base, segs = [], segs[1:]
+    elif segs[0] in ("self", "super"):
+        base = list(cur)
+        while segs and segs[0] in ("self", "super"):
+            if segs[0] == "super":
+                base = base[:-1]
+            segs = segs[1:]
+    elif segs[0] in names:
+        src, base, segs = names[segs[0]], [], segs[1:]
+    elif src and _rs_module(project, src, cur + [segs[0]]):
+        base = list(cur)
+    elif src and _rs_module(project, src, [segs[0]]):
+        base = []  # (2015 edition: paths start at the crate root)
+    else:
+        return EXTERNAL  # std, core, alloc or a dependency
+    if not src:
+        return ""
+    best = _rs_module(project, src, base)
+    for k in range(len(segs)):
+        m = _rs_module(project, src, base + segs[:k + 1])
+        if not m:
+            break
+        best = m
+    return best
 
 
 def _py_index(project: Project, cache: dict) -> dict[str, list[str]]:
@@ -943,10 +1033,19 @@ def _scoped_language(rel: str) -> bool:
     """A language where a bare name resolves only through the file's own
     definitions and imports. A plain .js script (a QML library, a browser
     script) sees globals from anywhere, so it is not."""
-    return os.path.splitext(rel)[1] in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts", ".py", ".go")
+    return os.path.splitext(rel)[1] in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts", ".py", ".go", ".rs")
 
 
 _SELF = {"self", "this", "Self", "cls"}
+_RS_STD_METHODS = {
+    "unwrap", "expect", "unwrap_or", "unwrap_or_else", "unwrap_or_default", "unwrap_err", "is_none", "is_some",
+    "is_ok", "is_err", "ok", "err", "map_err", "ok_or", "ok_or_else", "and_then", "as_ref", "as_mut", "as_deref",
+    "clone", "cloned", "copied", "to_string", "to_owned", "into", "iter", "iter_mut", "into_iter", "collect",
+    "push", "push_str", "pop", "len", "is_empty", "as_bytes", "as_str", "as_slice", "to_vec", "extend", "borrow",
+    "borrow_mut", "lock", "take", "chars", "bytes", "trim", "split", "join", "starts_with", "ends_with",
+    "filter", "filter_map", "enumerate", "zip", "rev", "any", "all", "fold", "sum", "count", "last", "first",
+    "to_str", "to_path_buf", "display", "fmt", "eq", "cmp", "partial_cmp", "hash", "deref", "drop", "default",
+}
 
 
 def _build_edges(project: Project) -> None:
@@ -985,7 +1084,7 @@ def _build_edges(project: Project) -> None:
         for c in f.calls:
             targets: list[tuple[Func, bool]] = []
             q = c.qual
-            if q == "super" and mod:
+            if q == "super" and mod and mod.parent:
                 t = _lookup(project, mod.parent, c.name)
                 if t:
                     targets = [(t, True)]
@@ -1094,6 +1193,11 @@ def _build_edges(project: Project) -> None:
                 # every project function named reject.
                 res = project.resolution[os.path.splitext(f.file)[1]]
                 res[2] += 1
+                continue
+            if not targets and q and c.name in _RS_STD_METHODS and f.file.endswith(".rs"):
+                # `.unwrap()`, `.len()`, `.push()` on a receiver of unknown type:
+                # Option / Result / Vec / String, not a project function of that name
+                project.resolution[".rs"][2] += 1
                 continue
             if not targets:
                 # A method on some object, or an import we can't see: every
