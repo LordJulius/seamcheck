@@ -191,7 +191,8 @@ Some calls resolve to **nothing**, on purpose:
 
 `seamcheck stats` prints, per language, how many call sites are exact, guessed
 or nothing, and of the calls that reach project code, how many are exact.
-Watch that number: a drop after a change means the tool lost an import.
+Watch that number: a drop after a change means the tool lost an import. The
+gate watches it for you (below).
 
 Queries say how sure they are. `callers`, `callees`, `path` and `impact` walk
 exact edges; `--fuzzy` adds the guesses. `find` and the `callers` header print
@@ -604,6 +605,21 @@ untracked; `--staged`: only what is being committed), and fails on:
   code or grep product source;
 - functions whose lines it changes that copy a function elsewhere;
 - a test or script that still names a file the change split up or moved.
+
+It also warns, without blocking, when a language the change touches resolves
+worse than at `REF`: its "project calls exact" share (`stats`) fell more than
+2 points. That is a change that broke an import seamcheck followed, so its
+calls fell back to name guesses and every rule over them sees less:
+
+```
+  warning (not blocking): TypeScript (.ts) calls into project code exact: 100.0% at HEAD, 0.0% now (3 of 3 -> 0 of 2)
+```
+
+`check`, `gate` and `stats` record the shares whenever the tree's code and
+config are HEAD's (a small file in the cache, keyed by commit, seamcheck's
+version and the config). With no record for `REF`, the gate measures that
+commit's files itself when the project is small (300 parsed files, no bridge
+that runs a command); otherwise it records and stays quiet until there is one.
 
 Code the change only moved (a file split, a function moved between files) is
 judged as old. Debt already in a file you touched doesn't block you; new debt

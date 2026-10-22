@@ -161,6 +161,10 @@ def _main(argv=None) -> int:
     if a.cmd == "tighten":
         return _tighten(root, a.config)
     p = core.load(root, a.config, use_cache=not a.no_cache)
+    if a.cmd in ("check", "stats"):
+        # the gate's exactness guard compares a change against these (exactness.py)
+        from . import exactness
+        exactness.record(p)
 
     if a.cmd in ("check", "map"):
         findings = (core.run_rules(p, a.only.split(",") if a.only else None, a.skip.split(",") if a.skip else None)
