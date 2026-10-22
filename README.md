@@ -32,12 +32,30 @@ rules run in about 24 s, most of it the project's own command rules.
 
 ## Quick start
 
+Nothing to configure: in any repo, `seamcheck callers NAME`, `context NAME`,
+`impact FILE` and `stats` work on first run. Pick how to get it:
+
 ```sh
-pipx install git+https://github.com/LordJulius/seamcheck   # or, from a checkout: pip install --user .
+pipx install git+https://github.com/LordJulius/seamcheck      # installed: `seamcheck ...`
+uvx --from git+https://github.com/LordJulius/seamcheck seamcheck stats    # no install
+python3 seamcheck.pyz stats        # one file from a release (Python 3.11+, no dependencies)
 ```
 
-Or run it from a checkout with no install:
-`PYTHONPATH=/path/to/seamcheck python3 -m seamcheck check`.
+`seamcheck.pyz` is attached to each release (`python3 tools/build_pyz.py`
+builds it from a checkout); on first run it unpacks itself into
+`~/.cache/seamcheck/` and starts as fast as an install after that. From a
+checkout with no install: `PYTHONPATH=/path/to/seamcheck python3 -m seamcheck check`.
+
+For an agent (Claude Code shown; any MCP client works the same way), one line
+gives it the graph as tools, kept loaded between questions:
+
+```sh
+claude mcp add seamcheck -- seamcheck serve -C "$PWD"
+```
+
+and before it edits a function, `context` answers what it would otherwise
+grep for: the source, every caller (exact first, then marked guesses), where
+each of its calls lands, and the tests that reach it, so it knows what to run.
 
 Add a `seamcheck.toml` at the root of your repo:
 
@@ -92,6 +110,7 @@ The call graph
   seamcheck callees SPEC [--depth N]   what it calls
   seamcheck path FROM TO               the shortest call chain between two functions
   seamcheck find NAME                  where functions are defined (+ caller counts)
+  seamcheck context NAME [--json]      before editing it: source, each caller, where its calls land, tests to run
   seamcheck refs NAME...               defined / called / mentioned anywhere (scripts and config too)
   seamcheck impact TARGET... [--depth N] [--since REF]
                                        what a change could break: callers + bridged views, by area
@@ -809,6 +828,7 @@ claude mcp add seamcheck -- seamcheck serve -C /path/to/repo
 | `callers` / `callees` | `name`, `depth` (2), `fuzzy` | per match: exact and guess counts, what it reaches with depth |
 | `path` | `from`, `to`, `fuzzy` | the chain, or `through_guesses_only` |
 | `find` | `name` | id, file, lines, callers exact / guessed |
+| `context` | `name` | per match: source, callers (file, line, exact), its calls and their targets, the tests reaching it |
 | `refs` | `name` | defined, callers, mentions |
 | `impact` | `targets` (specs or files), `since`, `staged`, `depth` (4), `fuzzy` | reached functions by area |
 | `stats` | | sizes, timing, per language how calls resolve |

@@ -1445,7 +1445,7 @@ def _bind_closure(f: Func, fam: str, body: str, brace: int, name: str, chain: tu
 
 def _bind_param(f: Func, nm_: str, spec: str, body: str, a: int, b: int, first_line: int) -> None:
     """A lambda parameter: for the whole function when no other lambda uses
-    the name, and (`\$0`, `it`, `e` in many closures) on the lambda's own lines."""
+    the name, and (`$0`, `it`, `e` in many closures) on the lambda's own lines."""
     held = f.bound.get(nm_)
     if held is None:
         f.bound[nm_] = spec

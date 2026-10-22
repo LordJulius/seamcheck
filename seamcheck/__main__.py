@@ -9,6 +9,7 @@ parts. Deterministic, local, language-agnostic.
   seamcheck callees SPEC [--depth N]     what it calls (same)
   seamcheck path FROM TO                 shortest call chain (exact; --fuzzy through guesses)
   seamcheck find NAME                    where a function is defined
+  seamcheck context NAME                 before editing it: source, callers, what it calls, tests to run
   seamcheck dead                         functions nothing calls or references
   seamcheck stats                        size, parse time, graph density
   seamcheck matrix [RULE] [--all]        a fanout rule's token x view grid (all fanout rules if none;
@@ -110,7 +111,7 @@ def main(argv=None) -> int:
 def _main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="seamcheck", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"seamcheck {__version__}")
-    ap.add_argument("cmd", choices=["init", "serve", "check", "map", "callers", "callees", "path", "find", "dead", "stats", "deps", "matrix", "tidy", "tests", "test-only", "unused", "dups", "split", "hotspots", "remove", "refs", "impact", "gate",
+    ap.add_argument("cmd", choices=["init", "serve", "check", "map", "callers", "callees", "path", "find", "context", "dead", "stats", "deps", "matrix", "tidy", "tests", "test-only", "unused", "dups", "split", "hotspots", "remove", "refs", "impact", "gate",
                                     "trace", "run", "fuzz", "tighten"])
     ap.add_argument("args", nargs="*")
     ap.add_argument("-C", dest="root", default=".")
@@ -261,6 +262,30 @@ def _main(argv=None) -> int:
             return 1
         for i, fid in enumerate(best):
             print(f"{'  ' * i}{'-> ' if i else ''}{_fmt(p, fid)}")
+        return 0
+
+    if a.cmd == "context":
+        got = queries.context(p, a.args[0] if a.args else "*")
+        if a.json or a.format == "json":
+            print(json.dumps(got, indent=1))
+            return 0 if got else 1
+        if not got:
+            print(f"nothing matches {a.args[0] if a.args else '*'}")
+            return 1
+        for c in got:
+            ex = sum(1 for x in c["callers"] if x["exact"])
+            print(f"== {c['id']}  {c['file']}:{c['start']}-{c['end']}")
+            print(c["source"])
+            print(f"-- callers: {ex} exact, {len(c['callers']) - ex} name-guess")
+            for x in c["callers"][:25]:
+                print(f"   {'' if x['exact'] else '? '}{x['id']}  ({x['file']}:{x['line']})")
+            print("-- calls")
+            for x in c["callees"]:
+                to = ", ".join(x["targets"]) if x["targets"] else "(library / unresolved)"
+                print(f"   {x['line']}: {x['name']} -> {'' if x['exact'] or not x['targets'] else '? '}{to}")
+            print(f"-- tests reaching it ({len(c['tests'])}): run these after changing it")
+            for t in c["tests"][:25]:
+                print(f"   {t['id']}  ({t['file']}:{t['line']})")
         return 0
 
     if a.cmd == "find":

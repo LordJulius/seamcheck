@@ -12,3 +12,20 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover tests
+  pyz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python tools/build_pyz.py dist/seamcheck.pyz
+      # the one file works on its own, from outside the checkout
+      - run: |
+          cp dist/seamcheck.pyz "$RUNNER_TEMP/"
+          cd "$RUNNER_TEMP" && python seamcheck.pyz --version
+          python seamcheck.pyz -C "$GITHUB_WORKSPACE" stats
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seamcheck.pyz
+          path: dist/seamcheck.pyz
