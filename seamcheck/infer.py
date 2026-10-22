@@ -121,10 +121,15 @@ class Types:
         return mods, len(prims) == 1 or variants, True
 
     def _primary(self, mn: str) -> str:
+        """Which type a module is part of: a C++ class's header and source are
+        one; a C# partial class's files (and a Swift extension, a Rust impl)
+        are one per namespace and name."""
         m = self.p.modules[mn]
         if m.file.endswith((".h", ".hpp", ".hh", ".cpp", ".cc", ".cxx")):
             return os.path.splitext(m.file)[0] + "\0" + (m.decls[0] if m.owner and m.decls else "")  # Foo.h + Foo.cpp: one class
-        return m.file if m.kind == "ext" else mn
+        if m.kind == "ext" and m.decls:
+            return f"{self._pkg_of(mn)}\0{m.decls[0]}"
+        return mn
 
     def _pkg_of(self, mn: str) -> str:
         m = self.p.modules.get(mn)
@@ -226,11 +231,18 @@ class Types:
                     g = self.p.funcs.get(f"{part}.{name}")
                     if g and g not in impls:
                         impls.append(g)
-        for mn in mods:  # Kotlin / C# / Swift extensions on the type
-            m = self.p.modules[mn]
-            for d in m.decls[:1]:
-                impls += [g for g in self.ext_fns.get((d, name), []) if g not in impls]
+        for mn in mods:  # Kotlin / C# / Swift extensions on the type, or on a supertype / interface it has
+            for a in self.ancestors(mn):
+                m = self.p.modules[a]
+                for d in (m.decls[:1] if m.owner or m.kind == "ext" else m.decls[-1:]):
+                    impls += [g for g in self.ext_fns.get((d, name), []) if g not in impls]
+            if impls:
+                return impls, False  # (extensions: the receiver's type is sure, each overload may be the one)
         return impls, False
+
+    def one_type(self, funcs) -> bool:
+        """These functions are one type's (overloads, or its parts)."""
+        return len({self._primary(g.module) for g in funcs}) == 1
 
     def field(self, mods: list[str], name: str, depth: int):
         """A field's value; UNKNOWN when the class declares it without a type
@@ -443,6 +455,9 @@ class Types:
             else:
                 hits, _ = self.method(list(mods), name)
             if len(hits) == 1:
+                return self.returns(hits[0], list(mods) if kind == "inst" else None, depth + 1)
+            if hits and len({g.returns for g in hits}) == 1 and hits[0].returns:
+                # overloads that all return the same type: whichever runs, that is the value
                 return self.returns(hits[0], list(mods) if kind == "inst" else None, depth + 1)
             if not hits:
                 if seg in UNWRAP:

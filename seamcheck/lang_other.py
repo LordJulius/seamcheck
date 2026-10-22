@@ -647,7 +647,7 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
             span = (body, j)
         elif ext in _CPP_EXTS:
             continue  # `class QMouseEvent;`: a forward declaration names a type defined elsewhere
-        kind = "ext" if kw in ("extension", "impl") or (kw == "class" and "partial" in code[max(0, m.start() - 40):m.start()]) else "class"
+        kind = "ext" if kw in ("extension", "impl") or re.search(r"\bpartial\b", code[max(0, m.start() - 40):m.end()]) else "class"
         if kw in ("interface", "protocol", "trait"):
             kind = "interface"
         out.append({"name": name, "kw": kw, "bases": bases, "hdr": hdr, "pos": m.start(), "span": span, "kind": kind})

@@ -114,12 +114,18 @@ def receiver(code: str, pos: int, max_segs: int = 8) -> tuple[str, ...]:
                 break
             segs.append(name)
             i = s
-        elif ch == ">" and op == "::":  # `Vec::<T>::new` / `Foo<T>::bar`
+        elif ch == ">" and code[i - 2:i] != "->":  # `Vec::<T>::new`, `Foo<T>::bar`, `Policy<T>.Handle()`
             g = _match_back(code, i, ">", "<")
             if g < 0:
                 return ()
-            i = _skip_back_ws(code, g)
-            continue
+            j = _skip_back_ws(code, g)
+            if code[j - 2:j] == "::":  # Rust's turbofish `Vec::<u8>::new`
+                j = _skip_back_ws(code, j - 2)
+            s = _ident_back(code, j)
+            if s == j or code[s].isdigit():
+                return ()  # `a > b.c()`: a comparison, not a generic type
+            segs.append(code[s:j])
+            i = s
         else:
             segs.append("(...)")
             break
