@@ -364,6 +364,32 @@ class Types:
             return ("inst" if self.p.modules[path].kind == "class" else "static", (path,), True)
         return EXT
 
+    def _rs_external(self) -> set:
+        """The crates a Rust project uses but doesn't hold: std / core / alloc
+        and every Cargo.toml dependency that isn't a crate of the workspace."""
+        got = self.cache.get("\0rsext")
+        if got is None:
+            got = {"std", "core", "alloc"}
+            own = set()
+            for rel in self.p.files:
+                if os.path.basename(rel) != "Cargo.toml":
+                    continue
+                try:
+                    with open(os.path.join(self.p.root, rel), encoding="utf-8") as fh:
+                        text = fh.read()
+                except OSError:
+                    continue
+                pm = re.search(r"^\[package\][^\[]*?^name\s*=\s*\"([^\"]+)\"", text, re.M | re.S)
+                if pm:
+                    own.add(pm.group(1).replace("-", "_"))
+                for sec in re.finditer(r"^\[(?:workspace\.)?(?:dev-|build-)?dependencies\]([^\[]*)", text, re.M):
+                    got |= {k.replace("-", "_") for k in re.findall(r"^([A-Za-z0-9_-]+)\s*=", sec.group(1), re.M)}
+                for sec in re.finditer(r"^\[(?:target\.[^\]]+\.)?(?:dev-|build-)?dependencies\.([A-Za-z0-9_-]+)\]", text, re.M):
+                    got.add(sec.group(1).replace("-", "_"))
+            got -= own
+            self.cache["\0rsext"] = got
+        return got
+
     def _package_name(self) -> str:
         if "\0pkgname" not in self.cache:
             import json
@@ -471,6 +497,12 @@ class Types:
             if not own:
                 return None
             return ("static" if seg in ("Self", "static") else "inst", tuple(own), True)
+        if fm.file.endswith(".rs") and seg in ("super", "crate"):  # (Rust's `self` is the receiver: `self.x()`)
+            if seg == "super" and f is not None and re.search(r"^\s*(?:pub\s+)?mod\s+\w+\s*\{", "\n".join(fm.raw[:f.start]), re.M):
+                return ("static", (fm.name,), True)  # `super::shell_quote()` in an inline `mod tests`: this file's module
+            return None
+        if fm.file.endswith(".rs") and re.fullmatch(_RS_PRIMS, seg):
+            return EXT  # `u32::from(c)`: a primitive's
         if seg in ("super", "parent", "base", "super()"):  # (Python's `super().x()`)
             own = self.own_class(mod, f)
             if not own:
@@ -559,6 +591,8 @@ class Types:
             return EXT  # a type or module the project doesn't declare
         if fm.file.endswith(".qml") and seg not in self.qml_names and seg not in ("parent", "model", "modelData", "index"):
             return EXT  # a name no project QML file declares: the window's / framework's
+        if fm.file.endswith(".rs") and seg in self._rs_external():
+            return EXT  # `std::...`, `serde_json::from_str`: a crate the project depends on, not one of its own
         if seg in _JS_GLOBALS and fm.file.endswith(_JS_EXTS):
             return EXT  # `console`, `window`, `document`: the runtime's (no project name took it)
         return self._rb_named(mod, seg)
@@ -703,6 +737,7 @@ class Types:
         return got
 
 
+_RS_PRIMS = r"u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32|f64|bool|char|str"
 _ES_MODULE = (".ts", ".tsx", ".mts", ".cts")
 _JS_EXTS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".qml")
 _JS_GLOBALS = {"console", "window", "document", "navigator", "localStorage", "sessionStorage", "globalThis",
