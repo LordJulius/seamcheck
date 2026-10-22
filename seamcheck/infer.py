@@ -646,6 +646,13 @@ class Types:
             chain = chain[k:]
         if len(chain) > 1 and chain[-1] in _DOM_PROPS and mod.file.endswith(_JS_EXTS):
             return EXT  # `el.classList`, `el.style`: the DOM's, whatever `el` is
+        if start is None and len(chain) > 1 and chain[0] in ("window", "globalThis") and mod.file.endswith(_JS_EXTS) \
+                and not (f is not None and chain[0] in f.bound):
+            # `window.h`: a member the project adds to the global Window (`declare global { interface Window { h: ... } }`)
+            wins = [mn for mn in self.by_type.get("Window", ()) if self.p.modules[mn].kind == "interface"]
+            got = self.field(wins, chain[1], depth) if wins else None
+            if got is not None and got is not UNKNOWN:
+                return self.chain(mod, f, chain[1:], depth + 1, self_mods, start=got)
         cur = start if start is not None else self.first(mod, f, chain[0], depth, self_mods)
         before = None  # the value the previous segment was read from
         for k, seg in enumerate(chain[1:], 1):

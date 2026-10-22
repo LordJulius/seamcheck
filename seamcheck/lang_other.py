@@ -102,6 +102,8 @@ _TS_TYPED = re.compile(r"(?:\b(?:const|let|var)\s+|[(,]\s*|^\s*)([A-Za-z_$][\w$]
 _TS_FIELD = re.compile(r"^\s*(?:(?:private|public|protected|readonly|static|declare)\s+)*([a-z_$][\w$]*)\s*[?!]?\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])\s*[;=]", re.M)
 # a module-level `export const utf8Encoder: TextEncoder = new TextEncoder()`
 _TS_CONST = re.compile(r"^\s*(?:export\s+)?(?:declare\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])", re.M)
+_TS_INSTANCE_TYPE = re.compile(r"^\s*(?:(?:private|public|protected|readonly|static|declare)\s+)*([a-z_$][\w$]*)\s*[?!]?\s*:\s*"
+                               r"InstanceType\s*<\s*typeof\s+([A-Z][\w$]*)\s*>\s*[;,]?\s*$", re.M)
 _TS_PARAM_FIELD = re.compile(r"\b(?:private|public|protected|readonly)\s+([a-z_$][\w$]*)\s*\??\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])")
 # `Client client(...);` at a statement start, `QString name` as a parameter
 _CPP_VALUE = re.compile(r"(?:^|[(,])\s*(?:(?:const|final|this|using|await\s+using|out|ref|in|params|scoped|readonly)\s+)*"
@@ -1100,7 +1102,19 @@ def _assignments(tk: str, text: str) -> list[tuple[str, str]]:
         ch = expression(text, m.end())
         if ch:
             out.append((m.group(1), "expr:" + "\x1f".join(ch)))
+    if tk == "js":  # `const { h, app: a } = window`: each name is that member of the value
+        for m in _JS_DESTRUCTURE.finditer(text):
+            ch = expression(text, m.end())
+            if not ch or not re.match(r"^[\w$]+$", ch[-1] if ch[-1][-2:] != "()" else "x"):
+                continue
+            for part in lambdas.split_top(m.group(1)):
+                pm = re.match(r"^\s*([A-Za-z_$][\w$]*)\s*(?::\s*([A-Za-z_$][\w$]*))?\s*(?:=.*)?$", part, re.S)
+                if pm:
+                    out.append((pm.group(2) or pm.group(1), "expr:" + "\x1f".join(ch + (pm.group(1),))))
     return out
+
+
+_JS_DESTRUCTURE = re.compile(r"\b(?:const|let|var)\s*\{([^{}=;]*)\}\s*(?::[^=;]+)?=(?!=)")
 
 
 # what a literal on the right of `x =` builds
@@ -1579,12 +1593,33 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             for i in range(a_, min(b_ + 1, len(lines))):
                 inside[i] = True
         fields: dict[str, dict[str, set[str]]] = {}
+
+        def inside_any(i: int) -> bool:
+            return inside[i]
+
         line_class: dict[int, Module] = {}
         for c in classes:
             if c["name"] and c["span"]:
                 home = class_module(enclosing_classes(c["pos"]) + [c])
                 for i in range(c["a"], c["b"] + 1):
                     line_class[i] = home  # (nested classes come later and win)
+        if fam == "js":  # an interface member typed by an object literal (`h: {\n  app: App;\n}`): a type of its own
+            for i, ln in enumerate(lines):
+                om = re.match(r"^\s*(?:readonly\s+)?([A-Za-z_$][\w$]*)\s*\??\s*:\s*\{\s*$", ln)
+                owner_ = line_class.get(i)
+                if not om or owner_ is None or owner_.kind != "interface" or inside_any(i):
+                    continue
+                e_ = lambdas.matching(code, line_start[i] + ln.index("{", om.end(1)))
+                if e_ < 0:
+                    continue
+                sub = f"{owner_.name}.{om.group(1)}"
+                if sub not in mods:
+                    mods[sub] = Module(sub, rel, len(raw), raw, lines, owner=owner_.owner or mod.name, decls=[],
+                                       aliases=mod.aliases, uses=mod.uses, imported=mod.imported)
+                    mods[sub].kind = "interface"
+                fields.setdefault(owner_.name, {}).setdefault(om.group(1), set()).add("\0mod:" + sub)
+                for j in range(i + 1, line_of(e_) + 1):
+                    line_class[j] = mods[sub]
         for c in classes:  # Kotlin primary constructors: `class Foo(private val repo: Repo)`
             if c["name"] and fam == "kotlin":
                 home = class_module(enclosing_classes(c["pos"]) + [c])
@@ -1600,11 +1635,15 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     ch = expression(code, line_start[i] + m.end())
                     if ch:  # (a PHP property `$x` is read as `->x`)
                         expr_fields.setdefault(home.name, {}).setdefault(m.group(1).lstrip("$"), ch)
+            if fam == "js" and not inside[i] and "{" in ln:  # `const { h } = window;` at the top of a file
+                for nm_, held in _assignments("js", ln if ln.rstrip().endswith(";") else ln + ";"):
+                    if held.startswith("expr:") and len(held.split("\x1f")) > 1:
+                        expr_fields.setdefault(home.name, {}).setdefault(nm_, tuple(held[5:].split("\x1f")))
             pats_ = []
             if fam == "kotlin":
                 pats_ = [] if inside[i] else [_KT_FIELD, _KT_NEW]
             elif fam == "js":
-                pats_ = [_TS_PARAM_FIELD] + ([] if inside[i] else [_TS_FIELD, _TS_NEW, _TS_CONST])
+                pats_ = [_TS_PARAM_FIELD] + ([] if inside[i] else [_TS_FIELD, _TS_NEW, _TS_CONST, _TS_INSTANCE_TYPE])
             if not inside[i] and tk in ("cpp", "jvm", "kotlin", "js", "swift"):
                 for nm_, ty in _elements(tk, ln):  # `QHash<QString, Player*> m_players;`: its elements
                     got_fields.setdefault(nm_, set()).add(ty)
@@ -1653,7 +1692,8 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         for mname, fl in fields.items():
             target = mod if mname == mod.name else mods.get(mname)
             if target is not None:
-                target.bound = {**target.bound, **{k: "type:" + next(iter(v)) for k, v in fl.items() if len(v) == 1}}
+                target.bound = {**target.bound, **{k: (next(iter(v))[1:] if next(iter(v)).startswith("\0") else "type:" + next(iter(v)))
+                                                   for k, v in fl.items() if len(v) == 1}}
         for mname, fl in expr_fields.items():
             target = mod if mname == mod.name else mods.get(mname)
             if target is not None:
