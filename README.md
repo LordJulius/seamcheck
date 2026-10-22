@@ -18,7 +18,7 @@ the project writes down about how its parts fit together.
   (JSX), C, C++, QML, Python, GDScript, Rust, Go, C#, Swift, Ruby and PHP.
   Rules work on any text file.
 - **Says how sure it is.** On 37 open-source repos in 16 languages, 95% or
-  more of the calls into project code are exact on 31, and 90% on 36 (see
+  more of the calls into project code are exact on 29, and 90% on 36 (see
   "How exact it is"). The rest are marked as guesses, never passed off as fact.
 - **Every check came from a real bug.** Each rule and lint was written after a
   bug it would have caught, and its test reproduces that bug (cut down) and
