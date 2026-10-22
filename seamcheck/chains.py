@@ -112,6 +112,14 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
         if i == 0:
             break
         ch = code[i - 1]
+        closure_call = False
+        if ch == "}" and TRAILING_CLOSURES:  # `.uploadProgress(q) { p in ... }.next()`: the closure ends a call
+            k = _match_back(code, i, "}", "{")
+            j = _skip_back_ws(code, k) if k > 0 else 0
+            if j > 0 and (code[j - 1] == ")" or code[j - 1] in _IDENT_CH):
+                i = j
+                ch = code[i - 1]
+                closure_call = ch != ")"  # (`xs.map { ... }`: called with the closure alone)
         if ch == ")":
             k = _match_back(code, i, ")", "(")
             if k < 0:
@@ -178,7 +186,7 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                 return ()
             if name in ("await", "return", "new", "throw", "yield", "in", "of", "case", "else", "do"):
                 break
-            segs.append(name)
+            segs.append(name + "()" if closure_call else name)
             i = s
         elif ch == ">" and code[i - 2:i] != "->":  # `Vec::<T>::new`, `Foo<T>::bar`, `Policy<T>.Handle()`
             g = _match_back(code, i, ">", "<")
@@ -323,6 +331,8 @@ def expression(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
 # -> "Handle`1()"), as `Policy.NoOp()` and `Policy.NoOp<T>()` are different
 # methods; set while a C# file is parsed
 CALL_TARGS = False
+# Swift / Kotlin: `x.f(a) { ... }` / `x.map { ... }`: a closure after a call is its last argument
+TRAILING_CLOSURES = False
 _TARGS_SEG = re.compile(r"^([\w$]+)`\d+\(\)$")
 
 
