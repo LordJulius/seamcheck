@@ -556,7 +556,15 @@ class Types:
         if len(chain) > 1 and chain[-1] in _DOM_PROPS and mod.file.endswith(_JS_EXTS):
             return EXT  # `el.classList`, `el.style`: the DOM's, whatever `el` is
         cur = self.first(mod, f, chain[0], depth, self_mods)
-        for seg in chain[1:]:
+        before = None  # the value the previous segment was read from
+        for k, seg in enumerate(chain[1:], 1):
+            if seg in _ELEMENT_ACCESS and re.match(r"^[\w$]+$", chain[k - 1]):
+                # `m_players[id]`, `xs.get(0)`, `list.first()`: an element of a declared container
+                el = self._element(mod, f, chain[k - 1], before if k > 1 else None, depth)
+                if el is not None:
+                    before, cur = cur, el
+                    continue
+            before = cur
             if cur is None or is_ext(cur):
                 if cur is not None and "[]" in chain[chain.index(seg):]:
                     return None  # an element of a library collection (`shapes[0]`): could be a project object
@@ -678,6 +686,8 @@ class Types:
             return EXT  # a name no project QML file declares: the window's / framework's
         if fm.file.endswith(".rs") and seg in self._rs_external():
             return EXT  # `std::...`, `serde_json::from_str`: a crate the project depends on, not one of its own
+        if seg in ("std", "boost") and fm.file.endswith((".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".c")):
+            return EXT  # `std::unique_ptr<X509>(...)`: the standard library's
         if fm.file.endswith(".py") and seg in _PY_BUILTIN_NAMES:
             return EXT  # `int.__new__`, `object.__repr__`: Python's own
         if seg in _JS_GLOBALS and fm.file.endswith(_JS_EXTS):
@@ -760,6 +770,21 @@ class Types:
         if root in fm.external or root in ("functools", "staticmethod", "classmethod", "property"):
             return EXT
         return None  # a project decorator: what it returns, we don't know
+
+    def _element(self, mod, f, name: str, owner, depth: int):
+        """The element type a container `name` was declared with (`name[]`):
+        a local / parameter, else a field of the value it was read from."""
+        key = name + "[]"
+        if owner is None:
+            held = (f.bound.get(key) if f is not None else None) or mod.bound.get(key) or self._file_mod(mod).bound.get(key)
+            if held:
+                return self.held(mod, f, held, depth + 1)
+            own = self.own_class(mod, f)
+            return self.field(list(own), key, depth) if own else None
+        if owner and not is_ext(owner) and owner[0] in ("inst", "static"):
+            got = self.field(list(owner[1]), key, depth)
+            return None if got is UNKNOWN else got
+        return None
 
     def _getter(self, mods: list[str], name: str, depth: int):
         """`c.req` read through a getter (`get req(): HonoRequest`, Python's
@@ -852,6 +877,8 @@ class Types:
         return got
 
 
+_ELEMENT_ACCESS = {"[]", "at()", "first()", "last()", "value()", "get()", "front()", "back()", "constFirst()",
+                   "constLast()", "elementAt()", "getFirst()", "getLast()", "peek()", "poll()", "pop()", "find()"}
 _RS_PRIMS = r"u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32|f64|bool|char|str"
 _ES_MODULE = (".ts", ".tsx", ".mts", ".cts")
 _JS_EXTS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".qml")
