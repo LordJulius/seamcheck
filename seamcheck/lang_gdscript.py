@@ -64,6 +64,21 @@ def _module_name(path: str, text: str) -> str:
     return m.group(1) if m else os.path.splitext(os.path.basename(path))[0]
 
 
+def _res(rel: str, path: str, res_of) -> str:
+    """The module a script path names: `res://x/y.gd` from the Godot project
+    `rel` is in (any folder above it may hold its project.godot), or
+    `"../motion.gd"` relative to `rel` itself."""
+    here = os.path.dirname(rel)
+    if not path.startswith("res://"):
+        return res_of("res://" + os.path.normpath(os.path.join(here, path)).replace(os.sep, "/"))
+    tail = path[6:]
+    while True:
+        got = res_of("res://" + (here + "/" if here else "") + tail)
+        if got or not here:
+            return got
+        here = os.path.dirname(here)
+
+
 def parse(path: str, rel: str, text: str, res_of) -> list[Module]:
     """`res_of(res_path)` maps a "res://..." path to a module name (or "")."""
     code, strings = blank(text, "gdscript")
@@ -74,9 +89,9 @@ def parse(path: str, rel: str, text: str, res_of) -> list[Module]:
         mod.decls = [mod.name]  # `class_name Player`: a type other scripts name
     ext = _EXTENDS.search(text)
     if ext:
-        mod.parent = res_of(ext.group(1)) if ext.group(1) else ext.group(2)
+        mod.parent = _res(rel, ext.group(1), res_of) if ext.group(1) else ext.group(2)
     for m in _PRELOAD.finditer(text):
-        target = res_of(m.group(2))
+        target = _res(rel, m.group(2), res_of)
         if target:
             mod.aliases[m.group(1)] = target
     # Function spans: a func runs until the next non-blank line indented at

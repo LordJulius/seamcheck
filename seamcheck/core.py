@@ -1455,6 +1455,32 @@ def _param_type(project: Project, types, mod, text: str, k: int, label: str, ind
     return "|".join(sorted(found))  # (overloads: each parameter type; the member settles which)
 
 
+def _gd_declared(project: Project, types, mod, f: Func, chain: tuple) -> str:
+    """The engine class a GDScript receiver is declared as (`var x: Camera3D`),
+    or "" (untyped, or a project script's type)."""
+    if len(chain) == 1:
+        held = f.bound.get(chain[0]) or mod.bound.get(chain[0], "")
+    else:
+        v = types.chain(mod, f, chain[:-1])
+        if v is None or infer_mod.is_ext(v) or v[0] != "inst" or len(v[1]) != 1:
+            return ""
+        held = project.modules[v[1][0]].bound.get(chain[-1], "")
+    ty = held[5:] if held and held.startswith("type:") else ""
+    return ty if ty and ty not in project.modules and not project.short.get(ty) else ""
+
+
+def _gd_extends(project: Project, module: str, engine: str) -> bool:
+    """A script's `extends` chain reaches the engine class `engine`."""
+    seen = set()
+    m = project.modules.get(module)
+    while m is not None and m.name not in seen:
+        seen.add(m.name)
+        if m.parent == engine:
+            return True
+        m = project.modules.get(m.parent) if m.parent else None
+    return False
+
+
 def _swift_labels_match(project: Project, mod, c: Call, g: Func) -> bool:
     """A Swift call's first argument label against `g`'s first parameter:
     `append(contentsOf:)` is the library's, not the project's `append(optional:)`."""
@@ -1904,6 +1930,13 @@ def _build_edges(project: Project) -> None:
                     mine = []
                 own = [g for g in cands if g.file == f.file and g.recv] if not f.file.endswith(".cs") else []
                 fm_ = project.modules.get(mod.owner, mod) if mod and mod.owner else mod
+                if not targets and c.chain and f.file.endswith(".gd") and mod is not None:
+                    # `var part: RigidBody3D = ...` then `part.explode()`: the object is a script
+                    # extending RigidBody3D; the project's one such script with an explode() it is
+                    eng = _gd_declared(project, types, mod, f, c.chain)
+                    sub = [g for g in cands if eng and _gd_extends(project, g.module, eng)] if eng else []
+                    if len({g.module for g in sub}) == 1:
+                        targets = [(sub[0], True)]
                 if targets:
                     pass
                 elif q and f.file.endswith((".kt", ".kts")) and len(cands) == 1 and cands[0].recv and fm_ is not None and \
