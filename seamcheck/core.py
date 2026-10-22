@@ -1615,6 +1615,12 @@ def _build_edges(project: Project) -> None:
                             f.file.endswith((".swift", ".kt", ".kts", ".cs")):
                         _nothing(project, f, c)  # `Data` the project only extends: a method not in an extension is the library's
                         continue
+            if not q and mod and not targets and f.file.endswith(infer._JS_EXTS[:-1]) and c.name in f.bound \
+                    and f.bound[c.name].startswith("lam:"):
+                types.line = c.line
+                if infer.is_ext(types.first(mod, f, c.name, 0)):
+                    _nothing(project, f, c)  # `new Promise((resolve) => resolve(x))`: the runtime's function
+                    continue
             if not q and mod and not f.file.endswith((".py", ".ex", ".exs")) and not targets:
                 # a bare call in a class: its own (or an inherited) method first;
                 # `Foo(...)` / `new Foo(...)` / `: Base(args)`: Foo's constructor

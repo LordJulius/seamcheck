@@ -504,6 +504,10 @@ class Types:
         if key in self.cache:
             return self.cache[key]
         self.cache[key] = None  # (a lambda whose receiver is its own parameter)
+        if chain and name in ("addEventListener", "removeEventListener", "on", "once") and mod.file.endswith(_JS_EXTS[:-1]) \
+                and argi == 1 and is_ext(self.chain(mod, f, chain, depth + 1) or (None,)):
+            self.cache[key] = EXT  # `el.addEventListener('click', (e) => ...)`: a DOM event
+            return EXT
         if chain and name in _ELEMENT_HOFS and pi == _ELEMENT_HOFS[name]:
             # `paths.iter().all(|p| ...)`, `xs.forEach(x => ...)`, `list.map { it }`: an element of the receiver
             got = self.loop_element(mod, f, tuple(s_ for s_ in chain if s_ not in _ITER_SEGS) or chain, depth + 1)
@@ -525,6 +529,10 @@ class Types:
         else:
             g = self.bare(mod, f, name)
             hits = [g] if g is not None else []
+            if not hits and name[:1].isupper() and mod.file.endswith(_JS_EXTS[:-1]) and not self.type_modules(mod, name)[2] \
+                    and name not in self._file_mod(mod).imported:
+                self.cache[key] = EXT  # `new Promise((resolve) => ...)`: what a runtime class hands its callback
+                return EXT
         cands = []  # (type-parameter count, callee module, the lambda parameter's type)
         for g in hits:
             sh = shift if g.recv and g.file.endswith(".cs") else 0
@@ -825,8 +833,13 @@ class Types:
                     before, cur = cur, el
                     continue
             before = cur
+            if cur is None and seg in _DOM_QUERIES and seg.endswith("()") and mod.file.endswith(_JS_EXTS[:-1]) \
+                    and not self.p.by_name.get(seg[:-2]):
+                cur = EXT  # `el.getElementsByTagName('a')`: whatever el is, that finds DOM nodes
+                continue
             if cur is None or is_ext(cur):
-                if cur is not None and "[]" in chain[chain.index(seg):]:
+                if cur is not None and "[]" in chain[chain.index(seg):] and not (
+                        mod.file.endswith(_JS_EXTS[:-1]) and set(chain) & _DOM_QUERIES):
                     return None  # an element of a library collection (`shapes[0]`): could be a project object
                 return cur if cur is None else EXT
             cur = self.step(mod, cur, seg, depth)
@@ -1219,6 +1232,9 @@ _ELEMENT_HOFS = {n: 0 for n in ("map", "filter", "all", "any", "for_each", "find
 _ELEMENT_HOFS.update({"fold": 1, "reduce": 1, "try_fold": 1, "mapIndexed": 1, "filterIndexed": 1})
 _ITER_SEGS = {"iter()", "iter_mut()", "into_iter()", "drain()", "asSequence()", "stream()", "lazy", "values()",
               "copied()", "cloned()", "enumerate()", "rev()", "skip()", "take()", "peekable()", "by_ref()"}
+# DOM queries: what they find (`el.getElementsByTagName('a')[0]`) is a DOM node, never a project object
+_DOM_QUERIES = {"getElementsByTagName()", "getElementsByClassName()", "querySelectorAll()", "querySelector()",
+                "getElementById()", "children", "childNodes", "closest()", "parentElement", "parentNode"}
 _ELEMENT_ACCESS = {"[]", "at()", "first()", "last()", "value()", "get()", "front()", "back()", "constFirst()",
                    "constLast()", "elementAt()", "getFirst()", "getLast()", "peek()", "poll()", "pop()", "find()"}
 _RS_PRIMS = r"u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32|f64|bool|char|str"
