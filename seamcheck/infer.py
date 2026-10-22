@@ -634,9 +634,10 @@ class Types:
             return ("inst", tuple(mods), True) if mods else None
         return self.instance(gm, g.returns, self_mods)
 
-    def chain(self, mod, f, chain: tuple, depth: int = 0, self_mods=None):
+    def chain(self, mod, f, chain: tuple, depth: int = 0, self_mods=None, start=None):
         """The value a receiver chain evaluates to: ("inst" | "static",
-        modules, exact), EXT, or None (unknown)."""
+        modules, exact), EXT, or None (unknown). `start`: the first segment's
+        value, when the caller has it."""
         if not chain or depth > _MAX:
             return None
         if mod.file.endswith(".rs") and len(chain) > 1:
@@ -645,7 +646,7 @@ class Types:
             chain = chain[k:]
         if len(chain) > 1 and chain[-1] in _DOM_PROPS and mod.file.endswith(_JS_EXTS):
             return EXT  # `el.classList`, `el.style`: the DOM's, whatever `el` is
-        cur = self.first(mod, f, chain[0], depth, self_mods)
+        cur = start if start is not None else self.first(mod, f, chain[0], depth, self_mods)
         before = None  # the value the previous segment was read from
         for k, seg in enumerate(chain[1:], 1):
             if seg in _ELEMENT_ACCESS and re.match(r"^[\w$]+$", chain[k - 1]):
@@ -678,7 +679,8 @@ class Types:
             return None
         if fm.file.endswith(".rs") and re.fullmatch(_RS_PRIMS, seg):
             return EXT  # `u32::from(c)`: a primitive's
-        if seg in ("super", "parent", "base", "super()"):  # (Python's `super().x()`)
+        if seg == "super" or (seg, os.path.splitext(fm.file)[1]) in (("base", ".cs"), ("parent", ".php"), ("super()", ".py")):
+            # (C#'s `base`, PHP's `parent::`, Python's `super().x()`; elsewhere `base` is a name)
             own = self.own_class(mod, f)
             if not own:
                 return None
@@ -698,6 +700,12 @@ class Types:
             if name in self._lib_results():
                 return EXT  # `hc<App>(url)`: a runtime proxy (packs' [[returns]])
             g = self.bare(mod, f, name)
+            if g is None and not fm.file.endswith(".py"):
+                own = self.own_class(mod, f)
+                hits = self.method(own, name)[0] if own else []
+                if len(hits) > 1 and len({h.returns for h in hits}) == 1 and hits[0].returns not in ("", "Self") \
+                        and not hits[0].returns.startswith(("expr:", "byov:")):
+                    g = hits[0]  # `parse(url)`, open with overrides: each returns the one declared type
             if g is not None:
                 got = self.returns(g, None, depth + 1)
                 return got if got is not None else self._rb_named(mod, name)
@@ -721,6 +729,13 @@ class Types:
             return ("ns", (), True)
         if f is not None:
             held = f.bound.get(seg)
+            if held and held.startswith("expr:") and held[5:].split("\x1f")[0] == seg:
+                # `client = client.newBuilder().build()`: rebuilt from the field (or outer
+                # value) of that name, so the chain starts there
+                base = self.first(mod, None, seg, depth + 1, self_mods or self.own_class(mod, f))
+                if base is None:
+                    return None
+                return self.chain(mod, f, tuple(held[5:].split("\x1f")), depth + 1, self_mods, start=base)
             if held:
                 return self.held(mod, f, held, depth + 1, self_mods)
         # a bare name is a field only where `this` is implicit: never in Python,

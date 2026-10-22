@@ -80,8 +80,8 @@ _DECL = re.compile(r"\b(?:class|object|interface|enum|struct|record|trait|type)\
 # parameters, `Type* name` / `Type& name` in C++. The type is one Capitalized
 # word (a generic `List<Foo>` is List, outside the project: its calls resolve
 # to nothing, which is right).
-_KT_TYPED = re.compile(r"(?:\b(?:val|var)\s+|[(,{]\s*|^\s*)([a-z_]\w*)\s*:\s*([A-Z]\w*)(?![\w.])", re.M)
-_KT_FIELD = re.compile(r"\b(?:val|var)\s+([a-z_]\w*)\s*:\s*([A-Z]\w*)(?![\w.])")
+_KT_TYPED = re.compile(r"(?:\b(?:val|var)\s+|[(,{]\s*|^\s*)([a-z_]\w*)\s*:\s*([A-Z]\w*(?:\.[A-Z]\w*)*)(?![\w.])", re.M)
+_KT_FIELD = re.compile(r"\b(?:val|var)\s+([a-z_]\w*)\s*:\s*([A-Z]\w*(?:\.[A-Z]\w*)*)(?![\w.])")
 # built by its constructor: `val prefs = OsaPrefs(ctx)`, `const hub = new HubClient(url)`
 _KT_NEW = re.compile(r"\b(?:val|var)\s+([a-z_]\w*)\s*=\s*([A-Z]\w*)\s*\(")
 _TS_NEW = re.compile(r"(?:\b(?:const|let|var)\s+|^\s*(?:(?:private|public|protected|readonly|static)\s+)*)"
@@ -931,8 +931,10 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
             elif depth <= 0 and ch == ";":
                 break
             elif depth <= 0 and ch == "\n" and fam in ("kotlin", "js") and code[k + 1:k + 200].lstrip()[:1] not in ("{", ":", ",", ""):
-                if not code[:k].rstrip().endswith((",", ":", "(")):
-                    break
+                nxt = code[k + 1:k + 200].lstrip()
+                if not code[:k].rstrip().endswith((",", ":", "(")) and not (
+                        fam == "kotlin" and re.match(r"(?:@\w+\s*|(?:private|internal|public|protected)\s+)*constructor\b|@\w+\s*$|@\w+\s*\n", nxt)):
+                    break  # (Kotlin: `class Builder\n  @JvmOverloads\n  constructor(...) {` goes on)
             elif ch == "=" and depth <= 0 and fam in ("js", "c") and how == "type":
                 break  # `type X = ...` / a declaration, not a class body
             k += 1
@@ -994,7 +996,7 @@ _PHP_FIELD = re.compile(r"(?:^\s*|[(,]\s*)(?:(?:public|private|protected|static|
 # a function's declared return type, from its signature
 _RET_AFTER = {
     "js": re.compile(r"\)\s*:\s*([^={;]+?)\s*(?:=>|\{|;|$)", re.S),
-    "kotlin": re.compile(r"\)\s*:\s*([^={]+?)\s*(?:=|\{|\bwhere\b|$)", re.S),
+    "kotlin": re.compile(r"\)\s*:\s*([^={\n]+?)\s*(?:=|\{|\bwhere\b|\n|$)", re.S),
     "rust": re.compile(r"->\s*([^{;]+?)\s*(?:\bwhere\b|\{|;|$)", re.S),
     "swift": re.compile(r"->\s*([^{]+?)\s*(?:\bwhere\b|\{|$)", re.S),
     "php": re.compile(r"\)\s*:\s*\??\s*([\\\w|?]+)", re.S),
