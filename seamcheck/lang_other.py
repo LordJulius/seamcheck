@@ -312,6 +312,14 @@ def parse_python(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             (mods.get(mname) or fm).funcs.append(f)
         elif b - a > f.end - f.start:  # `@property x` and its `@x.setter`: one function, the longest span
             f.start, f.end, f.code = a + 1, b + 1, "\n".join(lines[a:b + 1])
+        if mname == fm.name and o >= 0 and blocks[o][3] == "def":
+            # a closure in a method (`def decorator(f):` in `add_template_global`): its
+            # `self` is the method's, an instance of that class
+            j = o
+            while j >= 0 and blocks[j][3] == "def":
+                j = outer[j]
+            if j >= 0 and blocks[j][3] == "class" and owner_of.get(j):
+                f.bound.setdefault("self", "mod:" + owner_of[j])
         _py_collect(f, lines, a, b, first=True)
         _py_types(f, lines, a, b, test_file, fixture=any(
             re.match(r"\s*@(?:pytest\.)?fixture\b", lines[j]) for j in range(max(0, a - 3), a)))

@@ -980,7 +980,8 @@ def _python_names(project: Project) -> None:
             # library (`werkzeug.test.Client`) means an inherited method may be its
             fm = project.modules.get(m.owner, m)
             got = [c for b in m.bases if (c := _py_class(project, m, b[3:]))]
-            if any(not _py_class(project, m, b[3:]) and b[3:].split(".")[0] in fm.external for b in m.bases):
+            if any(not _py_class(project, m, b[3:]) and (b[3:].split(".")[0] in fm.external or b[3:] in _PY_BUILTINS)
+                   for b in m.bases):  # (`class Config(dict)`, `class MyError(ValueError)`: Python's own)
                 m.unresolved = True
             m.bases = got
             m.parent = m.parent or (got[0] if got else "")
@@ -1366,6 +1367,7 @@ def _is_static(project: Project, g: Func) -> bool:
     return bool(re.search(r"\b(?:static|class)\s+(?:func|var|let)\b", line))
 
 
+_PY_BUILTINS = set(dir(__import__("builtins")))
 _SELF = {"self", "this", "Self", "cls"}
 _CTOR_NAMES = {"init", "__init__", "constructor", "__construct", "initialize"}
 _RS_STD_METHODS = {
