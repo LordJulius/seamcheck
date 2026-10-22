@@ -133,8 +133,9 @@ _CS_MEMBER = re.compile(r"^\s*(?:\[[^\]\n]*\]\s*)*(?:(?:public|private|protected
 # Go: `c *Command` / `var x Foo` (receivers, parameters, vars), `x := &Foo{`, and
 # struct fields (`flags *flagSet`). Go types may be lowercase (unexported).
 _GO_TYPED = re.compile(r"(?:\bvar\s+|[(,]\s*)([A-Za-z_]\w*)\s+\*?((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)(?=\s*[,)=]|\s*$)", re.M)
-_GO_NEW = re.compile(r"\b([A-Za-z_]\w*)\s*:?=\s*&?((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s*\{")
+_GO_NEW = re.compile(r"\b([A-Za-z_]\w*)\s*:?=\s*(?:&?((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s*\{|new\(\s*((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s*\))")
 _GO_FIELD = re.compile(r"^\s*(?:var\s+)?([A-Za-z_]\w*)\s+\*?((?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*)\s*(?:`[^`]*`)?\s*$")
+_GO_ELEMS = re.compile(r"\b([A-Za-z_]\w*)\s+(?:\[\d*\]|map\[[^\]\n]+\])\s*\*?((?:[A-Za-z_]\w*\.)?[A-Z]\w*)\b")
 _GO_KEYWORDS = {"return", "go", "defer", "case", "range", "package", "import", "type", "func", "else", "chan", "map",
                 "struct", "interface", "break", "continue", "var", "const"}
 
@@ -156,6 +157,8 @@ def _elements(tk: str, text: str) -> list[tuple[str, str]]:
     """("name[]", element type) for a container declaration: `QHash<QString,
     Player*> m_players`, `List<Foo> xs`, `xs: Map<K, Foo>`, TS `xs: Foo[]`.
     The element is the last type argument (a map's value)."""
+    if tk == "go":  # `cmds []*Command`, `flags map[string]*Flag`: their elements (a map's values)
+        return [(m.group(1) + "[]", m.group(2)) for m in _GO_ELEMS.finditer(text) if m.group(1) not in _GO_KEYWORDS]
     if tk not in ("cpp", "jvm", "kotlin", "js", "swift") or "<" not in text and "[" not in text:
         return []
     out = []
@@ -195,7 +198,7 @@ def _typed(tk: str, text: str) -> list[tuple[str, str]]:
         return [(m.group(1), m.group(2)) for pat in (_RS_TYPED, _RS_NEW) for m in pat.finditer(text)
                 if m.group(2) not in ("Self",)]
     if tk == "go":
-        return [(m.group(1), m.group(2)) for pat in (_GO_TYPED, _GO_NEW) for m in pat.finditer(text)
+        return [(m.group(1), m.group(2) or m.group(3)) for pat in (_GO_TYPED, _GO_NEW) for m in pat.finditer(text)
                 if m.group(1) not in _GO_KEYWORDS and m.group(2) not in _GO_KEYWORDS]
     if tk == "swift":
         return [(m.group(1), t) for pat in (_SW_TYPED, _SW_NEW) for m in pat.finditer(text) if (t := type_name(m.group(2)))]
@@ -1058,6 +1061,10 @@ def _returns(tk: str, prefix: str, sig: str, name: str, cls: str) -> str:
 
 def _return_text(tk: str, prefix: str, sig: str) -> str:
     """The declared return type as written (`Vec<Match>`), for its element."""
+    if tk == "go":
+        m = re.match(r"\s*(?:\[[^\]]*\])?\s*\((?:[^()]|\([^()]*\))*\)\s*(.*)$", sig, re.S)
+        res = (m.group(1) if m else "").strip().rstrip("{").strip()
+        return res[1:].split(",")[0].strip().split()[-1] if res.startswith("(") and res[1:].strip() else res
     pat = _RET_AFTER.get(tk)
     if pat:
         m = pat.search(sig)
@@ -1841,6 +1848,10 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                             if len(ts) == 1:
                                 got_fields.setdefault(m.group(1), set()).update(ts)
             elif tk == "go" and not inside[i]:
+                if home is mod:  # `var echoCmd = &cobra.Command{`: a package-level value
+                    for m in _GO_NEW.finditer(ln):
+                        if m.group(1) not in _GO_KEYWORDS:
+                            got_fields.setdefault(m.group(1), set()).add(m.group(2) or m.group(3))
                 for m in _GO_FIELD.finditer(ln):
                     if m.group(1) not in _GO_KEYWORDS and m.group(2) not in _GO_KEYWORDS:
                         got_fields.setdefault(m.group(1), set()).add(m.group(2))

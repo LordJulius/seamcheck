@@ -940,6 +940,10 @@ class Types:
         held = mod.bound.get(seg) or fm.bound.get(seg)
         if held and not held.startswith("group:"):
             return self.held(fm, None, held, depth + 1)
+        if fm.file.endswith(".go") and fm.package:  # a package-level var another file of the package declares
+            pm = self._go_package_var(fm.package, seg)
+            if pm is not None:
+                return self.held(pm, None, pm.bound[seg], depth + 1)
         if seg in fm.external:
             return EXT
         if seg[:1].isupper() and seg in self.by_type and not fm.file.endswith(".py"):
@@ -1077,6 +1081,10 @@ class Types:
             held = (f.bound.get(key) if f is not None else None) or mod.bound.get(key) or self._file_mod(mod).bound.get(key)
             if held:
                 return self.held(mod, f, held, depth + 1)
+            whole = f.bound.get(name, "") if f is not None else ""
+            if whole.startswith("expr:") and whole.endswith("()") and depth < _MAX:
+                # `tokens := Tokenize(s)` then `tokens[3]`: an element of what the function returns
+                return self.loop_element(mod, f, tuple(whole[5:].split("\x1f")), depth + 1)
             own = self.own_class(mod, f)
             return self.field(list(own), key, depth) if own else None
         if owner and not is_ext(owner) and owner[0] in ("inst", "static"):
@@ -1118,6 +1126,18 @@ class Types:
             if dm and dm not in mods and dm not in alt:
                 alt.append(dm)
         return alt
+
+    def _go_package_var(self, pkg: str, name: str):
+        """The file module of package `pkg` declaring package-level `name`."""
+        idx = self.cache.get("\0gopkgvars")
+        if idx is None:
+            idx = self.cache["\0gopkgvars"] = {}
+            for m in self.p.modules.values():
+                if m.file.endswith(".go") and not m.owner and m.package:
+                    for k in m.bound:
+                        idx.setdefault((m.package, k), []).append(m)
+        hits = idx.get((pkg, name), [])
+        return hits[0] if len(hits) == 1 else None
 
     def _nested(self, mn: str) -> bool:
         """`<mod>.<name>` is a class nested in mod, not a file named with a
