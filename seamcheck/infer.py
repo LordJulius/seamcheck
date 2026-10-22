@@ -20,6 +20,7 @@ import re
 
 from .chains import UNWRAP
 
+UNKNOWN = ("unknown", (), False)  # declared, of a type the code doesn't say (a QML `property var`)
 EXT = ("ext", (), True)  # a library value: every call on it is the library's (("ext", (type,), True) when named)
 
 
@@ -37,6 +38,13 @@ class Types:
         for m in project.modules.values():
             for d in m.decls:
                 self.by_type.setdefault(d, []).append(m.name)
+        for qname, cls in project.__dict__.get("_qml_names", {}).items():  # a C++ class registered under a QML name
+            if qname != cls:
+                self.by_type.setdefault(qname, []).extend(self.by_type.get(cls, []))
+        # every name a project QML file declares (ids, properties): any other
+        # bare name in QML is the framework's (Kirigami's `pageStack`)
+        self.qml_names = {k for m in project.modules.values() if m.file.endswith(".qml") for k in m.bound} | \
+            {f.name for m in project.modules.values() if m.file.endswith(".qml") for f in m.funcs}
         self.cache: dict = {}
         self.ext_fns: dict[tuple[str, str], list] = {}
         for g in project.funcs.values():
@@ -225,12 +233,15 @@ class Types:
         return impls, False
 
     def field(self, mods: list[str], name: str, depth: int):
+        """A field's value; UNKNOWN when the class declares it without a type
+        the code states (so it is not a library supertype's)."""
         for mn in mods:
             for a in self.ancestors(mn):
                 m = self.p.modules[a]
                 held = m.bound.get(name)
                 if held:
-                    return self.held(m, None, held, depth + 1, self_mods=[mn])
+                    got = self.held(m, None, held, depth + 1, self_mods=[mn])
+                    return UNKNOWN if got is None else got
         return None
 
     # --- the walk -----------------------------------------------------------------
@@ -338,6 +349,8 @@ class Types:
             return None
         if seg in ("(...)", "[]", "?", "!!"):
             return None
+        if fm.bound.get(seg) == "qmlns:":
+            return ("ns", (), True)
         if f is not None:
             held = f.bound.get(seg)
             if held:
@@ -345,6 +358,8 @@ class Types:
         own = self_mods or self.own_class(mod, f)
         if own:
             got = self.field(list(own), seg, depth)
+            if got is UNKNOWN:
+                return None
             if got is not None:
                 return got
         held = mod.bound.get(seg) or fm.bound.get(seg)
@@ -376,6 +391,8 @@ class Types:
             return ("static", tuple(short), len(short) == 1)
         if seg[:1].isupper() and not fm.file.endswith((".ex", ".exs", ".gd")):
             return EXT  # a type or module the project doesn't declare
+        if fm.file.endswith(".qml") and seg not in self.qml_names and seg not in ("parent", "model", "modelData", "index"):
+            return EXT  # a name no project QML file declares: the window's / framework's
         return None
 
     def bare(self, mod, f, name: str):
@@ -405,6 +422,10 @@ class Types:
             return cur
         if seg in ("[]", "(...)"):
             return None
+        if kind == "ns":  # a QML module's namespace: `KDEConnect.Type`
+            name = seg[:-2] if seg.endswith("()") else seg
+            mods_, ex, declared = self.type_modules(mod, name)
+            return ("static", tuple(mods_), ex) if declared else EXT
         if kind == "pkg":
             from .core import _in_scope
             if seg.endswith("()"):
@@ -441,6 +462,8 @@ class Types:
                     return self.held(m, None, held, depth + 1, self_mods=[mn])
             return None
         got = self.field(list(mods), seg, depth)
+        if got is UNKNOWN:
+            return None
         if got is None and seg in UNWRAP:
             return cur
         if got is None and any(self.external_base(mn) for mn in mods):

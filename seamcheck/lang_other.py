@@ -732,6 +732,61 @@ def _stem_key(s: str) -> str:
     return re.sub(r"[-_.]", "", s).lower()
 
 
+_QML_ID = re.compile(r"(?:^|[;{])[ \t]*id[ \t]*:[ \t]*([A-Za-z_]\w*)", re.M)
+_QML_PROP = re.compile(r"\b(?:required[ \t]+|readonly[ \t]+|default[ \t]+)*property[ \t]+([A-Z][\w.]*)[ \t]+([a-z_]\w*)")
+_QML_ROOT = re.compile(r"^[ \t]*([A-Z][\w.]*)[ \t]*\{", re.M)
+
+
+def _qml_types(mod: Module, code: str, stem: str) -> None:
+    """A QML file is a component type named by its file, whose base is its
+    root object's type. `Type { id: x }` and `property Type x` say what x
+    is; the root object's id is the component itself."""
+    mod.kind = "class"
+    name = next((d for d in [os.path.basename(mod.file)[:-4]] if d[:1].isupper()), "")
+    if name and name not in mod.decls:
+        mod.decls.append(name)
+    root = _QML_ROOT.search(code)
+    if root:
+        mod.bases = [root.group(1)]
+    for m in _QML_ID.finditer(code):
+        depth, k = 0, m.start()
+        while k > 0:  # back to the `{` of the object this id names
+            k -= 1
+            if code[k] == "}":
+                depth += 1
+            elif code[k] == "{":
+                if depth == 0:
+                    break
+                depth -= 1
+        tm = re.search(r"([A-Z][\w.]*)\s*$", code[max(0, k - 120):k])
+        if not tm:
+            continue
+        if root and k == code.find("{", root.start()):
+            mod.bound[m.group(1)] = "type:" + (name or tm.group(1))  # the root: this component
+        else:
+            mod.bound.setdefault(m.group(1), "type:" + tm.group(1))
+    generic = set()
+    for m in _QML_PROP.finditer(code):
+        if m.group(1) not in ("QtObject", "QObject", "Item", "Component"):  # (any object: unknown, not a library one)
+            mod.bound.setdefault(m.group(2), "type:" + m.group(1))
+        else:
+            generic.add(m.group(2))
+    for m in re.finditer(r"\b(?:property[ \t]+[\w.<>]+|signal)[ \t]+([a-z_]\w*)", code):
+        mod.bound.setdefault(m.group(1), "qmlvar:")  # declared here, of a type QML doesn't say
+    generic |= {m.group(1) for m in re.finditer(r"\bproperty[ \t]+(?:var|variant)[ \t]+([a-z_]\w*)", code)}
+    for m in re.finditer(r"\bproperty[ \t]+(?:var|variant|QtObject|QObject)[ \t]+([a-z_]\w*)[ \t]*:", code):
+        ch = expression(code, m.end())  # `property var iface: Factory.create(id)`: what it is bound to
+        if ch and mod.bound.get(m.group(1), "qmlvar:") == "qmlvar:":
+            mod.bound[m.group(1)] = "expr:" + "\x1f".join(ch)
+    for m in re.finditer(r"(?:^|[;{])[ \t]*([a-z_]\w*)[ \t]*=(?!=)", code, re.M):
+        if m.group(1) in generic and mod.bound.get(m.group(1), "qmlvar:") == "qmlvar:":  # `clipboard = Factory.create(id)`: what it holds
+            ch = expression(code, m.end())
+            if ch:
+                mod.bound[m.group(1)] = "expr:" + "\x1f".join(ch)
+    for m in re.finditer(r"^[ \t]*import[ \t]+[\w.]+(?:[ \t]+[\d.]+)?[ \t]+as[ \t]+([A-Z]\w*)", mod.raw and "\n".join(mod.raw) or code, re.M):
+        mod.bound[m.group(1)] = "qmlns:"  # `KDEConnect.Foo`: a type of that QML module
+
+
 _GO_RECV = re.compile(r"^func\s*\(\s*(?:\w+\s+)?\*?\s*([A-Za-z_]\w*)")
 _GO_TEST = re.compile(r"(?:Test|Benchmark|Example|Fuzz)(?:[A-Z_0-9]|$)")
 _GO_DECL = re.compile(r"\btype\s+([A-Za-z_]\w*)(?:\[[^\]]*\])?\s+(?!=)")
@@ -1139,6 +1194,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                         f.calls.append(Call(m.group(2), m.group(1) or "", i + 1))
                 off += len(ln) + 1
         home.funcs.append(f)
+    if qml:
+        _qml_types(mod, code, stem)
     top = Func(mod.name, "<top>", rel, 1, len(lines), "", kind="top")
     if ext == ".qml":
         # `Button {` instantiates Button.qml: a use of that component
