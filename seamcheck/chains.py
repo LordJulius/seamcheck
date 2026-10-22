@@ -23,17 +23,22 @@ def _skip_back_ws(code: str, i: int) -> int:
 
 
 def _match_back(code: str, i: int, close: str, open_: str) -> int:
-    """code[i-1] is `close`: the index of its matching `open_` (or -1)."""
-    depth, k = 0, i - 1
+    """code[i-1] is `close`: the index of its matching `open_` (or -1). All
+    bracket kinds nest (a callback's `{ ...; }` inside the arguments); a `;`
+    outside them means the statement ended first."""
+    pairs = {")": "(", "]": "[", "}": "{", ">": "<"}
+    stack, k = [], i - 1
     while k >= 0:
         ch = code[k]
-        if ch == close:
-            depth += 1
-        elif ch == open_:
-            depth -= 1
-            if depth == 0:
-                return k
-        elif ch in ";{}" and close != "}":
+        if ch in ")]}" or (ch == ">" and close == ">"):
+            stack.append(pairs[ch])
+        elif ch in "([{" or (ch == "<" and close == ">"):
+            if not stack or stack[-1] != ch:
+                return -1
+            stack.pop()
+            if not stack:
+                return k if ch == open_ else -1
+        elif ch == ";" and len(stack) <= 1:
             return -1  # left the statement
         k -= 1
     return -1
