@@ -140,6 +140,7 @@ class Project:
     text_cache: dict = field(default_factory=dict)
     parse_ms: int = 0
     config_problems: list[str] = field(default_factory=list)
+    precise: dict = field(default_factory=dict)  # what the language servers settled (precise.py), when asked
 
     # ---- lookups
     def module_of_file(self, rel: str) -> Module | None:
@@ -262,7 +263,10 @@ def _stamp(root: str, rel: str):
         return None
 
 
-def load(root: str, config_path: str | list[str] | None = None, use_cache: bool = True) -> Project:
+def load(root: str, config_path: str | list[str] | None = None, use_cache: bool = True,
+         precise: bool | None = None) -> Project:
+    """precise: let language servers settle the calls the static resolver
+    guesses (precise.py); None: as `[precise] enabled` says."""
     import time
     t0 = time.time()
     root = os.path.abspath(root)
@@ -272,6 +276,8 @@ def load(root: str, config_path: str | list[str] | None = None, use_cache: bool 
     include = proj_cfg.get("include", ["**/*"])
     exclude = DEFAULT_EXCLUDE + proj_cfg.get("exclude", [])
     files = list_files(root, include, exclude)
+    if precise is None:
+        precise = bool(config.get("precise", {}).get("enabled"))
     project = Project(root, config, files=files)
     project.config_problems = problems
     res = _res_map(files)
@@ -302,7 +308,9 @@ def load(root: str, config_path: str | list[str] | None = None, use_cache: bool 
             todo.append((root, rel, res))
     # The whole linked graph, when nothing changed: an agent runs seamcheck
     # many times in a row, and linking (edges) is most of a warm load.
-    graph_key = hashlib.sha1(json.dumps([_code_version(), extra, config, sorted(files), sorted(digests.items())],
+    from . import precise as precise_mod
+    graph_key = hashlib.sha1(json.dumps([_code_version(), extra, config, sorted(files), sorted(digests.items())]
+                                        + ([precise_mod.key(config)] if precise else []),
                                         sort_keys=True, default=str).encode()).hexdigest()
     graph_name = f"{repo}-graph-{graph_key[:16]}.pkl"
     index_name = f"{repo}-graphs.pkl"
@@ -368,7 +376,7 @@ def load(root: str, config_path: str | list[str] | None = None, use_cache: bool 
             if k[0] in old_digests and old_digests[k[0]] == hashes.of(k[0]):
                 project.text_cache[k] = v
         previous = None
-    _build_edges(project)
+    _link(project, precise, use_cache)
     _apply_bridges(project)
     project.config_problems += project.bridge_problems
     if use_cache:
@@ -1098,6 +1106,25 @@ def _nothing(project: Project, f: Func, c) -> None:
 
 # SEAMCHECK_TRACE=1: every call's outcome, for tuning a resolver (bench/trace.py)
 _TRACE: list | None = [] if os.environ.get("SEAMCHECK_TRACE") else None
+
+
+def _link(project: Project, precise: bool, use_cache: bool) -> None:
+    """The static call graph; in precise mode, language servers then settle
+    the calls it guessed, read from this build's trace (precise.py)."""
+    global _TRACE
+    if not precise:
+        _build_edges(project)
+        return
+    outer, _TRACE = _TRACE, []
+    try:
+        _build_edges(project)
+        trace = _TRACE
+    finally:
+        _TRACE = outer
+    if outer is not None:
+        outer.extend(trace)
+    from . import precise as precise_mod
+    precise_mod.refine(project, trace, use_cache)
 
 
 def _build_edges(project: Project) -> None:

@@ -30,7 +30,7 @@ KEYS = {
     "bridge": {"id", "from", "to", "match", "sep", "wildcard", "normalize", "why"},
 }
 SEVERITIES = {"error", "warn", "info"}
-TABLES = ("project", "runtime", "deps", "tidy", "gate")
+TABLES = ("project", "runtime", "deps", "tidy", "gate", "precise")
 
 
 def files_for(root: str, extra: list[str] | None = None) -> list[str]:
