@@ -53,8 +53,9 @@ why = "damage outside take_hit skips armor, shields and crits"
 ```
 
 Or let seamcheck write a first one from what the repo holds (its languages,
-the folders their code lives in, one commented example of each common rule
-kind), and install the pre-commit gate:
+the folders their code lives in, the rule packs of the frameworks it finds,
+one commented example of each common rule kind), and install the pre-commit
+gate:
 
 ```sh
 seamcheck init --hook
@@ -242,9 +243,10 @@ in this order:
 2. every `seamcheck.d/*.toml` beside it (split rules by area)
 3. each `--config PATH` (a file, or a folder of .toml): rules kept outside a repo you don't own
 
-`[project]` and `[runtime]` keys merge (include / exclude lists add up);
-`[[rule]]`, `[[bridge]]`, `[[invariant]]` and `[[contract]]` lists concatenate.
-An id defined twice is an error, and findings name the file a rule came from.
+`[project]` and `[runtime]` keys merge (include / exclude / packs lists add
+up); `[[rule]]`, `[[bridge]]`, `[[invariant]]` and `[[contract]]` lists
+concatenate. An id defined twice is an error, and findings name the file a
+rule came from. `[project] packs` adds seamcheck's framework rules (below).
 
 Suppress one line: `# seamcheck: allow rule-id` (or `// seamcheck: allow
 rule-id`) on the line or the line above. Every rule takes `severity`
@@ -470,6 +472,35 @@ send = 'data-testid="send"'
 auto_approve = { marker = 'data-testid="auto-approve"', disabled = false }   # may never be disabled
 abort = { marker = 'data-testid="abort"', when = '^busy\b' }                # the one condition it may have
 ```
+
+## Framework packs
+
+Some rules are true for every project on a framework, not one project's
+contract. seamcheck ships them as packs; a project turns them on:
+
+```toml
+[project]
+packs = ["phoenix", "react"]
+
+[[rule]]                         # override a pack rule by its id: its keys replace the pack's
+id = "phoenix/no-atoms-from-strings"
+severity = "error"
+```
+
+| pack | rules |
+|---|---|
+| `phoenix` | `ets-owner`, `handle-info-catch-all`, `rescue-logged-at-debug` (the lints above); `no-atoms-from-strings` (warn: atoms are never collected) |
+| `react` | `inert-control`, `disabled-by-data` (JSX), `popup-clipped`; `effect-not-async` (an async effect's cleanup never runs), `state-not-assigned` (`this.state.x =` outside the constructor) |
+| `qml` | `unknown-type`, `singleton-import`, `js-shadows-type`, `anchors-in-positioner` |
+| `compose` | `init-order` (`kotlin-init-order`), `inert-control` (Kotlin); `no-global-scope` (warn: a `GlobalScope` coroutine outlives its screen) |
+
+Pack rules are named `<pack>/<id>` (`seamcheck check --skip react/popup-clipped`
+leaves one out of a run). An unknown pack, or an override naming a rule its
+pack doesn't have, is a config error. `seamcheck init` lists the packs whose
+framework a manifest declares: `:phoenix` in a mix.exs, `react` in a
+package.json, Qt Quick in a CMakeLists.txt beside `.qml` files, Compose in a
+Gradle build. A pack holds only what is true everywhere; a project's taste
+stays in its own rules.
 
 ## One graph across languages: bridges and impact
 
