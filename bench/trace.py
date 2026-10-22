@@ -35,7 +35,7 @@ print(f"{len(rows)} {want} calls")
 heads = collections.Counter((r[3][0] if r[3] else "<bare>") for r in rows)
 print("first segment:", heads.most_common(15))
 print("name:", collections.Counter(r[2] for r in rows).most_common(15))
-random.seed(3)
+random.seed(int(os.environ.get("SEED", "3")))
 for f, line, name, chain, _, tg in random.sample(rows, min(n, len(rows))):
     src = p.by_file[f][0].raw[line - 1].strip()[:90] if f in p.by_file else ""
     print(f"{f}:{line} {'.'.join(chain)}.{name}  -> {', '.join(tg)}\n      {src}")

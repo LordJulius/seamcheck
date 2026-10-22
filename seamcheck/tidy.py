@@ -29,7 +29,8 @@ from .model import Func
 
 DEFAULT_TESTS = ["test/**", "tests/**", "**/test/**", "**/tests/**", "**/__tests__/**", "**/src/test/**",
                  "**/src/androidTest/**", "**/*.test.*", "**/*.spec.*", "**/*_test.*", "**/test_*.py",
-                 "**/*Test.kt", "**/*Test.java", "**/*_spec.rb"]
+                 "**/*Test.kt", "**/*Test.java", "**/*_spec.rb", "**/spec/**/*.rb",
+                 "**/test_*.rb"]
 DEFAULT_CORPUS = ["scripts/**", "config/**", "deploy/**", "priv/**", "rel/**", "bin/**", "tools/**", "Makefile",
                   "justfile", "*.toml", "*.json", "*.yml", "*.yaml", ".github/**", "**/*.service", "**/*.sh",
                   "**/*.tscn", "**/*.tres", "**/*.heex", "**/*.eex", "**/*.html", "**/AndroidManifest.xml",

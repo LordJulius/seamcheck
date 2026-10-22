@@ -22,7 +22,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 
 from . import config as config_mod
-from . import lang_elixir, lang_gdscript, lang_other
+from . import lang_elixir, lang_gdscript, lang_other, lang_ruby
 from .model import Func, Module
 from .scan import blank
 
@@ -58,6 +58,8 @@ def adapter_for(rel: str):
         return lang_elixir.parse
     if ext == ".py":
         return lang_other.parse_python
+    if ext in lang_ruby.EXT:
+        return lang_ruby.parse
     if ext in lang_other.LANGS:
         return lang_other.parse_brace
     return None
@@ -71,6 +73,8 @@ def scan_family(rel: str) -> str:
         return "elixir"
     if ext == ".py":
         return "python"
+    if ext in lang_ruby.EXT:
+        return "ruby"
     if ext in lang_other.LANGS:
         return lang_other.LANGS[ext][0]
     return "python"  # '#' comments are the safest guess
@@ -872,6 +876,7 @@ def _is_test_file(project: Project, rel: str) -> bool:
 
 def _resolve_imports(project: Project) -> None:
     cache: dict = {}
+    lang_ruby.link(project)  # Ruby: requires, constants and supertypes, across files (lang_ruby.py)
 
     def res(v):
         return _resolve_where(project, v, cache)
@@ -1038,10 +1043,12 @@ _locals_cache: dict[str, set[str]] = {}
 
 def _shadowed(f: Func, name: str) -> bool:
     """`name` is a parameter or local of `f` (Kotlin/Java/TS/Rust), so a bare
-    `name()` calls that value, not a function in scope."""
+    `name()` calls that value, not a function in scope. (Ruby's `foo(key: v)`
+    passes a keyword, it declares nothing.)"""
     loc = _locals_cache.get(f.id)
     if loc is None:
-        loc = _locals_cache[f.id] = {a or b for a, b in _LOCALS.findall(f.code)}
+        rb = f.file.endswith((".rb", ".rake", ".ru"))
+        loc = _locals_cache[f.id] = {a or ("" if rb else b) for a, b in _LOCALS.findall(f.code)} - {""}
     return name in loc
 
 
@@ -1128,6 +1135,7 @@ _FAMILIES = {
     ".ts": {"web"}, ".tsx": {"web"}, ".jsx": {"web"}, ".mjs": {"web"}, ".cjs": {"web"}, ".js": {"web", "qt"},
     ".qml": {"qt"}, ".cpp": {"qt"}, ".cc": {"qt"}, ".cxx": {"qt"}, ".h": {"qt"}, ".hpp": {"qt"}, ".hh": {"qt"},
     ".py": {"py"}, ".gd": {"gd"}, ".rs": {"rs"}, ".go": {"go"}, ".cs": {"cs"},
+    ".rb": {"rb"}, ".rake": {"rb"}, ".ru": {"rb"},
 }
 
 
@@ -1141,7 +1149,7 @@ def _scoped_language(rel: str) -> bool:
     definitions and imports. A plain .js script (a QML library, a browser
     script) sees globals from anywhere, so it is not."""
     return os.path.splitext(rel)[1] in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts", ".py", ".go", ".rs",
-                                        ".swift", ".php")
+                                        ".swift", ".php", ".rb", ".rake", ".ru")
 
 
 _SELF = {"self", "this", "Self", "cls"}
@@ -1458,6 +1466,8 @@ def _build_edges(project: Project) -> None:
                     # x.f() reaches a module-level Python function only through
                     # the module's own name (resolved above), never `session.get()`
                     mine = [g for g in mine if project.modules[g.module].owner]
+                if q and f.file.endswith((".rb", ".rake", ".ru")):
+                    mine = []  # an untyped Ruby receiver (`@app.call`) can hold anything: a unique name is no proof
                 own = [g for g in cands if g.file == f.file and g.recv]
                 if targets:
                     pass

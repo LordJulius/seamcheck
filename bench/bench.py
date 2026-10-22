@@ -30,7 +30,7 @@ CORPUS = {
     "C++": ([".cpp", ".cc", ".h", ".hpp"], ["flameshot-org/flameshot", "KDE/kdeconnect-kde"]),
     "QML": ([".qml"], ["KDE/kdeconnect-kde", "Swordfish90/cool-retro-term", "KDE/neochat"]),
     "Swift": ([".swift"], ["Alamofire/Alamofire", "apple/swift-argument-parser"]),
-    "Ruby": ([".rb"], ["sinatra/sinatra", "jekyll/jekyll"]),
+    "Ruby": ([".rb", ".rake", ".ru"], ["sinatra/sinatra", "jekyll/jekyll"]),
     "PHP": ([".php"], ["slimphp/Slim", "guzzle/guzzle"]),
 }
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -425,7 +425,10 @@ class Types:
                 return self.chain(mod, f, tuple(held[5:].split("\x1f")), depth + 1, self_mods)
             g = self.bare(mod, f, name)
             if g is not None:
-                return self.returns(g, None, depth + 1)
+                got = self.returns(g, None, depth + 1)
+                return got if got is not None else self._rb_named(mod, name)
+            if mod.file.endswith(".rb") and len(got := {self.returns(h, [h.module], depth + 1) for h in self.method(self.own_class(mod, f) or [], name)[0]}) == 1:
+                return got.pop()  # Ruby: a mixin's `site` that every includer's `site` returns alike (lang_ruby.py)
             if name in fm.external:
                 return EXT
             own = self.own_class(mod, f)
@@ -435,7 +438,7 @@ class Types:
             if name[:1].isupper():
                 got = self.instance(mod, name, self_mods)  # `Foo(...)`: a constructor
                 return got
-            return None
+            return self._rb_named(mod, name)
         if seg == "<literal>":
             return EXT  # a string / array / number literal: the language's own type
         if seg in ("(...)", "[]", "?", "!!"):
@@ -486,14 +489,33 @@ class Types:
                 return ("static", tuple(mods), exact)
         if seg in p.modules:
             return ("static", (seg,), True)
-        short = p.short.get(seg)
-        if short:
+        short = p.short.get(seg) if not (seg[:1].islower() and fm.file.endswith((".rb", ".rake", ".ru"))) else None
+        if short:  # (a lowercase Ruby name is a value, never the file `site.rb`)
             return ("static", tuple(short), len(short) == 1)
         if seg[:1].isupper() and not fm.file.endswith((".ex", ".exs", ".gd")):
             return EXT  # a type or module the project doesn't declare
         if fm.file.endswith(".qml") and seg not in self.qml_names and seg not in ("parent", "model", "modelData", "index"):
             return EXT  # a name no project QML file declares: the window's / framework's
-        return None
+        return self._rb_named(mod, seg)
+
+    def _rb_named(self, mod, name: str):
+        """Ruby, an untyped receiver named after a class (`site`, `@document`,
+        `collection`): by the language's convention it holds that class, when
+        the project has exactly one class of that name."""
+        if not mod.file.endswith((".rb", ".rake", ".ru")):
+            return None
+        cls = "".join(w[:1].upper() + w[1:] for w in name.lstrip("@").split("_") if w)
+        if not cls or not cls[0].isalpha():
+            return None
+        short = self.cache.get("\0rbshort")
+        if short is None:  # `Jekyll::Site` is `Site` by its last name
+            short = self.cache["\0rbshort"] = {}
+            for d, mns in self.by_type.items():
+                for mn in mns:
+                    if self.p.modules[mn].file.endswith(".rb") and self.p.modules[mn].kind != "ext":
+                        short.setdefault(d.rsplit("::", 1)[-1], set()).add(mn)
+        mods = short.get(cls, set())
+        return ("inst", tuple(mods), True) if len(mods) == 1 else None
 
     def _var_module(self, where: str, name: str, depth: int = 0):
         """(module, its name there) for a module-level variable, through re-exports."""
@@ -563,8 +585,8 @@ class Types:
                 # overloads that all return the same type: whichever runs, that is the value
                 return self.returns(hits[0], list(mods) if kind == "inst" else None, depth + 1)
             if not hits:
-                if kind == "static" and name == "new":
-                    return ("inst", mods, exact)  # `Foo.new()` (GDScript, Ruby): an instance
+                if kind == "static" and seg == "new()" and mod.file.endswith((".gd", ".rb", ".rake", ".ru")):
+                    return ("inst", mods, exact)  # `Foo.new()` (GDScript, Ruby): a Foo (no `new` of its own)
                 if seg in UNWRAP:
                     return cur  # `.unwrap()` / `.get()` on an Option: the value inside
                 if any(self.external_base(mn) for mn in mods):
@@ -611,9 +633,9 @@ def resolve_bases(project) -> None:
     t = Types(project)
     for m in list(project.modules.values()):
         if m.parent and not m.bases and m.parent not in project.modules and m.parent[:1].isupper() \
-                and not m.file.endswith((".ex", ".exs")):
+                and not m.file.endswith((".ex", ".exs", ".rb", ".rake", ".ru")):
             m.unresolved = True  # GDScript `extends CharacterBody3D`: an engine class
-        if not m.bases:
+        if not m.bases or m.file.endswith((".rb", ".rake", ".ru")):  # Ruby: lang_ruby.link resolved them
             continue
         got, missing = [], False
         fm = project.modules.get(m.owner, m) if m.owner else m
