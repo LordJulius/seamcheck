@@ -15,10 +15,11 @@ the project writes down about how its parts fit together.
   GitHub annotations; exit code 1 on errors; a pre-commit gate; queries (`callers`, `impact`, `refs`) that replace grep
   loops and say how sure they are; and an MCP server that keeps the graph loaded.
 - **Many languages, one graph.** Elixir, Kotlin, Java, TypeScript/JavaScript
-  (JSX), C++, QML, Python, GDScript, Rust, Go, C#, Swift, Ruby and PHP. Rules
-  work on any text file.
-- **Says how sure it is.** On 35 open-source repos in 15 languages, 90% or
-  more of the calls into project code are exact on 34 (see "How exact it is").
+  (JSX), C, C++, QML, Python, GDScript, Rust, Go, C#, Swift, Ruby and PHP.
+  Rules work on any text file.
+- **Says how sure it is.** On 37 open-source repos in 16 languages, 95% or
+  more of the calls into project code are exact on 31, and 90% on 36 (see
+  "How exact it is"). The rest are marked as guesses, never passed off as fact.
 - **Every check came from a real bug.** Each rule and lint was written after a
   bug it would have caught, and its test reproduces that bug (cut down) and
   its fix.
@@ -282,27 +283,41 @@ the code.
 
 | language | repo: project calls exact (static, October 2026) |
 |---|---|
-| Python | flask 90.5%, httpx 92.6%, requests 91.6% |
-| Go | cobra 91.2%, fzf 94.2% |
-| Rust | ripgrep 91.3%, bat 91.4% |
-| TypeScript | excalidraw 90.4%, hono 90.4%, plausible 96.8% |
-| JavaScript | express 92.1%, hexpm 97.8%, plausible 92.0% |
-| Java | gson 93.3%, jsoup 92.8% |
-| Kotlin | nowinandroid 93.8%, okhttp 91.9% |
-| C# | Polly 90.8%, Newtonsoft.Json 91.9% |
+| Python | flask 95.7%, httpx 95.6%, requests 95.5% |
+| C | jq 99.9%, redis 100.0% |
+| C++ | flameshot 96.5%, kdeconnect 95.8% |
+| C# | Polly 95.2%, Newtonsoft.Json 95.5% |
+| Java | gson 97.1%, jsoup 96.8% |
+| Kotlin | nowinandroid 95.8%, okhttp 95.6% |
+| Rust | ripgrep 95.5%, bat 95.3% |
+| Go | cobra 95.9%, fzf 96.0% |
+| TypeScript | excalidraw 95.2%, hono 95.5%, plausible 97.8% |
+| JavaScript | express 95.3%, hexpm 97.8%, plausible 95.3% |
 | Elixir | plausible 99.9%, hexpm 99.4%, phoenix 99.9% |
-| GDScript | godot-demo-projects 90.6%, tps-demo 92.9% |
-| C++ | flameshot 95.1%, kdeconnect 91.0% |
-| QML | neochat 94.5%, cool-retro-term 96.9%, kdeconnect **79.4%** |
-| Swift | Alamofire 90.4%, swift-argument-parser 91.4% |
-| Ruby | sinatra 92.6%, jekyll 92.6% |
-| PHP | Slim 98.0%, guzzle 93.3% |
+| PHP | Slim 98.1%, guzzle 95.6% |
+| Swift | Alamofire 94.0%, swift-argument-parser 92.9% |
+| Ruby | sinatra 94.0%, jekyll 92.9% |
+| GDScript | godot-demo-projects 90.8%, tps-demo 92.9% |
+| QML | neochat 93.7%, cool-retro-term 96.9%, kdeconnect **79.4%** |
+
+What gets a call there, beyond imports and declared types: return types
+through chains (`a.b().c()`), generic arity (C#'s `Policy` vs `Policy<T>`),
+lambda and closure parameters typed from the function they're passed to
+(`services.Add(b => b.AddRetry())`, `|m| m.start()`, `xs.map { $0.name }`),
+for-loop and index elements of declared containers and returned sequences,
+Rust `Option` / `Result` kept wrapped until unwrapped and enum variants in
+match arms, Kotlin / C# extension functions, TS `declare global` augmentations
+and JSX runtimes, and a callback parameter called as a function when every
+caller passes the same project function. The rest stay guesses on purpose: a
+duck-typed Ruby value that may be a `Document` or a `Page`, a Swift implicit
+member whose context type isn't written down, a callback the callers don't
+name.
 
 kdeconnect's QML pages take their plugin interface as a `property QtObject`
 that a factory fills in when the page is pushed, a different type per page:
 no static reading can type it, and seamcheck leaves those calls as guesses
-rather than pick one. For TypeScript and Python, precise mode (below) goes
-further: hono 93% / 98% (.ts / .tsx), excalidraw 95% / 96%.
+rather than pick one. Precise mode (below) asks a language server about the
+remaining guesses.
 
 ### The Ruby adapter
 
@@ -1090,9 +1105,6 @@ before and after 0.3's adapter work, at each repo's HEAD in October 2026:
 | plausible/analytics | Elixir + TS | 98% | 98% | (unchanged) |
 | sinatra/sinatra | Ruby | (no adapter) | 93% | the Ruby adapter |
 | jekyll/jekyll | Ruby | (no adapter) | 90% | |
-
-C#'s share stays low: most of Polly's calls are fluent chains and extension
-methods, which need type inference seamcheck doesn't do.
 
 ## License
 
