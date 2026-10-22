@@ -877,7 +877,7 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
 # PHP `private ?Type $name;` (and promoted constructor parameters)
 _RS_FIELD = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z_]\w*)\s*:\s*([^,]+?),?\s*$")
 _SW_FIELD = re.compile(r"^\s*(?:(?:private|public|internal|fileprivate|open|static|class|lazy|weak|unowned|final|override|nonisolated)"
-                       r"(?:\([^)]*\))?\s+)*(?:let|var)\s+([A-Za-z_]\w*)\s*(?::\s*([A-Z][\w.]*)|=\s*([A-Z]\w*)\s*\()")
+                       r"(?:\([^)]*\))?\s+)*(?:let|var)\s+([A-Za-z_]\w*)\s*(?::\s*(\[[^\]=\n]*\][?!]?|[A-Z][\w.]*)|=\s*([A-Z]\w*)\s*\()")
 _PHP_FIELD = re.compile(r"(?:^\s*|[(,]\s*)(?:(?:public|private|protected|static|readonly|var)\s+)+\??([\\\w]+)\s+(\$\w+)")
 
 
@@ -973,7 +973,8 @@ def _assignments(tk: str, text: str) -> list[tuple[str, str]]:
 
 # what a literal on the right of `x =` builds
 _LITERAL = {"js": {"[": "Array", '"': "String", "'": "String", "`": "String"},
-            "py": {"[": "list", "{": "dict", '"': "str", "'": "str"}}
+            "py": {"[": "list", "{": "dict", '"': "str", "'": "str"},
+            "swift": {"[": "Array", '"': "String"}}
 
 
 def _own_return(code: str, bpos: int) -> str:
@@ -1453,6 +1454,9 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             _pack_params(f)
         sig_end = bpos if bpos >= 0 else min(len(code), npos + 400)
         sig = code[npos + len(name):sig_end]
+        if tk in ("swift", "php", "kotlin", "jvm", "rust", "go", "js") and "\n" in sig:
+            for nm_, ty in _typed(tk, sig.replace("\n", " ")):  # parameters on lines of their own
+                f.bound.setdefault(nm_, "type:" + ty)
         if kotlin:
             rm = re.search(_KT_RECV % re.escape(name), lines[a_])
             if rm:
@@ -1519,6 +1523,14 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                         f.calls.append(Call(m.group(2), m.group(1) or "", i + 1))
                 off += len(ln) + 1
         home.funcs.append(f)
+    # a nested function (a Swift / Kotlin / Go local function, a JS closure) sees what
+    # its enclosing function bound: `usedOrigins` is the outer function's parameter
+    every = sorted((g for m_ in [mod, *mods.values()] for g in m_.funcs), key=lambda g: (g.start, -g.end))
+    for g in every:
+        outer = [o for o in every if o is not g and o.start <= g.start and g.end <= o.end and (o.start, o.end) != (g.start, g.end)]
+        if outer:
+            inner = max(outer, key=lambda o: o.start)
+            g.bound = {**{k: v for k, v in inner.bound.items() if not v.startswith("fixture:")}, **g.bound}
     if qml:
         _qml_types(mod, code, stem)
     if go:  # `type Window interface { Top() int ... }`: a module listing the methods

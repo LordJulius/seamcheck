@@ -1167,6 +1167,205 @@ def _scoped_language(rel: str) -> bool:
                                         ".swift", ".php", ".rb", ".rake", ".ru")
 
 
+def _implicit_member(project: Project, types, mod, f: Func, c: Call):
+    """What a Swift implicit member `.name(...)` is, from its context:
+    ("none", []) for a pattern, an enum case or a library type's member;
+    ("exact", funcs) for the expected type's static function; ("?", []) when
+    the context doesn't say the type."""
+    if mod is None or not (0 < c.line <= len(mod.raw)):
+        return "?", []
+    line = mod.raw[c.line - 1]
+    code_ = mod.code if mod.code and len(mod.code) == len(mod.raw) else mod.raw
+    # the text before the member, from a few lines up (a call's arguments span lines)
+    before = "\n".join(code_[max(0, c.line - 12):c.line - 1] + [code_[c.line - 1][:max(0, c.col - 1)]])
+    if re.search(r"\bcase\s+(?:let\s+|var\s+)?$", before) or \
+            re.match(r"\s*(?:case|if\s+case|guard\s+case|for\s+case)\b", line) and "=" not in before.split("case", 1)[-1]:
+        return "none", []  # `case .value(let v):` matches, it builds nothing
+    ty = ""
+    elem = re.search(r"(?:\breturn\s*\[|=\s*\[|\b(\w+)\s*\.\s*(?:append|insert)\s*\(|\[\s*)\s*$", before)
+    if elem:  # an element: of the returned / declared array, or of the one appended to
+        src = "\n".join(mod.raw[max(0, f.start - 1):f.start + 4]) if "return" in elem.group(0) else ""
+        if elem.group(1):
+            src = "\n".join(mod.raw)
+            dm = re.search(r"\b" + re.escape(elem.group(1)) + r"\s*:\s*\[([\w.]+)\]", src)
+        elif "return" in elem.group(0):
+            dm = re.search(r"->\s*\[([\w.]+)\]", src)
+        else:
+            dm = re.search(r"\b(?:let|var)\s+\w+\s*:\s*\[([\w.]+)\]\s*=\s*\[\s*$", before)
+        if dm:
+            ty = dm.group(1)
+    if ty:
+        pass
+    elif re.search(r"\breturn\s*$", before):
+        ty = f.returns if f.returns and not f.returns.startswith("expr:") else ""
+    elif re.search(r"\bself\s*=\s*$", before):
+        own = types.own_class(mod, f)
+        ty = project.modules[own[0]].decls[0] if own and project.modules[own[0]].decls else ""
+    elif (tm := re.search(r"\b(?:let|var)\s+\w+\s*:\s*([\w.]+)[?!]?\s*=\s*$", before)):
+        ty = tm.group(1)
+    elif (lm := re.search(r"(?:^|[(,]\s*)(\w+)\s*:\s*$", before)) or re.search(r",\s*$", before):
+        # a labelled argument: the parameter of that label in the callee's signature
+        depth, k, text = 0, len(before) - (len(lm.group(0)) if lm else 0), before
+        while k > 0:
+            k -= 1
+            if text[k] == ")":
+                depth += 1
+            elif text[k] == "(":
+                if depth == 0:
+                    break
+                depth -= 1
+        ty = _param_type(project, types, mod, text, k, lm.group(1) if lm else "",
+                         len(_top_commas(text[k + 1:])) if k >= 0 else 0, f, c.line)
+    elif (am := re.search(r"\(\s*$", before)):
+        ty = _param_type(project, types, mod, before, am.start(), "", 0, f, c.line)  # the first, unlabelled argument
+    from .chains import type_name
+    verdicts = []
+    for t in (ty.split("|") if ty else []):  # overloads: the parameter type that has the member
+        t = type_name(t)
+        if not t or t == "Self":
+            verdicts.append(("?", []))
+            continue
+        tmods, ex, declared = types.type_modules(mod, t)
+        if not declared:
+            verdicts.append(("lib", []))  # a library type's member
+            continue
+        if not ex:
+            verdicts.append(("?", []))
+            continue
+        hits = [g for g in types.method(list(tmods), c.name)[0] if _is_static(project, g)]
+        if hits:
+            verdicts.append(("exact", hits))
+        elif any(_enum_case(project.modules[m_], c.name) for m_ in tmods):
+            verdicts.append(("none", []))  # an enum case: `case option(String)`
+        else:
+            verdicts.append(("miss", []))  # this overload's type has no such member
+    found = list({(v[0], tuple(g.id for g in v[1])): v for v in verdicts if v[0] in ("exact", "none")}.values())
+    if len(found) == 1 and all(v[0] in ("exact", "none", "miss") for v in verdicts):
+        return found[0]
+    if verdicts and all(v[0] == "lib" for v in verdicts):
+        return "none", []
+    return "?", []
+
+
+def _top_commas(text: str) -> list[int]:
+    """The positions of the commas at bracket depth 0."""
+    out, d = [], 0
+    for i, ch in enumerate(text):
+        d += ch in "([{"
+        d -= ch in ")]}"
+        if ch == "," and d == 0:
+            out.append(i)
+    return out
+
+
+def _params(sig: str) -> list[tuple[str, str]]:
+    """A Swift signature's parameters: (external label, type text)."""
+    a = sig.find("(")
+    if a < 0:
+        return []
+    d, b = 0, a
+    for b in range(a, len(sig)):
+        d += sig[b] in "(["
+        d -= sig[b] in ")]"
+        if d == 0:
+            break
+    body, out, last = sig[a + 1:b], [], 0
+    for cut in _top_commas(body) + [len(body)]:
+        p = body[last:cut].strip()
+        last = cut + 1
+        pm = re.match(r"(\w+)(?:\s+\w+)?\s*:\s*(?:inout\s+|@\w+\s+)*([^=]+)", p)
+        if pm:
+            out.append((pm.group(1), pm.group(2).strip().removesuffix("...")))  # (variadic `T...`: each a T)
+    return out
+
+
+from . import infer as infer_mod  # noqa: E402
+
+
+def _param_type(project: Project, types, mod, text: str, k: int, label: str, index: int = 0,
+                f: Func | None = None, line_no: int = 0) -> str:
+    """The declared type of the parameter `label` (or the first, unlabelled
+    one) of the call whose `(` is at text[k]: `Element(value: .option(x))`,
+    `session.request(.status(401))`. "" when the callees disagree."""
+    callee = re.search(r"([A-Za-z_]\w*)\s*$", text[:k]) if k > 0 else None
+    if not callee:
+        return ""
+    name = callee.group(1)
+    prefix = text[:callee.start(1)]  # where the callee is: `text` ends on line `line_no`
+    callee_line = line_no - (text.count("\n") - prefix.count("\n"))
+    callee_col = len(prefix) - (prefix.rfind("\n") + 1)
+    if name == "init" and re.search(r"\b(?:self|Self|super)\s*\.\s*init\s*$", text[:k]):
+        own = types.own_class(mod, f) if f else None  # `self.init(base: .message(x))`: this type's own init
+        cands = [g for a in (types.ancestors(own[0]) if own else []) for g in project.modules[a].funcs if g.name == "init"]
+    elif name[:1].isupper():
+        tmods, ex, _ = types.type_modules(mod, name)
+        cands = [g for m_ in (tmods if ex else []) for a in types.ancestors(m_)
+                 for g in project.modules[a].funcs if g.name == "init"]
+    else:
+        cands = project.by_name.get(name, [])
+        # the callee through its own receiver: `session.request(` is Session's request
+        outer = next((c2 for c2 in (f.calls if f else []) if c2.line == callee_line and c2.name == name
+                      and c2.col == callee_col), None) if line_no else None
+        if outer is not None and outer.chain:
+            v = types.chain(mod, f, outer.chain)
+            if v is not None and not infer_mod.is_ext(v) and v[0] in ("inst", "static"):
+                cands = types.method(list(v[1]), name)[0] or cands
+        elif outer is not None and mod is not None:
+            own = types.own_class(mod, f)
+            hits = types.method(own, name)[0] if own else []
+            cands = hits or cands
+    found = set()
+    for g in cands[:12]:
+        gm = project.modules.get(g.module)
+        if gm is None:
+            continue
+        sig = " ".join(gm.raw[g.start - 1:g.start + 6])
+        ps = _params(sig[sig.find(g.name):] if g.name in sig else sig)
+        hit = [t for lab, t in ps if lab == label] if label else ([ps[index][1]] if index < len(ps) and ps[index][0] == "_" else [])
+        if hit:
+            found.add(hit[0])
+    return "|".join(sorted(found))  # (overloads: each parameter type; the member settles which)
+
+
+def _swift_labels_match(project: Project, mod, c: Call, g: Func) -> bool:
+    """A Swift call's first argument label against `g`'s first parameter:
+    `append(contentsOf:)` is the library's, not the project's `append(optional:)`."""
+    if mod is None or not (0 < c.line <= len(mod.raw)):
+        return True
+    am = re.match(r"\s*\(\s*(?:(\w+)\s*:(?!:))?", mod.raw[c.line - 1][c.col + len(c.name):])
+    gm = project.modules.get(g.module)
+    ps = _params(" ".join(gm.raw[g.start - 1:g.start + 3])[" ".join(gm.raw[g.start - 1:g.start + 3]).find(g.name):]) if gm else []
+    if not am or not ps:
+        return True
+    want = am.group(1) or "_"
+    return ps[0][0] == want
+
+
+def _enum_case(m: Module, name: str) -> bool:
+    """`enum <m's type> { case name(...) }`: name is one of its cases (in the
+    enum's own body, not another type's in the same file)."""
+    if not m.decls:
+        return False
+    text = "\n".join(m.raw)
+    for em in re.finditer(r"\benum\s+" + re.escape(m.decls[0].split(".")[-1]) + r"\b[^{]*\{", text):
+        d, k = 1, em.end()
+        while k < len(text) and d:
+            d += text[k] == "{"
+            d -= text[k] == "}"
+            k += 1
+        body = text[em.end():k]
+        if re.search(r"\bcase\s+(?:[^\n]*,\s*)?" + re.escape(name) + r"\b", body):
+            return True
+    return False
+
+
+def _is_static(project: Project, g: Func) -> bool:
+    """A function declared `static` / `class func` (callable as `.name(...)`)."""
+    m = project.modules.get(g.module)
+    line = m.raw[g.start - 1] if m and 0 < g.start <= len(m.raw) else ""
+    return bool(re.search(r"\b(?:static|class)\s+(?:func|var|let)\b", line))
+
+
 _SELF = {"self", "this", "Self", "cls"}
 _CTOR_NAMES = {"init", "__init__", "constructor", "__construct", "initialize"}
 _RS_STD_METHODS = {
@@ -1268,13 +1467,32 @@ def _build_edges(project: Project) -> None:
             targets: list[tuple[Func, bool]] = []
             recv: tuple = ()  # the receiver's type, when known: overrides only in its subtypes run
             q = c.qual
-            if c.chain and mod:
+            if c.chain == ("<implicit>",):
+                # `.option(x)` / `case .value(let v)`: an enum case or a static member of the
+                # type the context expects. A pattern runs nothing; with the expected type
+                # known, that type's static function (or its enum case: nothing); else a
+                # guess among the project's static functions of that name
+                kind_, got = _implicit_member(project, types, mod, f, c)
+                if kind_ == "none":
+                    _nothing(project, f, c)
+                    continue
+                if kind_ == "exact":
+                    targets = [(g, True) for g in got]
+                else:
+                    stat = [g for g in project.by_name.get(c.name, []) if _is_static(project, g)]
+                    if not stat:
+                        _nothing(project, f, c)
+                        continue
+                    targets = [(g, False) for g in stat]
+            elif c.chain and mod:
                 # the receiver's type, step by step (see infer.py)
                 v = types.chain(mod, f, c.chain)
                 if infer.is_ext(v):
                     # a library value; a Kotlin / C# / Swift extension the project
                     # declares on that library type is the one exception
                     exts = types.ext_fns.get((v[1][0], c.name), []) if v[1] else []
+                    if exts and f.file.endswith(".swift"):
+                        exts = [g for g in exts if _swift_labels_match(project, mod, c, g)]
                     own = [g for g in exts if g.file == f.file]
                     exts = own if len(own) == 1 else exts
                     if not exts:
@@ -1306,6 +1524,10 @@ def _build_edges(project: Project) -> None:
                         targets = [(h, sure) for h in hits]
                     elif kind != "pkg" and any(types.external_base(mn) for mn in mods_):
                         _nothing(project, f, c)  # inherited from a library supertype
+                        continue
+                    elif kind == "inst" and mods_ and all(project.modules[mn].kind == "ext" for mn in mods_) and \
+                            f.file.endswith((".swift", ".kt", ".kts", ".cs")):
+                        _nothing(project, f, c)  # `Data` the project only extends: a method not in an extension is the library's
                         continue
             if not q and mod and not f.file.endswith((".py", ".ex", ".exs")) and not targets:
                 # a bare call in a class: its own (or an inherited) method first;

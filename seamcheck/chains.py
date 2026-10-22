@@ -69,6 +69,10 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
         if op == "." and i >= 2 and code[i - 2] == ".":
             break  # a range `..` or a spread `...`
         i = _skip_back_ws(code, i - len(op))
+        if op == "." and not segs and (i == 0 or code[i - 1] in "(,[:={" or
+                                       re.search(r"(?:^|[^\w$])(?:case|return|in|else|try|await|let|var)$", code[max(0, i - 7):i])):
+            segs.append("<implicit>")  # Swift's `.option(x)`, `case .value(let v)`: a member of a type the context gives
+            break
         # postfix unwraps: `x!!.`, `x!.`, `x?.` (Kotlin, TS, Swift), Rust `x?.`
         while i > 0 and code[i - 1] in "!?":
             segs.append("!!" if code[i - 1] == "!" else "?")
@@ -272,6 +276,8 @@ def type_name(text: str) -> str:
         if len(parts) != 1:
             return ""
         t = parts[0]
+        if re.match(r"^\[.*\][?!]?$", t, re.S):
+            return "Array"  # Swift's `[Element]` / `[Key: Value]`: the language's collection
         if re.search(r"\[\s*\]\s*[?!]?$", t):
             return "Array"  # `Foo[]`: an array (the language's), not a Foo
         m = re.match(r"^([\w.:$\\]+)\s*[<\[](.*)[>\]]\s*[?!*&]*$", t, re.S)

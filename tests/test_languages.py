@@ -600,5 +600,22 @@ class PythonPackages(Base):
         self.assertFalse(self.guessed("pkg/_client.Client.get"))  # kwargs.get / vars().items: Python's own
 
 
+class SwiftImplicitMembers(Base):
+    FILES = {
+        "Sources/Net/Endpoint.swift": "struct Endpoint {\n    enum Path {\n        case status(Int)\n    }\n"
+                                      "    static func status(_ code: Int) -> Endpoint {\n        Endpoint()\n    }\n}\n",
+        "Sources/Net/Other.swift": "struct Other {\n    static func status(_ code: Int) -> Other {\n        Other()\n    }\n}\n",
+        "Sources/Net/Session.swift": "class Session {\n    func request(_ endpoint: Endpoint) {}\n"
+                                     "    func go(p: Endpoint.Path) {\n        request(.status(200))\n"
+                                     "        switch p {\n        case .status(let c):\n            print(c)\n        }\n    }\n}\n",
+    }
+
+    def test_a_the_parameter_type_settles_the_member(self):
+        self.assertEqual(self.exact("Sources/Net/Session.go"), {"Sources/Net/Session.request", "Sources/Net/Endpoint.status"})
+
+    def test_b_a_pattern_calls_nothing(self):
+        self.assertEqual([e for e in self.p.edges["Sources/Net/Session.go"] if e[1] == 6], [])
+
+
 if __name__ == "__main__":
     unittest.main()
