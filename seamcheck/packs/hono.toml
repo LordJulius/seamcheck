@@ -16,6 +16,12 @@ names = ["c"]
 in_call = ["get", "post", "put", "delete", "patch", "options", "all", "on", "use", "route", "notFound", "onError"]
 types = { c = "hono:src/context" }
 
+[[param]]
+id = "route-ctx"
+names = ["ctx"]
+in_call = ["get", "post", "put", "delete", "patch", "options", "all", "on", "use", "route", "notFound", "onError"]
+types = { ctx = "hono:src/context" }
+
 # The RPC client (`hc<typeof app>(url)`, `testClient(app)`) is a runtime Proxy:
 # every `client.posts.$get()` is a fetch, and the response it gives is the
 # platform's Response, never a project function, in an app or in hono itself.
