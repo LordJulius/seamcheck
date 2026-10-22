@@ -217,6 +217,12 @@ def total(x):
     return x
 
 
+def register(session):
+    def handler(e):
+        return e
+    session.total(handler)
+
+
 app = Cart()
 if __name__ == "__main__":
     app.dump()
@@ -258,6 +264,11 @@ class TestCart:
     def test_library_calls_reach_nothing(self):
         self.assertEqual(self.exact("src/shop/cart.Cart.dump"), {"src/shop/cart.Cart.get"})
         self.assertEqual(self.guessed("src/shop/cart.Cart.dump"), set())
+
+    def test_nested_def_and_attribute_calls(self):
+        # `def handler(e):` is no call to handler; `session.total()` is a method
+        # of something unknown, not the module-level total
+        self.assertEqual(self.exact("src/shop/cart.register"), set())
 
     def test_pytest_functions_and_package_reexports(self):
         t = self.p.funcs["tests/test_cart.test_total"]

@@ -11,8 +11,8 @@ the project writes down about how its parts fit together.
 
 - **Deterministic and local.** No network, no model, no dependencies beyond
   Python 3.11+ (ripgrep is used when present).
-- **Built for agents.** Plain-text or JSON output, exit code 1 on errors, a
-  pre-commit gate, and queries (`callers`, `impact`, `refs`) that replace grep
+- **Built for agents and CI.** Plain text, JSON, SARIF (code scanning) or
+  GitHub annotations; exit code 1 on errors; a pre-commit gate; and queries (`callers`, `impact`, `refs`) that replace grep
   loops and say how sure they are.
 - **Many languages, one graph.** Elixir, Kotlin, Java, TypeScript/JavaScript
   (JSX), C++, QML, Python, GDScript, Rust, Go and C#. Rules work on any text
@@ -52,6 +52,14 @@ allow = ["game/entities/Unit.gd:take_hit"]
 why = "damage outside take_hit skips armor, shields and crits"
 ```
 
+Or let seamcheck write a first one from what the repo holds (its languages,
+the folders their code lives in, one commented example of each common rule
+kind), and install the pre-commit gate:
+
+```sh
+seamcheck init --hook
+```
+
 Then:
 
 ```sh
@@ -64,10 +72,13 @@ seamcheck gate --staged         # in a pre-commit hook: may this change land?
 ## Commands
 
 ```
+Starting
+  seamcheck init [--hook] [--force] a first seamcheck.toml for this repo (+ the pre-commit gate)
+
 Checks
-  seamcheck check [--json] [--only id,id] [--skip id,id] [--errors-only]
+  seamcheck check [--format F] [--only id,id] [--skip id,id] [--errors-only]
                                     run every rule (exit 1 on errors)
-  seamcheck gate [--since REF] [--staged]
+  seamcheck gate [--since REF] [--staged] [--format F]
                                     may this change land? (see "The land gate")
   seamcheck tighten                 run each command rule's `tighten` (an allowlist rewrite that only shrinks)
 
@@ -104,6 +115,8 @@ Options
   --fuzzy         callers / callees / path / impact: also walk name-guess edges
   --no-cache      parse everything again
   --strict        runtime: also flag rules that had nothing to check in this run
+  --format F      check / gate: text (default), json (= --json), sarif, github
+  --version
 ```
 
 SPEC is `name` (glob ok), `Module.name`, or `path/glob:funcglob`.
@@ -120,12 +133,30 @@ An edge is **exact** when the target is certain:
 - a name imported by the file: Elixir `alias A.{B, C}`, `import A` and the
   imports an Elixir `use` injects (its `__using__` or `using do` block, or
   `def controller` for `use App, :controller`); JS/TS `import {f as g}`,
-  `* as ns`, default imports and tsconfig `paths` (`@/lib/x`); Kotlin/Java
-  same-package files, `import a.b.fn` and `import a.b.*`;
+  `* as ns`, default imports, an object imported by name (`API.create()`),
+  tsconfig `paths` (`@/lib/x`, an exact `"@app/common"`, an `extends`ed base's)
+  and workspace packages by their package.json name; Kotlin/Java
+  same-package files, `import a.b.fn` and `import a.b.*`; C# the file's
+  namespace and its `using`s; Python `import a.b as c` and `from .x import y`
+  (absolute imports find the package under its source root: `src/flask` over
+  a test fixture named `flask.py`); Go the files of the same directory and
+  package, and imports through `go.mod`; Rust `use` trees through `crate::`,
+  `self::`, `super::`, child modules and the workspace's crates (a
+  `[[bin]] path` root included);
+- a name a barrel or package re-exports: `export * from`,
+  `export { a as b } from`, an `__init__.py`'s imports and `import *`, Rust
+  `pub use`;
 - a variable whose type the code states or builds: Kotlin `val r: Repo`, TS
   `const s: Store`, parameters, class fields and constructor properties, C++
   `Type* p`, `Type& r`, `Type v(...)` and a class's header members for its
-  `.cpp`, and a constructor (`val prefs = Prefs(ctx)`, `const hub = new Hub()`);
+  `.cpp`, Java/C# `Repo repo` and fields, Python `x: Repo` and
+  `self.repo = Repo()`, Go receivers, parameters, struct fields and
+  `x := &T{}` (`w tui.Window` too), Rust `x: &mut Repo`, and a constructor
+  (`val prefs = Prefs(ctx)`, `const hub = new Hub()`, `let s = Searcher::new()`);
+- `self.x()` / `this.x()` / `Self::x()` / `super().x()`: the caller's own class
+  (a Python class is a module of its own, `file.Class`, its parent the first
+  base; a Go type's methods are the module `file.Type`), and `Foo()` in Python
+  is `Foo.__init__`;
 - an object C++ hands to QML by name (`setContextProperty("continuity",
   &continuity)`), typed by that variable's declaration;
 - a C++ namespace (`veridian::api::parseClaim()` reaches the one in `api/`);
@@ -146,10 +177,16 @@ Some calls resolve to **nothing**, on purpose:
 
 - a qualifier that names a module with no such function in the project
   (`Enum.reject`, `Repo.rollback`) is a library call;
-- in Elixir, Kotlin, Java and TypeScript a bare call with nothing in scope is
-  the language's own library (`Enum`, Compose's `Row`, vitest's `expect`);
+- in Elixir, Kotlin, Java, TypeScript, Python, Go and Rust a bare call with
+  nothing in scope is the language's own library (`Enum`, Compose's `Row`,
+  vitest's `expect`, `len`, `append`, `println!`);
+- a call on a name imported from outside the project (`json.dumps()`,
+  `fmt.Println()`, `_.map()` after `import _ from "lodash"`);
 - a call on a variable typed outside the project (`s: String; s.split()`),
-  unless a project Kotlin extension is declared on that type.
+  unless a project Kotlin extension is declared on that type;
+- in Rust, `.unwrap()`, `.len()`, `.push()` and the other everyday
+  Option / Result / Vec / String / iterator methods on a receiver of unknown
+  type: they are the standard library's, not a project function of that name.
 
 `seamcheck stats` prints, per language, how many call sites are exact, guessed
 or nothing, and of the calls that reach project code, how many are exact.
@@ -161,11 +198,18 @@ both counts (`callers: 12 exact, 1849 name-guess`).
 
 Tests are functions too (kind `test`): ExUnit `test "..." do` (including a
 head that goes on to the next line, like `test "x",\n %{conn: conn} do`),
-vitest/jest `it(...)` / `test(...)`, and JUnit `@Test`. So `callees 'test *'`
+vitest/jest `it(...)` / `test(...)`, JUnit `@Test`, pytest `test_*` functions
+and `Test*` class methods in test files, Go `TestX` / `BenchmarkX` /
+`ExampleX` / `FuzzX` in `_test.go`, Rust `#[test]` (and `#[tokio::test]`),
+and xUnit / NUnit / MSTest `[Fact]` / `[Test]` / `[TestMethod]`. So `callees 'test *'`
 says what a test exercises. ExUnit `setup` and `describe` are fixtures and
 grouping, not tests.
 
-Adapter details: C++ out-of-line methods, `->` calls and `25'000` digit
+Adapter details: a Java / C# method's parameters may span lines and its body
+may open on the next line (Allman braces), a C# body may be `=> expr;`; a
+TypeScript class field holding an arrow function (`private onDown = (e) =>
+{`) is a function; Python module-level code (decorators, `app = create()`,
+`if __name__ == "__main__":`) belongs to the file's `<top>`; C++ out-of-line methods, `->` calls and `25'000` digit
 separators; QML functions, `onX:` handlers and component instances (a use of
 `X.qml`); JSX `<Card />` is a call to `Card`; an Elixir sigil (`~w(a b)`) is
 not a call. A file an adapter crashes on is a `config` error finding, never a
@@ -545,10 +589,34 @@ seamcheck gate --staged || { echo "fix the above, or waive a line with 'seamchec
 forbid_added = ["fallback", "legacy", "compat", "shim"]
 ```
 
-`gate --json` gives one flat list of findings, each with why and how to fix.
+`gate --json` gives one flat list of findings, each with why and how to fix;
+`--format sarif` and `--format github` give the same list to CI (below).
 In a gate, per-file lints read only the touched files, command rules run only
 when the change touches their `when` paths, and `run` outputs come from their
 cache, so a gate after a small edit takes seconds.
+
+### In CI
+
+```yaml
+# .github/workflows/seamcheck.yml
+on: [pull_request]
+jobs:
+  seamcheck:
+    runs-on: ubuntu-latest
+    permissions: { contents: read, security-events: write }
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pipx install git+https://github.com/LordJulius/seamcheck
+      # annotations on the diff, and a red check when the change may not land
+      - run: seamcheck gate --since origin/${{ github.base_ref }} --format github
+      # or: every rule as code-scanning alerts
+      - run: seamcheck check --format sarif > seamcheck.sarif || true
+      - uses: github/codeql-action/upload-sarif@v3
+        with: { sarif_file: seamcheck.sarif }
+```
 
 ## Dependencies
 
@@ -682,11 +750,37 @@ check needs both: the cut-down bug that must fail, and the fixed shape that
 must pass.
 
 The cache lives in `~/.cache/seamcheck/`. Parses are keyed by file content and
-the linked graph by every file's content plus `CACHE_VERSION`
-(`seamcheck/core.py`), so every checkout of a repo (a git worktree, a lane)
-shares them; the cache prunes itself to 3 GB. The graph key does not include
-seamcheck's own code: a change to an adapter or to how calls resolve must bump
-`CACHE_VERSION`, or warm runs keep the old graph.
+the linked graph by every file's content, both with a digest of seamcheck's own
+source (and `CACHE_VERSION`, `seamcheck/core.py`), so every checkout of a repo
+(a git worktree, a lane) shares them, an upgrade or a local change to an
+adapter never reuses what the old code made, and the cache prunes itself to
+3 GB.
+
+`tests/test_languages.py` holds each language's resolution cases, cut down
+from open-source repos (below); after changing an adapter, run `seamcheck
+stats` on a real repo of that language and compare the "project calls exact"
+share.
+
+### Measured on open-source repos
+
+How many of the calls that reach project code are exact (`seamcheck stats`),
+before and after 0.3's adapter work, at each repo's HEAD in October 2026:
+
+| repo | language | 0.2 | 0.3 | what changed |
+|---|---|---|---|---|
+| pallets/flask | Python | 59% | 58% | 1,244 -> 1,301 functions (same-named methods were lost); 0.2's share counted ~680 nested `def` lines as calls |
+| encode/httpx | Python | 33% | 66% | imports, classes, `self`, constructors |
+| spf13/cobra | Go | 36% | 89% | packages, go.mod imports, receivers |
+| junegunn/fzf | Go | 47% | 75% | |
+| BurntSushi/ripgrep | Rust | 49% | 76% | `use` across crates, std methods |
+| sharkdp/bat | Rust | 44% | 66% | |
+| excalidraw/excalidraw | TypeScript (.tsx) | 68% | 82% | class-field handlers, barrels, workspace packages |
+| google/gson | Java | 80% | 89% | 5,300 -> 23,600 call sites (bodies ended at their first statement) |
+| App-vNext/Polly | C# | (0 functions) | 31% | 4,811 functions (Allman braces) |
+| plausible/analytics | Elixir + TS | 98% | 98% | (unchanged) |
+
+C#'s share stays low: most of Polly's calls are fluent chains and extension
+methods, which need type inference seamcheck doesn't do.
 
 ## License
 
