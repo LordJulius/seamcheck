@@ -402,6 +402,12 @@ class Types:
             return self.held(fm, None, held, depth + 1)
         if seg in fm.external:
             return EXT
+        if seg[:1].isupper() and seg in self.by_type and not fm.file.endswith(".py"):
+            # a type the project declares, whatever module the import names
+            # (Rust's `use grep_searcher::SearcherBuilder` names the crate root that re-exports it)
+            mods, exact, declared = self.type_modules(mod, seg)
+            if declared:
+                return ("static", tuple(mods), exact)
         if seg in fm.aliases:
             target = fm.aliases[seg]
             if target.startswith("pkg:"):
