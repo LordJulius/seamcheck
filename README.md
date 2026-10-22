@@ -12,8 +12,8 @@ the project writes down about how its parts fit together.
 - **Deterministic and local.** No network, no model, no dependencies beyond
   Python 3.11+ (ripgrep is used when present).
 - **Built for agents and CI.** Plain text, JSON, SARIF (code scanning) or
-  GitHub annotations; exit code 1 on errors; a pre-commit gate; and queries (`callers`, `impact`, `refs`) that replace grep
-  loops and say how sure they are.
+  GitHub annotations; exit code 1 on errors; a pre-commit gate; queries (`callers`, `impact`, `refs`) that replace grep
+  loops and say how sure they are; and an MCP server that keeps the graph loaded.
 - **Many languages, one graph.** Elixir, Kotlin, Java, TypeScript/JavaScript
   (JSX), C++, QML, Python, GDScript, Rust, Go and C#. Rules work on any text
   file.
@@ -53,8 +53,9 @@ why = "damage outside take_hit skips armor, shields and crits"
 ```
 
 Or let seamcheck write a first one from what the repo holds (its languages,
-the folders their code lives in, one commented example of each common rule
-kind), and install the pre-commit gate:
+the folders their code lives in, the rule packs of the frameworks it finds,
+one commented example of each common rule kind), and install the pre-commit
+gate:
 
 ```sh
 seamcheck init --hook
@@ -73,7 +74,8 @@ seamcheck gate --staged         # in a pre-commit hook: may this change land?
 
 ```
 Starting
-  seamcheck init [--hook] [--force] a first seamcheck.toml for this repo (+ the pre-commit gate)
+  seamcheck init [--hook] [--force] a first seamcheck.toml for this repo (+ packs, + the pre-commit gate)
+  seamcheck serve                   an MCP server (stdio): the queries below from one loaded graph
 
 Checks
   seamcheck check [--format F] [--only id,id] [--skip id,id] [--errors-only]
@@ -190,7 +192,8 @@ Some calls resolve to **nothing**, on purpose:
 
 `seamcheck stats` prints, per language, how many call sites are exact, guessed
 or nothing, and of the calls that reach project code, how many are exact.
-Watch that number: a drop after a change means the tool lost an import.
+Watch that number: a drop after a change means the tool lost an import. The
+gate watches it for you (below).
 
 Queries say how sure they are. `callers`, `callees`, `path` and `impact` walk
 exact edges; `--fuzzy` adds the guesses. `find` and the `callers` header print
@@ -242,9 +245,10 @@ in this order:
 2. every `seamcheck.d/*.toml` beside it (split rules by area)
 3. each `--config PATH` (a file, or a folder of .toml): rules kept outside a repo you don't own
 
-`[project]` and `[runtime]` keys merge (include / exclude lists add up);
-`[[rule]]`, `[[bridge]]`, `[[invariant]]` and `[[contract]]` lists concatenate.
-An id defined twice is an error, and findings name the file a rule came from.
+`[project]` and `[runtime]` keys merge (include / exclude / packs lists add
+up); `[[rule]]`, `[[bridge]]`, `[[invariant]]` and `[[contract]]` lists
+concatenate. An id defined twice is an error, and findings name the file a
+rule came from. `[project] packs` adds seamcheck's framework rules (below).
 
 Suppress one line: `# seamcheck: allow rule-id` (or `// seamcheck: allow
 rule-id`) on the line or the line above. Every rule takes `severity`
@@ -471,6 +475,35 @@ auto_approve = { marker = 'data-testid="auto-approve"', disabled = false }   # m
 abort = { marker = 'data-testid="abort"', when = '^busy\b' }                # the one condition it may have
 ```
 
+## Framework packs
+
+Some rules are true for every project on a framework, not one project's
+contract. seamcheck ships them as packs; a project turns them on:
+
+```toml
+[project]
+packs = ["phoenix", "react"]
+
+[[rule]]                         # override a pack rule by its id: its keys replace the pack's
+id = "phoenix/no-atoms-from-strings"
+severity = "error"
+```
+
+| pack | rules |
+|---|---|
+| `phoenix` | `ets-owner`, `handle-info-catch-all`, `rescue-logged-at-debug` (the lints above); `no-atoms-from-strings` (warn: atoms are never collected) |
+| `react` | `inert-control`, `disabled-by-data` (JSX), `popup-clipped`; `effect-not-async` (an async effect's cleanup never runs), `state-not-assigned` (`this.state.x =` outside the constructor) |
+| `qml` | `unknown-type`, `singleton-import`, `js-shadows-type`, `anchors-in-positioner` |
+| `compose` | `init-order` (`kotlin-init-order`), `inert-control` (Kotlin); `no-global-scope` (warn: a `GlobalScope` coroutine outlives its screen) |
+
+Pack rules are named `<pack>/<id>` (`seamcheck check --skip react/popup-clipped`
+leaves one out of a run). An unknown pack, or an override naming a rule its
+pack doesn't have, is a config error. `seamcheck init` lists the packs whose
+framework a manifest declares: `:phoenix` in a mix.exs, `react` in a
+package.json, Qt Quick in a CMakeLists.txt beside `.qml` files, Compose in a
+Gradle build. A pack holds only what is true everywhere; a project's taste
+stays in its own rules.
+
 ## One graph across languages: bridges and impact
 
 Languages meet through strings (a URL, an event name, an op), so no parser
@@ -506,6 +539,33 @@ seamcheck callers AppWeb.InboxController.index   -> the phone / web code calling
 receives what it emits), certain edges only. It stops where data moves through
 app state rather than calls (a fetched JSON rendered later by a screen):
 contract tests (golden payloads the clients parse) cover that part.
+
+## An MCP server for agents
+
+`seamcheck serve` speaks MCP (2025-06-18, JSON-RPC over stdio, no
+dependencies) and keeps the loaded graph between calls, so an agent's loop of
+small questions skips the load each one paid. Before each call it stats the
+project's files and config (mtime + size) and reloads only when one changed,
+appeared or went: an edit between two calls is seen by the second.
+
+```sh
+claude mcp add seamcheck -- seamcheck serve -C /path/to/repo
+```
+
+| tool | arguments | returns (JSON text) |
+|---|---|---|
+| `check` | `only`, `skip` (rule ids), `errors_only` | the findings, as `check --json` |
+| `gate` | `since` (default `HEAD`), `staged` | `{blocked, changed_files, findings}`, as `gate --json` |
+| `callers` / `callees` | `name`, `depth` (2), `fuzzy` | per match: exact and guess counts, what it reaches with depth |
+| `path` | `from`, `to`, `fuzzy` | the chain, or `through_guesses_only` |
+| `find` | `name` | id, file, lines, callers exact / guessed |
+| `refs` | `name` | defined, callers, mentions |
+| `impact` | `targets` (specs or files), `since`, `staged`, `depth` (4), `fuzzy` | reached functions by area |
+| `stats` | | sizes, timing, per language how calls resolve |
+| `unused` / `tests` | `since` | the rows `--json` prints |
+
+A query that finds nothing is an error result saying why (`no function
+matches 'x'`), not an empty answer.
 
 ## Keeping a big repo tidy
 
@@ -573,6 +633,21 @@ untracked; `--staged`: only what is being committed), and fails on:
   code or grep product source;
 - functions whose lines it changes that copy a function elsewhere;
 - a test or script that still names a file the change split up or moved.
+
+It also warns, without blocking, when a language the change touches resolves
+worse than at `REF`: its "project calls exact" share (`stats`) fell more than
+2 points. That is a change that broke an import seamcheck followed, so its
+calls fell back to name guesses and every rule over them sees less:
+
+```
+  warning (not blocking): TypeScript (.ts) calls into project code exact: 100.0% at HEAD, 0.0% now (3 of 3 -> 0 of 2)
+```
+
+`check`, `gate` and `stats` record the shares whenever the tree's code and
+config are HEAD's (a small file in the cache, keyed by commit, seamcheck's
+version and the config). With no record for `REF`, the gate measures that
+commit's files itself when the project is small (300 parsed files, no bridge
+that runs a command); otherwise it records and stays quiet until there is one.
 
 Code the change only moved (a file split, a function moved between files) is
 judged as old. Debt already in a file you touched doesn't block you; new debt

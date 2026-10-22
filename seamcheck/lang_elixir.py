@@ -101,6 +101,7 @@ def parse(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 mod.using.append(_resolve_qual(u.group(1), mod) + (f":{u.group(2)}" if u.group(2) else ""))
         # functions directly inside (skip nested module bodies)
         nested = [(x, y) for (n2, x, y, i2) in spans if x > a and y <= b and n2 != name]
+        covered: set[int] = set()
         i = a + 1
         while i < b:
             if any(x <= i <= y for x, y in nested):
@@ -142,6 +143,7 @@ def parse(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     break
             f = Func(name, fname, rel, i + 1, end + 1, "\n".join(lines[i:end + 1]), kind=kind)
             _collect(f, mod, lines, i, end, str_by_line)
+            covered.update(range(i, end + 1))
             # multiple clauses of one function: merge into the first
             prev = next((g for g in mod.funcs if g.name == f.name), None)
             if prev:
@@ -153,6 +155,12 @@ def parse(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 mod.funcs.append(f)
             i = end + 1
         top = Func(name, "<top>", rel, a + 1, b + 1, "", kind="top")
+        # code outside every function: a script's body (test_helper.exs, a
+        # seeds file) or a module body's compile-time calls
+        lo, hi = (a, b) if ind < 0 else (a + 1, b - 1)
+        for j in range(lo, hi + 1):
+            if j not in covered and lines[j].strip() and not any(x <= j <= y for x, y in nested):
+                _collect(top, mod, lines, j, j, str_by_line)
         mod.funcs.append(top)
         out.append(mod)
     return out

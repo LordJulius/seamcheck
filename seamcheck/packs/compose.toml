@@ -1,0 +1,25 @@
+# Android / Jetpack Compose (Kotlin): true for any Android app. Turn on with
+# `[project] packs = ["compose"]`; ids become `compose/<id>`.
+
+[[rule]]
+id = "init-order"
+kind = "lint"
+lint = "kotlin-init-order"
+why = "Kotlin initialises a class in source order: an init block that reaches a property declared below it reads null"
+
+[[rule]]
+id = "inert-control"
+kind = "lint"
+lint = "inert-control"
+in = ["**/*.kt"]
+why = "an empty onClick = {} looks tappable and does nothing"
+
+[[rule]]
+id = "no-global-scope"
+kind = "forbid"
+pattern = '\bGlobalScope\.(?:launch|async)\b'
+in = ["**/*.kt"]
+skip = ["**/src/test/**", "**/src/androidTest/**"]
+severity = "warn"
+why = "a GlobalScope coroutine outlives the screen and ViewModel that started it: it leaks, and works on a dead UI"
+message = "launch in viewModelScope, lifecycleScope or rememberCoroutineScope()"

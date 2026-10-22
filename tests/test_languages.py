@@ -483,5 +483,16 @@ impl Searcher {
         self.assertEqual(self.exact(t.id), {"crates/core/flags/parse.low"})
 
 
+class ElixirScripts(Base):
+    # hexpm's test_helper.exs / seeds.exs call project code outside any function
+    FILES = {
+        "lib/fake.ex": "defmodule App.Fake do\n  def start, do: :ok\nend\n",
+        "priv/repo/seeds.exs": "alias App.Fake\n\nFake.start()\nIO.puts(\"seeded\")\n",
+    }
+
+    def test_a_scripts_top_level_calls(self):
+        self.assertEqual(self.exact("seeds.<top>"), {"App.Fake.start"})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,4 +22,4 @@ seamcheck = "seamcheck.__main__:main"
 packages = ["seamcheck"]
 
 [tool.setuptools.package-data]
-seamcheck = ["qt_types.txt"]
+seamcheck = ["qt_types.txt", "packs/*.toml"]
