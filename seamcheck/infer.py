@@ -84,6 +84,9 @@ class Types:
             cls = _py_class(p, mod, name)
             if cls:
                 return [cls], True, True
+        al = fm.bound.get(name, "") if name[:1].isupper() else ""
+        if al.startswith("type:") and al[5:] != name:  # `using X = A.B;` / PHP `use A\\B as X;`: B, by another name
+            name = al[5:]
         if "." in name:  # `pkg.Type`, `Outer.Inner`, `ns.Type`
             q, _, last = name.rpartition(".")
             target = fm.aliases.get(q.split(".")[-1], "")
@@ -144,6 +147,10 @@ class Types:
         if m.file.endswith((".h", ".hpp", ".hh", ".cpp", ".cc", ".cxx")):
             return os.path.splitext(m.file)[0] + "\0" + (m.decls[0] if m.owner and m.decls else "")  # Foo.h + Foo.cpp: one class
         if m.kind == "ext" and m.decls:
+            # a Swift extension / Rust impl of the project's one type of that name is part of it
+            own = [o for o in self.by_type.get(m.decls[0], ()) if self.p.modules[o].kind != "ext"]
+            if len(own) == 1 and m.file.endswith((".swift", ".rs")):
+                return self._primary(own[0])
             return f"{self._pkg_of(mn)}\0{m.decls[0]}"
         return mn
 

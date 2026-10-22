@@ -1140,10 +1140,12 @@ def _scoped_language(rel: str) -> bool:
     """A language where a bare name resolves only through the file's own
     definitions and imports. A plain .js script (a QML library, a browser
     script) sees globals from anywhere, so it is not."""
-    return os.path.splitext(rel)[1] in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts", ".py", ".go", ".rs")
+    return os.path.splitext(rel)[1] in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts", ".py", ".go", ".rs",
+                                        ".swift", ".php")
 
 
 _SELF = {"self", "this", "Self", "cls"}
+_CTOR_NAMES = {"init", "__init__", "constructor", "__construct", "initialize"}
 _RS_STD_METHODS = {
     "unwrap", "expect", "unwrap_or", "unwrap_or_else", "unwrap_or_default", "unwrap_err", "is_none", "is_some",
     "is_ok", "is_err", "ok", "err", "map_err", "ok_or", "ok_or_else", "and_then", "as_ref", "as_mut", "as_deref",
@@ -1241,6 +1243,7 @@ def _build_edges(project: Project) -> None:
         mod = project.modules.get(f.module)
         for c in f.calls:
             targets: list[tuple[Func, bool]] = []
+            recv: tuple = ()  # the receiver's type, when known: overrides only in its subtypes run
             q = c.qual
             if c.chain and mod:
                 # the receiver's type, step by step (see infer.py)
@@ -1269,6 +1272,8 @@ def _build_edges(project: Project) -> None:
                             hits, on_type = types.method(list(mods_), c.name)
                     else:
                         hits, on_type = types.method(list(mods_), c.name)
+                        if kind == "inst":  # (`super.x()` runs the parent's x itself: no subtype's)
+                            recv = ("\0super",) if c.chain[-1] in ("super", "base", "parent") else tuple(mods_)
                     if hits:
                         # on the type: one definition (or one type's overloads); through an
                         # interface: each implementation runs. Several same-named types and
@@ -1473,8 +1478,14 @@ def _build_edges(project: Project) -> None:
             # Virtual dispatch: a call that lands on a parent's function can
             # run any subclass override of it too.
             more = []
+            below = {s for r in recv if r in project.modules
+                     for s in [r] + types.parts(project.modules[r]) + project.children.get(r, [])} if recv else None
             for t, exact in targets:
+                if t.name in _CTOR_NAMES or (t.name[:1].isupper() and c.name == t.name):
+                    continue  # a constructor builds that type, not a subclass
                 for sub in project.children.get(t.module, ()):
+                    if below is not None and sub not in below:
+                        continue  # a sibling's override: not this receiver's
                     o = project.funcs.get(f"{sub}.{t.name}")
                     if o:
                         more.append((o, exact))
@@ -1485,6 +1496,8 @@ def _build_edges(project: Project) -> None:
                 if _TRACE is not None:
                     _TRACE.append((f.file, c.line, c.name, c.chain, "exact" if any(e for _, e in targets) else "guess",
                                    tuple(t.id for t, _ in targets[:4])))
+            seen_t = {t.id for t, _ in targets}
+            more = [(o, e) for o, e in more if o.id not in seen_t and not seen_t.add(o.id)]
             for t, exact in targets + more:
                 project.edges[f.id].append((t.id, c.line, exact))
                 project.redges[t.id].append((f.id, c.line, exact))
