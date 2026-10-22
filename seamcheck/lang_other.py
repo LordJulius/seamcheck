@@ -85,6 +85,8 @@ _TS_NEW = re.compile(r"(?:\b(?:const|let|var)\s+|^\s*(?:(?:private|public|protec
                      r"([A-Za-z_$][\w$]*)\s*=\s*new\s+([A-Z][\w$]*)\s*[(<]", re.M)
 _TS_TYPED = re.compile(r"(?:\b(?:const|let|var)\s+|[(,]\s*|^\s*)([A-Za-z_$][\w$]*)\s*\??\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])", re.M)
 _TS_FIELD = re.compile(r"^\s*(?:(?:private|public|protected|readonly|static|declare)\s+)*([a-z_$][\w$]*)\s*[?!]?\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])\s*[;=]", re.M)
+# a module-level `export const utf8Encoder: TextEncoder = new TextEncoder()`
+_TS_CONST = re.compile(r"^\s*(?:export\s+)?(?:declare\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])", re.M)
 _TS_PARAM_FIELD = re.compile(r"\b(?:private|public|protected|readonly)\s+([a-z_$][\w$]*)\s*\??\s*:\s*([A-Z][\w$]*)(?![\w$.<\[])")
 # `Client client(...);` at a statement start, `QString name` as a parameter
 _CPP_VALUE = re.compile(r"(?:^|[(,])\s*(?:const\s+|final\s+)?([A-Z]\w*(?:<[^;=(){}]*>)?)\s+([a-z_]\w*)\s*(?=[({;=,)]|:(?!:))", re.M)
@@ -725,16 +727,22 @@ def _php_imports(mod: Module, text: str, code: str) -> None:
                 mod.bound[local] = "type:" + name
 
 
-def _pack_signatures() -> list[tuple[str, list[str], re.Pattern]]:
+def _pack_signatures() -> list[tuple[str, list[str], re.Pattern, re.Pattern | None]]:
     """Every pack's [[param]] parameter lists (`(req, res` after an optional
-    `err`), as a function's or callback's parameters."""
+    `err`), as a function's or callback's parameters; with `in_call`, only a
+    callback passed to a call of one of those names (`.get('/', (c) =>`)."""
     from .config import available_packs, pack_params
     out = []
     for pid, entry in pack_params(available_packs()).items():
         names = list(entry.get("names", []))
-        if names:
-            lst = r"\(\s*(?:[A-Za-z_$][\w$]*\s*,\s*)?" + r"\s*,\s*".join(map(re.escape, names)) + r"\s*(?:,[^()]*)?\)"
-            out.append((pid, names, re.compile(rf"(?:\bfunction\b[\s\w$]*{lst}|{lst}\s*=>)")))
+        if not names:
+            continue
+        lst = (r"\(\s*(?:[A-Za-z_$][\w$]*\s*,\s*)?" + r"\s*,\s*".join(map(re.escape, names))
+               + (r"\s*(?:,[^()]*)?\)" if len(names) > 1 else r"\s*\)"))
+        fn = rf"(?:\bfunction\b[\s\w$]*{lst}|(?:\basync\s*)?{lst}\s*(?::[^=;]+?)?=>)"
+        calls = entry.get("in_call")
+        call_rx = re.compile(r"\.(?:" + "|".join(map(re.escape, calls)) + r")\s*(?:<[^()]*?>)?\s*\(") if calls else None
+        out.append((pid, names, re.compile(fn), call_rx))
     return out
 
 
@@ -745,8 +753,22 @@ def _pack_params(f: Func) -> None:
     """Parameters a framework hands this function or a callback in it
     (Express's `(req, res, next)`): "pack:<pack>/<id>:<name>", typed by core
     when that pack is in force."""
-    for pid, names, rx in _PACK_SIGS:
-        if names[0] in f.code and rx.search(f.code):
+    for pid, names, rx, call_rx in _PACK_SIGS:
+        if names[0] not in f.code:
+            continue
+        if call_rx is None:
+            hit = rx.search(f.code)
+        else:  # the callback must be an argument of one of those calls
+            hit = None
+            for cm in call_rx.finditer(f.code):
+                depth, k = 1, cm.end()
+                while k < len(f.code) and depth:
+                    depth += {"(": 1, ")": -1}.get(f.code[k], 0)
+                    k += 1
+                if rx.search(f.code, cm.end(), k):
+                    hit = True
+                    break
+        if hit:
             for n in names:
                 f.bound.setdefault(n, f"pack:{pid}:{n}")
 
@@ -1362,7 +1384,7 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             if fam == "kotlin":
                 pats_ = [] if inside[i] else [_KT_FIELD, _KT_NEW]
             elif fam == "js":
-                pats_ = [_TS_PARAM_FIELD] + ([] if inside[i] else [_TS_FIELD, _TS_NEW])
+                pats_ = [_TS_PARAM_FIELD] + ([] if inside[i] else [_TS_FIELD, _TS_NEW, _TS_CONST])
             elif tk == "jvm" and not inside[i]:
                 for m in _JV_FIELD.finditer(ln):
                     got_fields.setdefault(m.group(2), set()).add(m.group(1))
@@ -1484,7 +1506,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     if i == sa and (nm == name or m.start(2) < name_col) or line_start[i] + m.start(2) in decl_pos:
                         continue
                     chain = receiver(body, off + m.start(2))
-                    q = m.group(1) or ("." if ln[:m.start(2)].rstrip().endswith((".", "->")) else "")
+                    before = ln[:m.start(2)].rstrip()
+                    q = m.group(1) or ("." if before.endswith((".", "->")) and not before.endswith("...") else "")
                     if chain and q and q != ".":
                         last = chain[-1]
                         q = last if re.match(r"^[\w$]+$", last) else "."
