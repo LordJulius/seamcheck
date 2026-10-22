@@ -52,6 +52,17 @@ _REQUIRE = re.compile(r"""^\s*(require|require_relative|load)\s*\(?\s*["']([^"'#
 _AUTOLOAD = re.compile(r"""^\s*autoload\s*\(?\s*:\w+\s*,\s*["']([^"'#]+)["']""")
 _ASSIGN = re.compile(r"(?<![\w.@$:])([a-z_]\w*)\s*(?:\|\||&&|\*\*|<<|>>|[-+*/%|&^])?=(?![=~>])")
 _MULTI = re.compile(r"^\s*((?:\*?@{0,2}[a-z_]\w*\s*,\s*)+\*?@{0,2}[a-z_]\w*)\s*=(?![=~>])", re.M)
+# `<receiver>.each do |x|` / `.map { |x| ... }`: x is an element of the receiver
+_ITERS = {"each", "map", "select", "find", "detect", "each_with_index", "sort_by", "reject", "any?", "all?",
+          "flat_map", "filter", "filter_map", "count", "min_by", "max_by", "group_by", "partition", "each_with_object",
+          "sum", "find_all", "none?", "map!", "select!", "reject!", "collect", "each_slice", "find_index", "index_by",
+          "to_h", "sort", "uniq"}
+_SAME_ELEMENTS = {"sort", "sort_by", "select", "reject", "filter", "uniq", "reverse", "compact", "to_a", "values",
+                  "dup", "flatten", "select!", "reject!", "sort!", "uniq!", "compact!", "first", "last", "take", "drop"}
+_ITER_BLOCK = re.compile(r"((?:@{0,2}[a-z_]\w*|[A-Z][\w:]*)(?:\[[^\]\n]*\])?(?:\s*\.\s*[a-z_]\w*[?!]?(?:\([^()\n]*\))?(?:\[[^\]\n]*\])?)*?)"
+                         r"\s*\.\s*(?:each|map|select|find|detect|each_with_index|sort_by|reject|any\?|all\?|flat_map|filter|"
+                         r"filter_map|count|min_by|max_by|group_by|partition|sum|find_all|none\?|map!|select!|reject!|"
+                         r"collect|find_index)\b(?:\([^()\n]*\))?\s*(?:\bdo|\{)\s*\|([^|\n]*)\|")
 _BLOCK_PARAMS = re.compile(r"(?:\bdo|\{)\s*\|([^|\n]*)\|")
 # `Benchmark.ips do |x|`, `File.open(p) { |f| }`: a block given to a constant's method
 _CONST_BLOCK = re.compile(rf"(?<![\w.:])({_CONST})\s*\.\s*\w+[?!]?(?:\s*\(([^()\n]*)\)|[ \t]+([^\n{{|]*?))?\s*(?:\bdo|\{{)\s*\|([^|\n]*)\|")
@@ -759,6 +770,13 @@ def expression(code: str, pos: int, is_local) -> tuple[str, ...]:
             tok = "[]()"
     segs.append(tok)
     while len(segs) < 8:
+        if i < n and code[i] == "[" and segs[-1] != "[]" and segs[-1] != "[]()":
+            close = _match_paren(code, i)  # `@site.collections["x"]`: an element
+            if close < 0 or "\n" in code[i:close]:
+                return ()
+            segs.append("[]")
+            i = close + 1
+            continue
         j = i
         while j < n and code[j] in " \t":
             j += 1
@@ -861,6 +879,25 @@ def _collect(f: Func, b, code: str, starts: list[int], idx: list[int], lines: li
                 continue  # it was handed a value of ours: what it yields may be ours
             for nm in re.findall(r"[a-z_]\w*", cb.group(4)):
                 f.bound.setdefault(nm, "lib:" + const)  # link() keeps it if the constant is a library's
+        for im_ in _ITER_BLOCK.finditer(ln):  # `docs.sort.each do |doc|`: doc is an element of docs
+            src = list(expression(code, a + im_.start(1), is_local))
+            if not src or src[-1][:-2] not in _ITERS:
+                continue
+            src.pop()  # the iterator itself
+            while len(src) > 1 and src[-1][:-2] in _SAME_ELEMENTS:
+                src.pop()  # `docs.sort.each`: the same elements
+            if not src or src == ["self"]:
+                continue
+            if src[-1].endswith("()"):
+                src[-1] = src[-1][:-2]  # (a reader: `docs` is `@docs`, read for its `docs[]`)
+            nm = re.findall(r"[a-z_]\w*", im_.group(2))[:1]
+            if nm:
+                spec = "elem:" + "\x1f".join(src)
+                held = f.bound.get(nm[0])
+                if held is None:
+                    f.bound[nm[0]] = spec
+                elif held != spec and held.startswith("elem:"):
+                    f.bound[nm[0]] = "lam:?"  # (one name, two collections)
         rb_ = _RESCUE_BIND.search(ln)
         if rb_:
             classes = re.split(r"\s*,\s*", rb_.group(1)) if rb_.group(1) else ["StandardError"]
@@ -1008,6 +1045,8 @@ def _class_fields(mods: dict, funcs) -> None:
         accessors = {g.name for g in m.funcs if g.returns == f"expr:@{g.name}"}
         for k, v in _ivar_sets(f, accessors):
             seen.setdefault(m.name, {}).setdefault(k, set()).add(v)
+        for k, v in _pushes(f, m):
+            seen.setdefault(m.name, {}).setdefault(k, set()).add(v)
     for mn, fields in seen.items():
         for k, vs in fields.items():
             if len(vs) > 1:
@@ -1041,6 +1080,42 @@ def _ivar_sets(f: Func, accessors: set):
             yield name, "expr:" + "\x1f".join(ch)
 
 
+_PUSH = re.compile(r"(?<![\w@.:])(@?[a-z_]\w*)\s*(?:<<|\.push\(|\.append\(|\.unshift\()\s*"
+                   r"(?:([A-Z][\w:]*)\.new\b|([a-z_]\w*)\s*(?:$|[)\n]|\bif\b|\bunless\b))", re.M)
+
+
+def _pushes(f: Func, m):
+    """("@docs[]", <element>) for each `docs << doc` / `@docs.push(Foo.new)` in
+    f: what the collection holds, as `docs[0]`, `docs.first`, `docs.find {}`
+    read it. A bare `docs` is the class's own reader of `@docs`."""
+    own = {g.name: g for g in m.funcs}
+    for pm in _PUSH.finditer(f.code):
+        coll, cls, var = pm.groups()
+        if cls:
+            val = f"expr:{cls}\x1fnew()"
+        else:
+            held = f.bound.get(var, "")
+            if not (held.startswith("expr:") and held[5:6].isupper() and held.endswith("\x1fnew()")):
+                yield (coll if coll.startswith("@") else "@" + coll) + "[]", "?"
+                continue
+            val = held
+        if coll.startswith("@"):
+            yield coll + "[]", val
+        elif coll not in f.bound and coll in own and f"@{coll}" in own[coll].code:
+            yield coll + "[]", val
+            yield f"@{coll}[]", val
+    # `@collections ||= names.each_with_object({}) do |name, hsh| hsh[name] = Collection.new(...)`
+    acc = re.search(rf"(@{re.escape(f.name)})\s*\|\|=.*?\.each_with_object\(\s*(?:\{{\s*\}}|\[\s*\]|Hash\.new|\{{\}})\s*\)\s*"
+                    r"(?:do|\{)\s*\|[^|,]*,\s*([a-z_]\w*)\s*\|", f.code, re.S)
+    for hm in re.finditer(r"(?<![\w@.:])(@?[a-z_]\w*)\[[^\]\n]+\]\s*=\s*([A-Z][\w:]*)\.new\b", f.code):
+        coll, cls = hm.groups()
+        if coll.startswith("@"):
+            yield coll + "[]", f"expr:{cls}\x1fnew()"
+        elif acc and coll == acc.group(2):
+            yield f.name + "[]", f"expr:{cls}\x1fnew()"
+            yield acc.group(1) + "[]", f"expr:{cls}\x1fnew()"
+
+
 def _params_of(f: Func) -> set[str]:
     m = re.match(rf"\s*def\s+(?:\w+\.)?{re.escape(f.name)}\s*\(([^)]*)\)", f.code)
     return set(re.findall(r"[a-z_]\w*", m.group(1))) if m else set()
@@ -1057,6 +1132,7 @@ def link(project) -> None:
     _link_requires(project, rb)
     r = _link_classes(project, rb)
     _bare_calls_on_self(project, rb)
+    _block_forwarders(rb)
     _rewrite_constants(rb, r)
     _infer_types(project, rb, r)
 
@@ -1552,6 +1628,30 @@ def _method_params(p, rb: list, r, t, texts) -> bool:
                 g.bound[name] = ty
                 changed = True
     return changed
+
+
+def _block_forwarders(rb: list) -> None:
+    """`def update_file(path, &block) ... File.open(path, 'w', &block)`: a
+    block given to update_file is File's, so `update_file(p) do |f|` has f
+    as the library's (when every method of that name hands it on alike)."""
+    fwd: dict[str, set] = {}
+    for m in rb:
+        for f in m.funcs:
+            if not re.match(r"\s*def\s+(?:self\.)?\w+[?!]?\s*\([^)]*&(\w+)", f.code):
+                fwd.setdefault(f.name, set()).add(None)
+                continue
+            blk = re.match(r"\s*def\s+(?:self\.)?\w+[?!]?\s*\([^)]*&(\w+)", f.code).group(1)
+            hm = re.search(rf"(?<![\w.:])({'|'.join(sorted(_STDLIB_YIELDS))})\s*\.\s*\w+[?!]?\s*\([^()\n]*&{blk}\s*\)", f.code)
+            fwd.setdefault(f.name, set()).add(hm.group(1) if hm else None)
+    names = {n: next(iter(cs)) for n, cs in fwd.items() if len(cs) == 1 and None not in cs}
+    if not names:
+        return
+    pat = re.compile(rf"(?<![\w.:@])({'|'.join(map(re.escape, names))})\b[^\n{{]*?(?:\bdo|\{{)\s*\|([^|\n]*)\|")
+    for m in rb:
+        for f in m.funcs:
+            for cm in pat.finditer(f.code):
+                for nm in re.findall(r"[a-z_]\w*", cm.group(2)):
+                    f.bound.setdefault(nm, "lib:" + names[cm.group(1)])
 
 
 def _option_fields(p, r, t, texts, g, per_cls: dict, raw: dict, own_test: bool) -> bool:

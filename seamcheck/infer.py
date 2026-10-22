@@ -459,7 +459,21 @@ class Types:
     def loop_element(self, mod, f, chain: tuple, depth: int):
         """A for-loop variable: an element of what it iterates (a declared
         container, or a function whose return type is a sequence)."""
+        key = ("\0elem", mod.name, f.id if f is not None else "", chain, self.line)
+        if key in self.cache:
+            return self.cache[key]
+        self.cache[key] = None  # (a cycle through the same container: unknown)
+        got = self.cache[key] = self._loop_element(mod, f, chain, depth)
+        return got
+
+    def _loop_element(self, mod, f, chain: tuple, depth: int):
         last = chain[-1]
+        if last.endswith("()") and mod.file.endswith(_RB_EXTS) and depth < _MAX:  # Ruby: `site.docs` reads `@docs`, its `docs[]`
+            owner = self.chain(mod, f, chain[:-1], depth + 1) if len(chain) > 1 else None
+            if owner is not None and not is_ext(owner) and owner is not UNKNOWN:
+                el = self._element(mod, f, last[:-2], owner, depth + 1)
+                if el is not None:
+                    return el
         if not last.endswith("()"):  # `for x in xs` / `self.items`: a declared container
             owner = self.chain(mod, f, chain[:-1], depth + 1) if len(chain) > 1 else None
             if len(chain) > 1 and owner is None:
@@ -869,9 +883,11 @@ class Types:
         cur = start if start is not None else self.first(mod, f, chain[0], depth, self_mods)
         before = None  # the value the previous segment was read from
         for k, seg in enumerate(chain[1:], 1):
-            if seg in _ELEMENT_ACCESS and re.match(r"^[\w$]+$", chain[k - 1]):
+            prev = chain[k - 1][:-2] if mod.file.endswith(".rb") and chain[k - 1].endswith("()") else chain[k - 1]
+            if seg in _ELEMENT_ACCESS and re.match(r"^[@\w$]+$", prev):
                 # `m_players[id]`, `xs.get(0)`, `list.first()`: an element of a declared container
-                el = self._element(mod, f, chain[k - 1], before if k > 1 else None, depth)
+                # (Ruby: `site.collections["x"]`, the reader's `@collections`)
+                el = self._element(mod, f, prev, before if k > 1 else None, depth)
                 if el is not None:
                     before, cur = cur, el
                     continue
@@ -921,6 +937,10 @@ class Types:
             return self._scene_node(fm.file, seg[1:])  # `$HUD`: the node the script's scene names so
         if seg.startswith("<as:"):
             return self.instance(mod, seg[4:-1], self_mods)  # `(x as Foo)`: a Foo
+        if seg == "described_class()" and fm.file.endswith(_RB_EXTS):
+            # RSpec: the class the (outermost) `describe Foo do` names
+            dm = re.search(r"^\s*(?:RSpec\.)?describe\s*\(?\s*((?:::)?[A-Z][\w:]*)", "\n".join(fm.raw), re.M)
+            return self.chain(fm, None, (dm.group(1).lstrip(":"),), depth + 1) if dm else None
         if seg.endswith("()"):
             name = seg[:-2]
             held = f.bound.get(name, "") if f is not None else ""
@@ -955,7 +975,12 @@ class Types:
                 # `fetch(url)` in an ES module: not its own, not imported, and no project module exports
                 # a function of that name (a lost import stays a guess): the runtime's global
                 return EXT
-            return self._rb_named(mod, name)
+            got = self._rb_named(mod, name)
+            if got is None and fm.file.endswith(_RB_EXTS) and name not in fm.imported and not (f is not None and name in f.bound) \
+                    and not self.method(self.own_class(mod, f) or [], name)[0] and not self.p.by_name.get(name + "=") \
+                    and _bare_reaches_nothing(self.p, fm, name):
+                return EXT  # Ruby: nothing in scope has that name, so it is a library's (core says so of the call too)
+            return got
         if seg == "<literal>":
             return EXT  # a string / array / number literal: the language's own type
         if seg == "<range>":
@@ -980,7 +1005,10 @@ class Types:
                     return None
                 return self.chain(mod, f, tuple(held[5:].split("\x1f")), depth + 1, self_mods, start=base)
             if held:
-                return self.held(mod, f, held, depth + 1, self_mods)
+                got = self.held(mod, f, held, depth + 1, self_mods)
+                if got is not None or not fm.file.endswith(_RB_EXTS):
+                    return got
+                # (Ruby: a value we can't type says nothing; the name may still)
         # a bare name is a field only where `this` is implicit: never in Python,
         # JS/TS or PHP (`cli` in a Flask method is the module, not self.cli)
         own = self_mods or (None if fm.file.endswith(_EXPLICIT_SELF) else self.own_class(mod, f))
@@ -1346,7 +1374,14 @@ _ITER_SEGS = {"iter()", "iter_mut()", "into_iter()", "drain()", "asSequence()", 
 _DOM_QUERIES = {"getElementsByTagName()", "getElementsByClassName()", "querySelectorAll()", "querySelector()",
                 "getElementById()", "children", "childNodes", "closest()", "parentElement", "parentNode"}
 _ELEMENT_ACCESS = {"[]", "at()", "first()", "last()", "value()", "get()", "front()", "back()", "constFirst()",
-                   "constLast()", "elementAt()", "getFirst()", "getLast()", "peek()", "poll()", "pop()", "find()"}
+                   "constLast()", "elementAt()", "getFirst()", "getLast()", "peek()", "poll()", "pop()", "find()",
+                   "detect()"}
+_RB_EXTS = (".rb", ".rake", ".ru")
+
+
+def _bare_reaches_nothing(p, fm, name: str) -> bool:
+    from .core import _in_scope
+    return not _in_scope(p, fm.name, name) and not any(_in_scope(p, w, name) for w in fm.uses)
 _RS_PRIMS = r"u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32|f64|bool|char|str"
 _ES_MODULE = (".ts", ".tsx", ".mts", ".cts")
 _JS_EXTS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".qml")
