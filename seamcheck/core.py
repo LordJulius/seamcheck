@@ -1276,7 +1276,8 @@ def _implicit_member(project: Project, types, mod, f: Func, c: Call):
         ty = tm.group(1)
     elif (lm := re.search(r"(?:^|[(,]\s*)(\w+)\s*:\s*$", before)) or re.search(r",\s*$", before):
         # a labelled argument: the parameter of that label in the callee's signature
-        depth, k, text = 0, len(before) - (len(lm.group(0)) if lm else 0), before
+        # (start just after the `(` or `,` the label follows, so that paren is the call's own)
+        depth, k, text = 0, len(before) - (len(lm.group(0)) - (1 if lm.group(0)[:1] in "(," else 0) if lm else 0), before
         while k > 0:
             k -= 1
             if text[k] == ")":
@@ -1296,7 +1297,13 @@ def _implicit_member(project: Project, types, mod, f: Func, c: Call):
         if not t or t == "Self":
             verdicts.append(("?", []))
             continue
-        tmods, ex, declared = types.type_modules(mod, t)
+        nested = None  # `Value` inside `Element`: the enclosing types' own nested `Value` first
+        o = mod.name
+        while o and nested is None:
+            if f"{o}.{t}" in project.modules:
+                nested = f"{o}.{t}"
+            o = project.modules[o].owner if o in project.modules else ""
+        tmods, ex, declared = ([nested], True, True) if nested else types.type_modules(mod, t)
         if not declared:
             verdicts.append(("lib", []))  # a library type's member
             continue
@@ -1395,6 +1402,20 @@ def _param_type(project: Project, types, mod, text: str, k: int, label: str, ind
         hit = [t for lab, t in ps if lab == label] if label else ([ps[index][1]] if index < len(ps) and ps[index][0] == "_" else [])
         if hit:
             found.add(hit[0])
+    if not found and label and (name == "init" or name[:1].isupper()) and mod is not None:
+        # a struct's memberwise init (`Element(value: .option(x))`, `self.init(base: .message(t))`):
+        # the parameter is the stored property of that name
+        if name == "init":
+            owners = types.own_class(mod, f) if f else []
+        else:
+            tmods, ex, _ = types.type_modules(mod, name)
+            owners = tmods if ex else []
+        for o in owners or []:
+            for a in types.ancestors(o):
+                held = project.modules[a].bound.get(label, "")
+                if held.startswith("type:"):
+                    found.add(held[5:])
+                    break
     return "|".join(sorted(found))  # (overloads: each parameter type; the member settles which)
 
 
