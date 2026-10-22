@@ -889,6 +889,12 @@ class Types:
             if name[:1].isupper():
                 got = self.instance(mod, name, self_mods)  # `Foo(...)`: a constructor
                 return got
+            if fm.file.endswith(_JS_EXTS[:-1]) and self._es_module(fm.file) and name not in fm.imported \
+                    and not (f is not None and name in f.bound) and not any(
+                        g.file == fm.file or not self.p.modules[g.module].owner for g in self.p.by_name.get(name, ())):
+                # `fetch(url)` in an ES module: not its own, not imported, and no project module exports
+                # a function of that name (a lost import stays a guess): the runtime's global
+                return EXT
             return self._rb_named(mod, name)
         if seg == "<literal>":
             return EXT  # a string / array / number literal: the language's own type

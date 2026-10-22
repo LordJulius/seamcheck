@@ -23,7 +23,9 @@ _JS = [
     re.compile(rf"^[ \t]*(?:{_ID}\.)+({_ID})[ \t]*=\s*(?:(?:{_ID}\.)+{_ID}[ \t]*=\s*)+(?:async[ \t]+)?function\b[^(\n]*\(", re.M),
     # `this.use = (arg, ...handlers) => {` in a constructor: a member of the class
     re.compile(rf"^[ \t]*this\.({_ID})[ \t]*=[ \t]*(?:async[ \t]+)?(?:\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=\n]+?)?=>|{_ID}[ \t]*=>)", re.M),
-    re.compile(rf"\b(?:const|let|var)\s+({_ID})\s*(?::[^=]+)?=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::\s*[^=]+)?=>|{_ID}\s*=>)"),
+    # (the annotation may be a function type: `const mergePath: (...p: string[]) => string = (`)
+    re.compile(rf"\b(?:const|let|var)\s+({_ID})\s*(?::(?:[^=;]|=>){{1,300}}?)?=\s*(?:async\s+)?"
+               rf"(?:function\b|\((?:[^()]|\([^()]*\))*\)\s*(?::\s*[^=]+)?=>|{_ID}\s*=>)"),
     # object-literal members (`applyOp: (op) => {`): a zustand store, a handler table
     re.compile(rf"^[ \t]*({_ID})[ \t]*:[ \t]*(?:async[ \t]+)?(?:function\b|\([^()\n]*\)[ \t]*(?::[^=\n]+)?=>|{_ID}[ \t]*=>)", re.M),
     # a method `name(params) {`; its parameters hold no string (`describe('x', function () {` is a call)
