@@ -657,5 +657,20 @@ class GodotScenes(Base):
         self.assertFalse(self.guessed("main._ready"))  # $Timer is the engine's Timer, not conductor.start
 
 
+class VendoredCode(unittest.TestCase):
+    FILES = {"src/app.js": "function go() {}\n", "assets/vendor/lib.js": "function lib() {}\n",
+             "static/x.min.js": "function m() {}\n"}
+
+    def test_a_vendored_code_is_not_read(self):
+        d, p = load(dict(self.FILES))
+        self.addCleanup(d.cleanup)
+        self.assertEqual(sorted(p.by_file), ["src/app.js"])
+
+    def test_b_include_naming_it_reads_it(self):
+        d, p = load(dict(self.FILES, **{"seamcheck.toml": '[project]\nname = "x"\ninclude = ["src/**", "assets/vendor/**"]\n'}))
+        self.addCleanup(d.cleanup)
+        self.assertEqual(sorted(p.by_file), ["assets/vendor/lib.js", "src/app.js"])
+
+
 if __name__ == "__main__":
     unittest.main()
