@@ -15,6 +15,9 @@ from .scan import blank
 _ID = r"[A-Za-z_$][\w$]*"
 _JS = [
     re.compile(rf"\bfunction\s*\*?\s*({_ID})\s*\("),
+    # `exports.foo = function (`, `app.use = function (`, `Foo.prototype.bar = async function (`:
+    # an anonymous function stored as a property is called by that property's name
+    re.compile(rf"^[ \t]*(?:{_ID}\.)+({_ID})[ \t]*=[ \t]*(?:async[ \t]+)?function[ \t]*\*?[ \t]*\(", re.M),
     re.compile(rf"\b(?:const|let|var)\s+({_ID})\s*(?::[^=]+)?=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::\s*[^=]+)?=>|{_ID}\s*=>)"),
     # object-literal members (`applyOp: (op) => {`): a zustand store, a handler table
     re.compile(rf"^[ \t]*({_ID})[ \t]*:[ \t]*(?:async[ \t]+)?(?:function\b|\([^()\n]*\)[ \t]*(?::[^=\n]+)?=>|{_ID}[ \t]*=>)", re.M),
@@ -468,6 +471,36 @@ def _real(lines: list[str], text: str, pos: int) -> bool:
     return ln < len(lines) and lines[ln].strip().startswith("import")
 
 
+_CJS_REQUIRE = re.compile(r"""(?:\b(?:const|let|var)\s+|,\s*)([A-Za-z_$][\w$]*|\{[^}]*\})\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)\s*(\.\s*([A-Za-z_$][\w$]*))?""")
+_CJS_EXPORT = re.compile(r"""^[ \t]*(?:exports[ \t]*=[ \t]*)?module\.exports[ \t]*=[ \t]*(?:exports[ \t]*=[ \t]*)?(?:require\(\s*['"]([^'"]+)['"]\s*\)|([A-Za-z_$][\w$]*)[ \t]*;?[ \t]*$)""", re.M)
+
+
+def _cjs(mod: Module, rel: str, text: str) -> None:
+    """CommonJS: `const x = require("./x")` (the module, and calling it calls
+    what it exports), `const { a, b: c } = require("./x")`, and what a file
+    exports (`module.exports = createApplication`, `= require("./lib/x")`)."""
+    d = rel.rsplit("/", 1)[0] if "/" in rel else ""
+    base = os.path.basename(rel)
+    for m in _CJS_REQUIRE.finditer(text):
+        where = f"js:{d}\0{m.group(2)}"
+        local = m.group(1)
+        if local.startswith("{"):
+            for part in local[1:-1].split(","):
+                src, _, alias = part.strip().partition(":")
+                if src.strip():
+                    mod.imported.setdefault((alias or src).strip(), (where, src.strip()))
+        elif m.group(4):  # `const Router = require("./router").Router`
+            mod.imported.setdefault(local, (where, m.group(4)))
+        else:
+            mod.aliases.setdefault(local, where)
+            mod.imported.setdefault(local, (where, "default"))
+    for m in _CJS_EXPORT.finditer(text):
+        if m.group(1):
+            mod.imported["default"] = (f"js:{d}\0{m.group(1)}", "default")
+        elif m.group(2):
+            mod.imported["default"] = (f"js:{d}\0./{base}", m.group(2))
+
+
 def _js_imports(mod: Module, rel: str, text: str, lines: list[str]) -> None:
     d = rel.rsplit("/", 1)[0] if "/" in rel else ""
     for m in _JS_IMPORT.finditer(text):
@@ -806,6 +839,25 @@ def _assignments(tk: str, text: str) -> list[tuple[str, str]]:
     return out
 
 
+def _own_return(code: str, bpos: int) -> str:
+    """With no declared type, what a function's own last `return <chain>`
+    (at its body's top level, not a callback's) gives: "expr:<chain>"."""
+    depth, k, n, last = 0, bpos, len(code), ""
+    while k < n:
+        ch = code[k]
+        if ch in "{([":
+            depth += 1
+        elif ch in "})]":
+            depth -= 1
+            if depth == 0:
+                break
+        elif depth == 1 and code.startswith("return", k) and not code[k - 1:k].isalnum() and code[k + 6:k + 7] in " \t":
+            ch_ = expression(code, k + 6)
+            last = ("expr:" + "\x1f".join(ch_)) if ch_ else ""
+        k += 1
+    return last
+
+
 def _stem_key(s: str) -> str:
     return re.sub(r"[-_.]", "", s).lower()
 
@@ -924,6 +976,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     if fam == "js":
         _js_imports(mod, rel, text, lines)
         _js_reexports(mod, rel, text, lines)
+        if "require(" in text or "module.exports" in text:
+            _cjs(mod, rel, text)
     elif fam == "kotlin" or ext == ".java":
         _kt_imports(mod, text, lines)
     elif ext == ".cs":
@@ -1251,6 +1305,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             f.returns = _returns(tk, code[line_start_pos:npos], sig, name, cls_name)
             if not f.returns and bpos >= 0 and re.search(r"\breturn\s+(?:this|self|\$this)\s*[;\n}]", f.code):
                 f.returns = "Self"  # a builder step: `return this`
+            if not f.returns and bpos >= 0:
+                f.returns = _own_return(code, bpos)
             if not f.returns and tk == "kotlin" and bpos < 0:
                 em = re.search(r"\)\s*=\s*", sig)
                 if em and re.match(r"\s*(?:apply|also)\s*\{|\s*this\b(?!\s*\.)", sig[em.end():]):
@@ -1265,6 +1321,9 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             body = "\n".join(lines[sa:sb + 1])
             for nm_, held in _assignments(tk, body):
                 f.bound.setdefault(nm_, held)
+            if fam == "js":  # `mixin(app, proto)` / `Object.assign(app, proto)`: app has proto's members
+                for mm in re.finditer(r"\b(?:Object\.assign|mixin|merge|extend|_\.extend|_\.assign)\s*\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*[,)]", body):
+                    f.bound[mm.group(1)] = "expr:" + mm.group(2)
             off = 0
             for i in range(sa, sb + 1):
                 ln = lines[i]

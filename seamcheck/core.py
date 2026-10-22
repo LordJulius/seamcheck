@@ -488,7 +488,8 @@ def _resolve_where(project: Project, where: str, cache: dict) -> str:
         if not base:
             return EXTERNAL  # a package from node_modules
     base = re.sub(r"\.(?:[mc]?[jt]sx?)$", "", base.rstrip("/"))
-    for cand in (base, base + "/index", base + "/src/index"):
+    base = "" if base == "." else base
+    for cand in ((base, base + "/index", base + "/src/index") if base else ("index", "src/index")):
         if cand in project.modules:
             return cand
     return ""
