@@ -136,7 +136,7 @@ _GO_KEYWORDS = {"return", "go", "defer", "case", "range", "package", "import", "
 # Rust: `x: &mut Foo` (a parameter, a `let`), `let x = Foo::new(` / `Foo {`
 _RS_PRIM = r"(?:u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32|f64|bool|char|str)"
 _RS_TYPED = re.compile(r"(?:\blet\s+(?:mut\s+)?|[(,]\s*(?:mut\s+)?)([a-z_]\w*)\s*:\s*&?(?:'\w+\s+)?(?:mut\s+)?"
-                       r"([A-Z]\w*|\[[^\]\n]*\]|" + _RS_PRIM + r")(?![\w:])")
+                       r"((?:[a-z_]\w*::)*[A-Z]\w*|\[[^\]\n]*\]|" + _RS_PRIM + r")(?![\w:])")
 _RS_NEW = re.compile(r"\blet\s+(?:mut\s+)?([a-z_]\w*)\s*(?::[^=]+)?=\s*([A-Z]\w*)\s*(?:::\s*(?:new|default|with_\w+|from\w*|builder)\s*\(|\{)")
 
 
@@ -1065,6 +1065,7 @@ def _return_text(tk: str, prefix: str, sig: str) -> str:
     return ""
 
 
+_RS_WRAPPED = re.compile(r"^\s*(?:&\s*)?(?:(?:std::)?(?:option|result|io|fmt)::)?(?:Option|Result)\s*<")
 _RS_ARM = re.compile(r"(?:\b([A-Z]\w*)::)?\b([A-Z]\w*)\s*\(\s*(?:ref\s+)?(?:mut\s+)?([a-z_]\w*)\s*\)\s*(=>|=(?![=>]))")
 
 
@@ -1453,6 +1454,10 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         _go_imports(mod, rel, text, code)
     elif ext == ".rs":
         _rs_imports(mod, rel, code)
+        # `mod convert { pub fn string(...) }` inline: `convert::string(v)` is this file's
+        for im_ in re.finditer(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?mod\s+([a-z_]\w*)\s*\{", code, re.M):
+            if im_.group(1) not in ("tests", "test"):
+                mod.bound.setdefault(im_.group(1), "mod:" + mod.name)
         # `pub static PROJECT_DIRS: Lazy<BatProjectDirs> = ...`: a module-level value of that type
         for sm in re.finditer(r"^(?:pub(?:\([^)]*\))?\s+)?(?:static|const)\s+(?:mut\s+)?([A-Z_][A-Z0-9_]*)\s*:\s*([^=;]+?)\s*=", code, re.M):
             t_ = type_name(sm.group(2))
@@ -1830,7 +1835,7 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 for m in _RS_FIELD.finditer(ln):
                     t = type_name(m.group(2))
                     if t:
-                        got_fields.setdefault(m.group(1), set()).add(t)
+                        got_fields.setdefault(m.group(1), set()).add(("opt:" if _RS_WRAPPED.match(m.group(2)) else "") + t)
             elif cpp and not inside[i]:
                 for m in _CPP_FIELD.finditer(ln):
                     t = type_name(m.group(1))  # (`QPointer<CaptureTool>` holds a CaptureTool)
@@ -1924,7 +1929,15 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         cls_name = (cls["name"] if cls else "") or (home.decls[-1] if home is not mod or recv else "")
         if (a_, name) not in tests:
             f.returns = _returns(tk, code[line_start_pos:npos], sig, name, cls_name)
-            f.relem = elem_type(_return_text(tk, code[line_start_pos:npos], sig))
+            rtext_ = _return_text(tk, code[line_start_pos:npos], sig)
+            f.relem = elem_type(rtext_)
+            if tk == "rust" and _RS_WRAPPED.match(rtext_):  # `-> Option<Foo>`: a method on it is Option's until unwrapped
+                f.returns = "opt:" + f.returns
+            elif tk in ("rust", "swift") and rtext_.startswith("(") and lambdas.matching(rtext_, 0) == len(rtext_) - 1:
+                parts_ = lambdas.split_top(rtext_[1:-1])  # `-> (Ignore, Option<Error>)`: each element's type
+                if len(parts_) > 1:
+                    f.returns = "tuple:" + "|".join(("opt:" if _RS_WRAPPED.match(p_) else "") + type_name(p_.split(":")[-1])
+                                                    for p_ in parts_)
             if ext == ".cs" and len({x.split("=", 1)[1] for x in by_ov}) > 1:
                 f.returns = "byov:" + "|".join(by_ov)  # overloads that return different types
             if not f.returns and bpos >= 0 and re.search(r"\breturn\s+(?:this|self|\$this)\s*[;\n}]", f.code):
@@ -1949,6 +1962,14 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 f.bound.setdefault(nm_, held)
             for nm_, held in _loop_bindings(tk, body):
                 f.bound.setdefault(nm_, held)
+            if tk in ("rust", "swift"):  # `let (ig, err) = b.add_child(p);`: each name is that element of the tuple
+                for tm_ in re.finditer(r"\b(?:let|var)\s+\(\s*([^()=]*?)\s*\)\s*(?::[^=]+)?=(?!=)", body):
+                    ch_ = expression(body, tm_.end())
+                    if ch_ and ch_[-1].endswith("()"):
+                        for k_, nm_ in enumerate(lambdas.split_top(tm_.group(1))):
+                            nm_ = re.sub(r"^(?:mut\s+|ref\s+)", "", nm_.strip())
+                            if re.match(r"^[a-z_]\w*$", nm_) and nm_ != "_":
+                                f.bound.setdefault(nm_, f"tuple:{k_}\x1e" + "\x1f".join(ch_))
             if tk == "rust":  # `Raw(ref x) => x.ino()`: x, on that arm's lines, is what the variant holds
                 for nm_, ln_, held in _rs_arms(body, sa):
                     f.bound.setdefault(f"{nm_}@{ln_}", held)

@@ -97,6 +97,8 @@ class Types:
         al = fm.bound.get(name, "") if name[:1].isupper() else ""
         if al.startswith("type:") and al[5:] != name:  # `using X = A.B;` / PHP `use A\\B as X;`: B, by another name
             name = al[5:]
+        if "." in name and fm.file.endswith(".rs") and name.split(".")[0] in self._rs_external():
+            return [], False, False  # `walkdir::DirEntry`: that crate's, not the project's own DirEntry
         if "." in name:  # `pkg.Type`, `Outer.Inner`, `ns.Type`
             q, _, last = name.rpartition(".")
             target = fm.aliases.get(q.split(".")[-1], "")
@@ -370,6 +372,23 @@ class Types:
             return self.pack_param(held[5:])
         if held.startswith("variant:"):
             return self.variant(mod, held[8:], f)
+        if held.startswith("tuple:"):  # `let (a, b) = f();`: that element of what f returns
+            k_, _, ch_ = held[6:].partition("\x1e")
+            chain = tuple(ch_.split("\x1f"))
+            last = chain[-1][:-2]
+            if len(chain) == 1:
+                g = self.bare(mod, f, last)
+                hits = [g] if g is not None else []
+            else:
+                v = self.chain(mod, f, chain[:-1], depth + 1)
+                hits = self.method(list(v[1]), last)[0] if v is not None and not is_ext(v) and v is not UNKNOWN \
+                    and v[0] in ("inst", "static") else []
+            tys = {(g.module, g.returns.split("|")[int(k_)]) for g in hits
+                   if g.returns.startswith("tuple:") and int(k_) < len(g.returns[6:].split("|"))}
+            if len({t for _, t in tys}) != 1:
+                return None
+            gm_, ty_ = tys.pop()
+            return self.instance(self.p.modules[gm_], ty_[6:] if ty_.startswith("tuple:") else ty_) if ty_ else None
         if held.startswith("elem:"):
             return self.loop_element(mod, f, tuple(held[5:].split("\x1f")), depth)
         if held.startswith("lam:"):
@@ -645,6 +664,8 @@ class Types:
         return None
 
     def instance(self, mod, ty: str, self_mods=None):
+        if ty.startswith("opt:"):  # Rust `Option<Foo>` / `Result<Foo, E>`: Foo once unwrapped
+            return ("wrap", self.instance(mod, ty[4:], self_mods) if ty[4:] else None, True)
         if ty == "Self":
             return ("inst", tuple(self_mods), True) if self_mods else None
         if mod.file.endswith(".go"):
@@ -690,6 +711,8 @@ class Types:
             return None
         if g.returns.startswith("expr:"):
             return self.chain(gm, g, tuple(g.returns[5:].split("\x1f")), depth + 1, self_mods=self_mods or self.own_class(gm, g))
+        if g.returns.startswith("tuple:"):
+            return None  # a tuple: its elements are typed through `let (a, b) =`
         if g.returns.startswith("byov:"):  # C# overloads returning different types: the call's
             ovs = [(e.split("=", 1)[0].split("/"), e.split("=", 1)[1]) for e in g.returns[5:].split("|")]
             want = targs if targs is not None else "0"
@@ -1019,6 +1042,13 @@ class Types:
 
     def step(self, mod, cur, seg: str, depth: int):
         kind, mods, exact = cur
+        if kind == "wrap":  # a Rust Option / Result: unwrapping gives the value, any other method is std's
+            if seg in UNWRAP or seg in ("unwrap_unchecked()", "unwrap_or_else()", "unwrap_or_default()"):
+                return mods
+            if seg in ("as_ref()", "as_mut()", "as_deref()", "as_deref_mut()", "cloned()", "copied()", "clone()",
+                       "take()", "ok()", "by_ref()"):
+                return cur
+            return EXT
         if seg in ("?", "!!"):
             return cur
         if seg in ("[]", "(...)"):
