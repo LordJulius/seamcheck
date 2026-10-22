@@ -49,10 +49,15 @@ _PRIVATE = re.compile(r"^\s*(private|protected|public)\s*$")
 _REQUIRE = re.compile(r"""^\s*(require|require_relative|load)\s*\(?\s*["']([^"'#]+)["']""")
 _AUTOLOAD = re.compile(r"""^\s*autoload\s*\(?\s*:\w+\s*,\s*["']([^"'#]+)["']""")
 _ASSIGN = re.compile(r"(?<![\w.@$:])([a-z_]\w*)\s*(?:\|\||&&|\*\*|<<|>>|[-+*/%|&^])?=(?![=~>])")
-_MULTI = re.compile(r"^\s*((?:\*?[a-z_]\w*\s*,\s*)+\*?[a-z_]\w*)\s*=(?![=~>])", re.M)
+_MULTI = re.compile(r"^\s*((?:\*?@{0,2}[a-z_]\w*\s*,\s*)+\*?@{0,2}[a-z_]\w*)\s*=(?![=~>])", re.M)
 _BLOCK_PARAMS = re.compile(r"(?:\bdo|\{)\s*\|([^|\n]*)\|")
 # `Benchmark.ips do |x|`, `File.open(p) { |f| }`: a block given to a constant's method
-_CONST_BLOCK = re.compile(rf"(?<![\w.:])({_CONST})\s*\.\s*\w+[?!]?(?:\s*\([^()\n]*\)|[ \t]+[^\n{{|]*?)?\s*(?:\bdo|\{{)\s*\|([^|\n]*)\|")
+_CONST_BLOCK = re.compile(rf"(?<![\w.:])({_CONST})\s*\.\s*\w+[?!]?(?:\s*\(([^()\n]*)\)|[ \t]+([^\n{{|]*?))?\s*(?:\bdo|\{{)\s*\|([^|\n]*)\|")
+# Ruby's own constants whose blocks get Ruby's objects (`File.open(path) do |f|`);
+# another library's may hand back what it was given (`Parallel.map(pages) { |page| }`)
+_STDLIB_YIELDS = {"File", "Dir", "IO", "Benchmark", "Open3", "Tempfile", "Zlib", "Timeout", "Mutex", "Thread",
+                  "OptionParser", "CSV", "Find", "FileUtils", "Pathname", "StringIO", "Socket", "TCPServer",
+                  "Net", "Etc", "Process", "Signal", "Logger", "Dir::Tmpname", "ERB"}
 _RESCUE_VAR = re.compile(r"\brescue\b[^\n=]*=>\s*([a-z_]\w*)")
 _RESCUE_BIND = re.compile(rf"\brescue\b\s*((?:{_CONST})(?:\s*,\s*{_CONST})*)?\s*=>\s*([a-z_]\w*)")
 _SELF_SET = re.compile(r"(?<![\w@.])self\.(\w+)\s*=(?![=~>])\s*")
@@ -235,8 +240,29 @@ def _blocks(code: str, line_of) -> list[dict]:
     return out
 
 
+def _blockless_classes(blocks: list[dict], lines: list[str]) -> None:
+    """`Generator = Class.new(Plugin)` (no block): a class all the same, as a
+    one-line block, so jekyll's plugins inherit Plugin's class methods."""
+    for i, ln in enumerate(lines):
+        m = _CLASS_NEW.match(ln)
+        if not m or re.search(r"\bdo\b|\{", ln[m.end():]):
+            continue
+        around = [b for b in blocks if b["a"] <= i <= b["b"] and b.get("end_pos") is not None]
+        parent = max(around, key=lambda b: (b["a"], -b["b"]))["i"] if around else -1
+        base = m.group(3) or ("" if m.group(2) == "Class" else m.group(2))
+        blocks.append({"kind": "class", "name": m.group(1), "base": base, "a": i, "b": i, "pos": 0,
+                       "parent": parent, "i": len(blocks), "end_pos": None})
+
+
 def _do_block(code: str, pos: int) -> dict:
     head = _stmt_prefix(code, pos)
+    a = code.rfind("\n", 0, pos)
+    for _ in range(3):  # `should "a, " \` / `"b" do`: a head over several lines
+        prev = code.rfind("\n", 0, a)
+        if a <= 0 or not code[prev + 1:a].rstrip().endswith(("\\", ",")):
+            break
+        head = code[prev + 1:a].rstrip().rstrip("\\") + " " + head.lstrip()
+        a = prev
     if _TEST_HEAD.match(head):
         return {"kind": "test"}
     dm = _DEFINE_METHOD.search(head)
@@ -264,6 +290,7 @@ def parse(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     fm = Module(_modname(rel), rel, len(raw), raw, lines)
     _requires(fm, rel, lines, raw)
     blocks = _blocks(code, line_of)
+    _blockless_classes(blocks, lines)
     first_str: dict[int, str] = {}
     for ln, st in strings:
         first_str.setdefault(ln - 1, st)
@@ -285,6 +312,8 @@ def parse(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 mods[mname] = cm
             if b["base"]:
                 cm.bases.append(f"S{enclosing}\0{b['base']}")
+            if "::" in written.lstrip(":") and "C\0" not in cm.bases:
+                cm.bases.append("C\0")  # `class Rack::Builder`: reopening a constant from elsewhere
             home[b["i"]] = cm
         elif p >= 0:
             home[b["i"]] = outer
@@ -408,8 +437,8 @@ def _attrs(fm, mods, blocks, home, body_blk, lines, funcs) -> None:
     """attr_reader / attr_accessor are methods returning their field;
     def_delegators / delegate are methods calling on through a field."""
     for b in blocks:
-        if b["kind"] not in ("class", "module"):
-            continue
+        if b["kind"] not in ("class", "module", "sclass") or b["i"] not in home:
+            continue  # (`class << self; attr_accessor :lsi`: the class's own)
         cm = home[b["i"]]
         for i in range(b["a"] + 1, b["b"]):
             if body_blk[i] != b["i"]:
@@ -508,7 +537,7 @@ def _locals(f: Func, b, code: str, spans: list[tuple[int, int]]) -> dict[str, in
         for m in _RESCUE_VAR.finditer(seg):
             loc.setdefault(m.group(1), a + m.start(1))
         for m in _MULTI.finditer(seg):
-            for nm in re.findall(r"[a-z_]\w*", m.group(1)):
+            for nm in re.findall(r"(?<![@\w])[a-z_]\w*", m.group(1)):  # `all, @path = ...`: all is a local
                 loc.setdefault(nm, a + m.start(1))
         for m in _ASSIGN.finditer(seg):
             loc.setdefault(m.group(1), a + m.start(1))
@@ -629,9 +658,9 @@ def receiver(code: str, pos: int, is_local) -> tuple[str, ...]:
             if not seg or seg == "(...)":
                 segs.append("(...)")
                 break
-        if seg == "class" and i - len(seg) > 0 and code[s - 1:s] == ".":
+        if seg == "class" and s > 0 and code[s - 1] == ".":
             seg = "class()"  # `self.class.x`: a method, not the keyword
-        if seg.rstrip("()") in _KEYWORDS and seg.rstrip("()") not in ("self",):
+        if seg.rstrip("()") in _KEYWORDS and seg not in ("self", "class()"):
             segs.append("(...)")  # `end.map`, `return x.y`: not a receiver we can name
             break
         segs.append(seg)
@@ -759,13 +788,13 @@ def _collect(f: Func, b, code: str, starts: list[int], idx: list[int], lines: li
 
     def is_local(name: str, pos: int) -> bool:
         p = loc.get(name)
-        return p is not None and p < pos
+        return p is not None and p <= pos  # (`output, warnings = ...`: the target itself is no call)
 
     skip: tuple[int, int] = (-1, -1)
     head_line = -1
     if b is not None and b["kind"] == "def":
         if b.get("name_span"):
-            skip = b["name_span"]
+            skip = (b["pos"], b["name_span"][1])  # `def site.process`: neither name is a call
         head_line = b["a"]
     if b is not None and b["kind"] == "test":
         head_line = b["a"]
@@ -775,6 +804,10 @@ def _collect(f: Func, b, code: str, starts: list[int], idx: list[int], lines: li
         if not ln.strip():
             continue
         lead = ln.lstrip()
+        am_ = re.match(r"alias\s+:?([\w?!=]+)\s+:?([\w?!=]+)\s*$", lead)
+        if am_:  # `alias stop! quit!`: two method names, not calls
+            f.refs.update(am_.groups())
+            continue
         for m in _WORD.finditer(ln):
             name = m.group(1)
             p = a + m.start(1)
@@ -823,8 +856,11 @@ def _collect(f: Func, b, code: str, starts: list[int], idx: list[int], lines: li
         for m in _SYMBOL.finditer(ln):
             f.refs.add(m.group(1).lstrip("@"))
         for cb in _CONST_BLOCK.finditer(ln):
-            for nm in re.findall(r"[a-z_]\w*", cb.group(2)):
-                f.bound.setdefault(nm, "lib:" + cb.group(1).lstrip(":"))  # link() keeps it if the constant is a library's
+            const, args = cb.group(1).lstrip(":"), cb.group(2) or cb.group(3) or ""
+            if const.split("::")[0] not in _STDLIB_YIELDS and re.search(r"(?<![:\w@$])[a-z_]\w*", args):
+                continue  # it was handed a value of ours: what it yields may be ours
+            for nm in re.findall(r"[a-z_]\w*", cb.group(4)):
+                f.bound.setdefault(nm, "lib:" + const)  # link() keeps it if the constant is a library's
         rb_ = _RESCUE_BIND.search(ln)
         if rb_:
             classes = re.split(r"\s*,\s*", rb_.group(1)) if rb_.group(1) else ["StandardError"]
@@ -925,9 +961,9 @@ def _declared(f: Func, b, code: str, raw: list[str], is_local, ends: dict) -> No
         st = code.find(last, s)
         if last.startswith("return "):
             st += 7
-        am = re.match(r"@{0,2}\w+\s*(?:\|\|)?=(?![=~>])\s*", last)
+        am = re.match(r"@{0,2}\w+\s*(?:\|\|)?=(?![=~>])\s*|[@\w.]+\[[^\]\n]*\]\s*\|\|=\s*", last)
         if am:
-            st += am.end()  # `@x ||= Foo.new(...)`: the value assigned
+            st += am.end()  # `@x ||= Foo.new(...)`, `cache[k] ||= build(k)`: the value assigned
         ch = expression(code, st, is_local)
     if not ch:
         return
@@ -974,6 +1010,8 @@ def _class_fields(mods: dict, funcs) -> None:
             seen.setdefault(m.name, {}).setdefault(k, set()).add(v)
     for mn, fields in seen.items():
         for k, vs in fields.items():
+            if len(vs) > 1:
+                vs = vs - {"expr:NilClass"}  # `@theme = nil` here, `@theme = Theme.new(...)` there: a Theme
             if "?" not in vs:
                 mods[mn].bound.setdefault(k, next(iter(vs)) if len(vs) == 1 else "alt:" + "\x1e".join(sorted(vs)))
 
@@ -1031,6 +1069,14 @@ def link(project) -> None:
         for mn in names:
             m = project.modules[mn]
             m.kind = "class" if mn == c else "ext"
+    # a library class the project only adds to (`class Rack::Builder`,
+    # `class Minitest::Test`: every declaration in that reopening form, none
+    # with a superclass or an `initialize`): still a supertype test classes
+    # inherit the added methods from, but a value of that type is the
+    # library's (sinatra's `builder.use` is Rack's `use`, not a test subclass's)
+    lib_reopened = {full for full, names in idx.items()
+                    if all("C\0" in project.modules[mn].bases and not any(b.startswith("S") for b in project.modules[mn].bases)
+                           and f"{mn}.initialize" not in project.funcs for mn in names)}
     for m in rb:
         if m.owner:
             r.bases(m)
@@ -1050,16 +1096,21 @@ def link(project) -> None:
             # a hundred files made every lookup walk a hundred modules)
             r.full_of[mn] = full
             project.modules[mn].decls = []
+    for full in lib_reopened:
+        for mn in idx[full]:
+            r.full_of[mn] = full
+            project.modules[mn].decls = []
     # a bare call is `self.x`: the class, its ancestors, and (a mixin calling
     # its includer's method, a base class its subclasses') the classes below
     # it; a top-level `def` (a method of every object) keeps the file's scope
-    top_defs = {f.name for m in rb if not m.owner for f in m.funcs if f.kind != "top"}
+    top_defs = _top_defs_seen(project, rb)
     for m in rb:
         if not m.owner:
             continue
+        seen = top_defs.get(m.owner, set())
         for f in m.funcs:
             for c in f.calls:
-                if not c.chain and not c.qual and c.name not in top_defs:
+                if not c.chain and not c.qual and c.name not in seen:
                     c.chain, c.qual = ("self",), "self"
     for m in rb:
         nest = r.nesting(m)
@@ -1079,7 +1130,7 @@ def link(project) -> None:
             for c in f.calls:
                 if not c.chain:
                     continue
-                c.chain = tuple(r.const(nest, s) if s[:1].isupper() else s for s in c.chain)
+                c.chain = tuple(r.index_new([r.const(nest, s) if s[:1].isupper() else s for s in c.chain]))
                 if c.chain[-1][:1].isupper():
                     c.qual = c.chain[-1].replace("::", ".")
                     if c.name == "new" and len(c.chain) == 1:
@@ -1112,19 +1163,25 @@ def _library_receivers(project, rb: list, t) -> None:
     value, so the call on it is the library's too: qualifier `Object`."""
     from .core import _in_scope
     reach: dict[tuple[str, str], bool] = {}
+
+    def library(m, fm, f, head: str, depth: int = 0) -> bool:
+        if head in f.bound and f.bound[head].startswith("expr:") and depth < 3:
+            # `error = assert_raises(Foo) do ... end`: a local holding one
+            return library(m, fm, f, f.bound[head][5:].split("\x1f")[0], depth + 1)
+        if not head.endswith("()") or not (head[:1].islower() or head[:1] == "_"):
+            return False
+        name = head[:-2]
+        key = (m.name, name)
+        if key not in reach:
+            hits = t.method([m.name], name)[0] if m.owner else []
+            reach[key] = bool(hits or _in_scope(project, fm.name, name))
+        return not reach[key]
+
     for m in rb:
         fm = project.modules.get(m.owner, m) if m.owner else m
         for f in m.funcs:
             for c in f.calls:
-                head = c.chain[0] if c.chain else ""
-                if not head.endswith("()") or not (head[:1].islower() or head[:1] == "_") or c.qual == "Object":
-                    continue
-                name = head[:-2]
-                key = (m.name, name)
-                if key not in reach:
-                    hits = t.method([m.name], name)[0] if m.owner else []
-                    reach[key] = bool(hits or _in_scope(project, fm.name, name))
-                if not reach[key]:
+                if c.chain and c.qual != "Object" and library(m, fm, f, c.chain[0]):
                     c.qual = "Object"
 
 
@@ -1138,6 +1195,25 @@ def _core_on_unknown(project, rb: list, t) -> None:
             for c in f.calls:
                 if c.chain and c.name in _CORE_METHODS and c.qual != "Object" and t.chain(m, f, c.chain) is None:
                     c.qual = "Object"
+
+
+def _top_defs_seen(project, rb: list) -> dict[str, set[str]]:
+    """File -> the top-level `def`s it can call: its own and those of the
+    files it requires (and they require). A benchmark script's `def site`
+    is not every class's `site`."""
+    own = {m.name: {f.name for f in m.funcs if f.kind != "top"} for m in rb if not m.owner}
+    out = {}
+    for mn in own:
+        seen, todo, names = set(), [mn], set()
+        while todo:
+            cur = todo.pop()
+            if cur in seen or cur not in own:
+                continue
+            seen.add(cur)
+            names |= own[cur]
+            todo += project.modules[cur].reexports
+        out[mn] = names
+    return out
 
 
 def _link_requires(project, rb: list) -> None:
@@ -1258,7 +1334,7 @@ class _Resolver:
         that defines no `self.[]`: Ruby's `[]` builds one, like `new`."""
         out = list(segs)
         for k in range(1, len(out)):
-            if out[k] == "[]()" and out[k - 1] in self.canon and self.collection_class(out[k - 1]):
+            if out[k] in ("[]", "[]()") and out[k - 1] in self.canon and self.collection_class(out[k - 1]):
                 out[k] = "new()"
         return out
 
@@ -1374,7 +1450,7 @@ def _ctor_params(project, rb: list, r: "_Resolver") -> None:
         raw[gid] = {k: v[5:].split("\x1f") for k, v in p.modules[g.module].bound.items()
                     if v.startswith("expr:") and v[5:].split("\x1f")[0] in params}
     texts: dict[str, tuple[str, list[int]]] = {}
-    for _ in range(4):
+    for _ in range(8):
         t = Types(project)
         changed = False
         for gid, per_cls in by_init.items():
@@ -1391,8 +1467,12 @@ def _ctor_params(project, rb: list, r: "_Resolver") -> None:
                         changed = True
                     changed = _type_fields(p.modules[g.module], raw[gid], name, ty) or changed
                     continue
+                # each class built through this initialize types its own fields;
+                # the defining class only when every other one has a type of its own
+                # (a subclass with none would inherit the defining class's)
+                own_ok = all(ty for cls, ty in tys.items() if cls != g.module)
                 for cls, ty in tys.items():
-                    if ty and cls != g.module:
+                    if ty and (cls != g.module or own_ok):
                         changed = _type_fields(p.modules[cls], raw[gid], name, ty) or changed
         changed = _method_params(p, rb, r, t, texts) or changed
         changed = _settle_alternatives(p, rb, Types(project), r) or changed
@@ -1506,7 +1586,7 @@ def _full_of(r, v) -> str:
     if v is None:
         return ""
     if v[0] == "ext":
-        return v[1][0] if v[1] else ""
+        return "Object"  # some library's value (`Rack::Builder.new` loses its name): calls on it are the library's
     if v[0] == "inst" and v[2]:
         fulls = {r.full(mn) for mn in v[1]} - {""}
         return next(iter(fulls)) if len(fulls) == 1 else ""
