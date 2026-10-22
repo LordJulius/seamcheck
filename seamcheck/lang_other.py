@@ -209,7 +209,7 @@ def _typed(tk: str, text: str) -> list[tuple[str, str]]:
 
 
 # Swift `let x: Foo`, `(with client: Client)`, `let x = Foo(`; PHP `(Foo $x`, `$x = new Foo(`
-_SW_TYPED = re.compile(r"(?:\b(?:let|var)\s+|[(,]\s*(?:[A-Za-z_]\w*\s+)?)([a-z_]\w*)\s*:\s*(?:inout\s+|@escaping\s+|@\w+\s+)*"
+_SW_TYPED = re.compile(r"(?:\b(?:let|var)\s+|[(,]\s*(?:[A-Za-z_]\w*\s+)?)([a-z_]\w*)\s*:\s*(?:inout\s+|@escaping\s+|@\w+\s+)*\(?\s*(?:any\s+|some\s+)?"
                        r"([A-Z][\w.]*(?:<[^<>=\n]*>)?[?!]?)(?![\w.(])")
 _SW_NEW = re.compile(r"\b(?:let|var)\s+([a-z_]\w*)\s*=\s*(?:try[?!]?\s+|await\s+)*([A-Z]\w*)\s*\(")
 _PHP_TYPED = re.compile(r"(?:[(,]\s*|\b(?:public|private|protected|readonly)\s+)(?:(?:public|private|protected|readonly)\s+)*"
@@ -1013,7 +1013,7 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
 # PHP `private ?Type $name;` (and promoted constructor parameters)
 _RS_FIELD = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z_]\w*)\s*:\s*([^,<]+?(?:<.*>)?[^,<]*?),?\s*$")
 _SW_FIELD = re.compile(r"^\s*(?:(?:private|public|internal|fileprivate|open|static|class|lazy|weak|unowned|final|override|nonisolated)"
-                       r"(?:\([^)]*\))?\s+)*(?:let|var)\s+([A-Za-z_]\w*)\s*(?::\s*(\[[^\]=\n]*\][?!]?|[A-Z][\w.]*)|=\s*([A-Z]\w*)\s*\()")
+                       r"(?:\([^)]*\))?\s+)*(?:let|var)\s+([A-Za-z_]\w*)\s*(?::\s*\(?\s*(?:any\s+|some\s+)?(\[[^\]=\n]*\][?!]?|[A-Z][\w.]*)|=\s*([A-Z]\w*)\s*\()")
 _PHP_FIELD = re.compile(r"(?:^\s*|[(,]\s*)(?:(?:public|private|protected|static|readonly|var)\s+)+\??([\\\w]+)\s+(\$\w+)")
 
 
@@ -1442,10 +1442,11 @@ def _bind_closure(f: Func, fam: str, body: str, brace: int, name: str, chain: tu
 def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     from . import chains
     chains.CALL_TARGS = rel.endswith(".cs")
+    chains.TRAILING_CLOSURES = rel.endswith((".swift", ".kt", ".kts"))
     try:
         return _parse_brace(path, rel, text, res_of)
     finally:
-        chains.CALL_TARGS = False
+        chains.CALL_TARGS = chains.TRAILING_CLOSURES = False
 
 
 def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
