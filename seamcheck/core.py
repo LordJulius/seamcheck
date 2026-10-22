@@ -1727,7 +1727,8 @@ def _build_edges(project: Project) -> None:
                 # (`_windows.go` / `_unix.go`): the call reaches whichever is built
                 variants = f.file.endswith(".go") and len({t.module for t in hits}) == len(hits) and \
                     len({(project.modules[t.module].owner or t.module) and project.modules.get(project.modules[t.module].owner or t.module, project.modules[t.module]).package for t in hits}) == 1
-                targets = [(t, len(hits) == 1 or variants) for t in hits]
+                hits = list({t.id: t for t in hits}.values())  # (overloads share an id: one function)
+                targets = [(t, len(hits) == 1 or variants or types.one_type(hits)) for t in hits]
                 if not targets and c.name in mod.external:
                     _nothing(project, f, c)
                     continue
