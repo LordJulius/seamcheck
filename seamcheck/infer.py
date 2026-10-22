@@ -1081,6 +1081,8 @@ class Types:
         raw = self.p.modules[g.module].raw
         head = " ".join(raw[max(0, g.start - 3):g.start])
         if re.search(r"\bget\s+" + re.escape(name) + r"\s*\(", head) or "@property" in head or \
+                g.file.endswith(_JS_EXTS) and any(re.search(r"^\s*(?:(?:public|private|protected|static|override)\s+)*get\s+"
+                                                            + re.escape(name) + r"\s*\(", ln) for ln in raw) or \
                 "@cached_property" in head or "@functools.cached_property" in head:
             return self.returns(g, mods, depth + 1)
         return None

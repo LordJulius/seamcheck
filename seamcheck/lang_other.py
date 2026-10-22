@@ -1942,6 +1942,12 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             f.returns = _returns(tk, code[line_start_pos:npos], sig, name, cls_name)
             rtext_ = _return_text(tk, code[line_start_pos:npos], sig)
             f.relem = elem_type(rtext_)
+            if fam == "js" and not f.returns and len(ss) > 1:  # `get res(): Response` beside `set res(r)`: the getter's
+                for _sa, _sb, np_, _bp in ss:
+                    gm_ = re.match(rf"\s*\(\s*\)\s*:\s*([^{{;=]+?)\s*\{{", code[np_ + len(name):np_ + len(name) + 200])
+                    if gm_ and re.search(r"\bget\s+$", code[max(0, np_ - 12):np_]):
+                        f.returns = type_name(gm_.group(1))
+                        break
             crm = re.match(r"^ReturnType\s*<\s*([A-Z][\w$]*)\s*>$", rtext_.strip()) if fam == "js" else None
             if crm:  # `): ReturnType<BodyRespond> =>`: what calling a BodyRespond gives
                 f.returns = "callret:" + crm.group(1)

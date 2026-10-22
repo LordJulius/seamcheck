@@ -125,9 +125,18 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                     j = _skip_back_ws(code, g)
             s = _ident_back(code, j)
             if s == j:  # `(expr).x`: a parenthesized expression
-                cast = re.search(r"\bas[!?]?\s+([A-Z][\w.]*)\s*[?]?\s*$", code[k + 1:i - 1]) or \
-                    re.match(r"\s*\(\s*([A-Z][\w.]*)(?:<[^()]*>)?\s*\)\s*[\w$]", code[k + 1:i - 1])  # Java / C# `((Foo) x).y()`
-                segs.append(f"<as:{cast.group(1)}>" if cast else "(...)")  # `($Timer as Timer).start()`: a Timer
+                inner = code[k + 1:i - 1]
+                cast = re.search(r"\bas[!?]?\s+([A-Z][\w.]*)\s*[?]?\s*$", inner) or \
+                    re.match(r"\s*\(\s*([A-Z][\w.]*)(?:<[^()]*>)?\s*\)\s*[\w$]", inner)  # Java / C# `((Foo) x).y()`
+                aw = re.match(r"^\s*(?:await|try[?!]?)\s+([A-Za-z_$][\w$]*)\s*$", inner)
+                if cast:
+                    segs.append(f"<as:{cast.group(1)}>")  # `($Timer as Timer).start()`: a Timer
+                elif aw:
+                    segs.append(aw.group(1))  # `(await res).toString()`: what res holds
+                elif re.search(r"[-+*/%|^~]|<<|>>", inner) and not re.search(r"[A-Za-z_$][\w$]*\s*\(|\?|=|\b(?:as|new|await)\b|['\"`]", inner):
+                    segs.append("<literal>")  # `((a << 8) | b).toString(16)`: arithmetic gives a number
+                else:
+                    segs.append("(...)")
                 i = s
                 break
             name = code[s:j]
