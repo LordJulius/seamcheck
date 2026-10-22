@@ -46,7 +46,7 @@ def _ident_back(code: str, i: int) -> int:
     return k
 
 
-def receiver(code: str, pos: int, max_segs: int = 8) -> tuple[str, ...]:
+def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
     """The chain a call at `pos` (its name's first character) is made on, or
     () for a bare call. Segments: `name`, `name()`, `[]`, `?`, `!!`; `new X()`
     is "new X()"; a parenthesized expression is "(...)". Reads back across
@@ -133,7 +133,7 @@ def receiver(code: str, pos: int, max_segs: int = 8) -> tuple[str, ...]:
     return tuple(segs)
 
 
-def expression(code: str, pos: int, max_segs: int = 8) -> tuple[str, ...]:
+def expression(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
     """The chain an expression starting at `pos` builds (the right side of
     `x = <expr>`): `repo.find(id).first()` -> ("repo", "find()", "first()");
     `new Foo(a)` -> ("new Foo()",); `await svc.load()` -> ("svc", "load()").

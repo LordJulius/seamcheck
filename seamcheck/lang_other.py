@@ -727,15 +727,25 @@ _FIELD_ASSIGN = {
 }
 
 
-def _assignments(tk: str, text: str) -> list[tuple[str, tuple]]:
+def _assignments(tk: str, text: str) -> list[tuple[str, str]]:
+    """(local, "expr:<chain>") for `x = <chain>`, and (local, "call:<chain>")
+    for a closure `x = |a| <chain>` / `x = { a -> <chain> }`: calling it gives that."""
     pat = _ASSIGN.get(tk)
     if not pat:
         return []
     out = []
     for m in pat.finditer(text):
+        rest = text[m.end():m.end() + 300].lstrip()
+        cm = re.match(r"(?:move\s*)?\|[^|]*\|\s*", rest) if tk == "rust" else \
+            re.match(r"\{\s*(?:[\w, ]+->)?\s*", rest) if tk == "kotlin" else None
+        if cm and not rest[cm.end():].startswith("{"):
+            ch = expression(rest, cm.end())
+            if ch:
+                out.append((m.group(1), "call:" + "\x1f".join(ch)))
+            continue
         ch = expression(text, m.end())
         if ch:
-            out.append((m.group(1), ch))
+            out.append((m.group(1), "expr:" + "\x1f".join(ch)))
     return out
 
 
@@ -1196,8 +1206,8 @@ def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         for sa, sb, _, _ in ss:
             name_col = max(0, lines[sa].find(name))  # the return type before it is no call (`Task<int> Run(`)
             body = "\n".join(lines[sa:sb + 1])
-            for nm_, ch in _assignments(tk, body):
-                f.bound.setdefault(nm_, "expr:" + "\x1f".join(ch))
+            for nm_, held in _assignments(tk, body):
+                f.bound.setdefault(nm_, held)
             off = 0
             for i in range(sa, sb + 1):
                 ln = lines[i]
