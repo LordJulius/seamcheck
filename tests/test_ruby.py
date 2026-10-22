@@ -534,6 +534,125 @@ class RubyResolutionTest(unittest.TestCase):
             self.assertEqual(edges(p, "test have an excerpt"), {"lib/post.Post.excerpt": True})
             self.assertEqual(edges(p, "test also have one"), {"lib/post.Page.excerpt": True})
 
+    def test_a_library_class_the_project_only_adds_to_stays_the_librarys(self):
+        # sinatra reopens `class Rack::Builder` (lib and test helper) and a test
+        # subclasses it: `builder.use` in lib is Rack's, not the test's `use`
+        d, p = load({
+            "lib/main.rb": "class Rack::Builder\n  include Delegator\nend\n",
+            "test/test_helper.rb": "class Rack::Builder\n  def include?(m); end\nend\n",
+            "test/settings_test.rb": """\
+                class SettingsTest < Minitest::Test
+                  class MiddlewareTracker < Rack::Builder
+                    def use(m); end
+                    def check
+                      include?(1)
+                    end
+                  end
+                end
+                """,
+            "lib/base.rb": """\
+                class Base
+                  def build
+                    builder = Rack::Builder.new
+                    setup builder
+                  end
+                  def setup(builder)
+                    builder.use 1
+                  end
+                end
+                """,
+        })
+        with d:
+            self.assertEqual(edges(p, "Base.setup"), {})
+            # the added method still reaches the subclass
+            self.assertEqual(edges(p, "MiddlewareTracker.check"), {"test/test_helper.Rack::Builder.include?": True})
+
+    def test_parameters_typed_by_every_caller_and_includers_that_agree(self):
+        # jekyll's Doctor: `healthy?(site)` with a Site; Convertible's `site`
+        # is Page#site and Layout#site, both a Site; `Generator = Class.new(Plugin)`
+        d, p = load({
+            "lib/site.rb": "class Site\n  def config; end\nend\n",
+            "lib/doctor.rb": """\
+                class Doctor
+                  def process
+                    site = Site.new
+                    healthy?(site)
+                  end
+                  def healthy?(site)
+                    site.config
+                  end
+                end
+                """,
+            "lib/convertible.rb": """\
+                module Convertible
+                  def read
+                    site.config
+                  end
+                end
+                """,
+            "lib/page.rb": """\
+                class Page
+                  include Convertible
+                  attr_reader :site
+                  def initialize(site)
+                    @site = site
+                  end
+                end
+                class Layout
+                  include Convertible
+                  attr_reader :site
+                  def initialize(site)
+                    @site = site
+                  end
+                end
+                class Build
+                  def go
+                    s = Site.new
+                    Page.new(s)
+                    Layout.new(s)
+                  end
+                end
+                """,
+            "lib/plugin.rb": """\
+                class Plugin
+                  def self.priority(p = nil); end
+                end
+                Generator = Class.new(Plugin)
+                """,
+            "lib/pagination.rb": "class Pagination < Generator\n  priority :high\nend\n",
+        })
+        with d:
+            self.assertEqual(edges(p, "Doctor.healthy?"), {"lib/site.Site.config": True})
+            got = edges(p, "Convertible.read")
+            self.assertEqual(got["lib/site.Site.config"], True)
+            self.assertEqual(edges(p, "Pagination.<top>"), {"lib/plugin.Plugin.priority": True})
+
+    def test_what_a_ruby_library_yields_and_what_isnt_a_call(self):
+        d, p = load({
+            "lib/doc.rb": "class Doc\n  def write; end\n  def stop!; end\n  def quit!; end\nend\n",
+            "lib/use.rb": """\
+                class Use
+                  def go(pages)
+                    File.open("x", "w") do |f|
+                      f.write
+                    end
+                    Parallel.map(pages) { |page| page.write }
+                    output, warnings = convert
+                    output.strip
+                  rescue ArgumentError => e
+                    e.message
+                  end
+                  alias stop! quit!
+                  def convert; end
+                end
+                """,
+        })
+        with d:
+            got = edges(p, "Use.go")
+            self.assertNotIn("lib/doc.Doc.quit!", got)  # an alias names methods; it calls none
+            # `f` is Ruby's File; `page` may be ours (Parallel was handed our pages): a guess
+            self.assertEqual(got, {"lib/use.Use.convert": True, "lib/doc.Doc.write": False})
+
 
 if __name__ == "__main__":
     unittest.main()
