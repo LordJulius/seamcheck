@@ -494,6 +494,8 @@ class Types:
         fm = self._file_mod(mod)
         if seg in ("this", "self", "$this", "Self", "static"):
             own = self_mods or self.own_class(mod, f)
+            if not own and f is not None and f.bound.get(seg, "").startswith("mod:"):
+                return self.held(mod, f, f.bound[seg], depth + 1)  # a Python closure's captured `self`
             if not own:
                 return None
             return ("static" if seg in ("Self", "static") else "inst", tuple(own), True)
@@ -722,6 +724,9 @@ class Types:
                 held = m.bound.get(seg)
                 if held:
                     return self.held(m, None, held, depth + 1, self_mods=[mn])
+                vm = self._var_module(mn, seg) if not m.owner else None
+                if vm is not None:  # `flask.g`: the package re-exports globals.g
+                    return self.held(vm[0], None, vm[0].bound[vm[1]], depth + 1)
             return None
         got = self.field(list(mods), seg, depth)
         if got is None:
