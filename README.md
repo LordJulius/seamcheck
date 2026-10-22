@@ -15,8 +15,10 @@ the project writes down about how its parts fit together.
   GitHub annotations; exit code 1 on errors; a pre-commit gate; queries (`callers`, `impact`, `refs`) that replace grep
   loops and say how sure they are; and an MCP server that keeps the graph loaded.
 - **Many languages, one graph.** Elixir, Kotlin, Java, TypeScript/JavaScript
-  (JSX), C++, QML, Python, GDScript, Rust, Go, C# and Ruby. Rules work on any
-  text file.
+  (JSX), C++, QML, Python, GDScript, Rust, Go, C#, Swift, Ruby and PHP. Rules
+  work on any text file.
+- **Says how sure it is.** On 35 open-source repos in 15 languages, 90% or
+  more of the calls into project code are exact on 34 (see "How exact it is").
 - **Every check came from a real bug.** Each rule and lint was written after a
   bug it would have caught, and its test reproduces that bug (cut down) and
   its fix.
@@ -173,13 +175,30 @@ An edge is **exact** when the target is certain:
 - a helper the calling function defines itself (`const nudge = () => ...`
   inside a component);
 - a Kotlin extension the caller's own file declares (it shadows other files'
-  of the same name), and overloads within the one module in scope;
-- a method name that exists in exactly one module the file can see;
-- a `[project.groups]` binding (below).
+  of the same name);
+- a `[project.groups]` binding (below);
+- a receiver typed step by step (`self.store.get().save()`): a field's or
+  property's declared type, what a method returns (`-> Foo`, `: Foo`, its own
+  last `return x`, a builder step returning `this`), a getter (`get x()`,
+  `@property`), a cast (`(x as Foo).y()`), a closure's body, an overload set
+  that all returns one type; and the parameter a framework hands a function,
+  as its pack says (Express's `(req, res)`, Hono's `c`; "Framework packs");
+- Swift's implicit members (`.status(404)`, `case .value(let v)`), typed by
+  their context: the parameter they're passed to (overloads settle by which
+  parameter type has the member), a `return`, `self =`, a typed `let` or an
+  array element; a pattern calls nothing;
+- GDScript's `$Node`: the node of that name in the `.tscn` scenes whose root
+  runs the script (a scripted or instanced node is its script's class);
+- a C++ class QML knows by another name (`QML_NAMED_ELEMENT(Phone)` +
+  `QML_FOREIGN(PhoneImpl)`), and a root object's property seen from the
+  components it instantiates (QML's dynamic scope).
 
 An edge is **fuzzy** (a name guess) when the call is on a receiver of unknown
 type: every function with that name is a candidate, unless more than 8 share
-it (then it's dropped as noise). Guesses are limited to what could be true: a
+it (then it's dropped as noise). That holds even when only one module in scope
+has a function of that name: sampled across hono, gson, Polly, okhttp and
+excalidraw, those edges were often wrong (`res.json()` on a fetch Response is
+not the project's `Context.json`), so a unique name alone is never "exact". Guesses are limited to what could be true: a
 guess never crosses languages (Kotlin never calls TypeScript; QML may call its
 JS libraries and C++), and product code is never guessed into a test file.
 
@@ -194,6 +213,13 @@ Some calls resolve to **nothing**, on purpose:
   `fmt.Println()`, `_.map()` after `import _ from "lodash"`);
 - a call on a variable typed outside the project (`s: String; s.split()`),
   unless a project Kotlin extension is declared on that type;
+- a value the language or runtime owns: a literal, `x: Foo[]` / `x = []`,
+  Python's builtins (`dict`, `vars(x)`, `**kwargs`) and a class whose base
+  is one, JS globals (`console`, `document`, `vi`) and DOM properties
+  (`el.classList`), Rust's primitives and the crates Cargo.toml depends on,
+  a method missing from a type the project only extends (a Swift `extension
+  Data`, a `global.d.ts` addition to `CanvasRenderingContext2D`), a TS type
+  an ES module neither declares nor imports (`Response` is the runtime's);
 - in Rust, `.unwrap()`, `.len()`, `.push()` and the other everyday
   Option / Result / Vec / String / iterator methods on a receiver of unknown
   type: they are the standard library's, not a project function of that name;
@@ -220,7 +246,9 @@ and `Test*` class methods in test files, Go `TestX` / `BenchmarkX` /
 `ExampleX` / `FuzzX` in `_test.go`, Rust `#[test]` (and `#[tokio::test]`),
 xUnit / NUnit / MSTest `[Fact]` / `[Test]` / `[TestMethod]`, and Ruby's RSpec
 `it "..." do` / `specify`, Minitest `def test_x` and `test "x" do`, and
-Shoulda `should "x" do` (named `test <label>`, in the class around them).
+Shoulda `should "x" do` (named `test <label>`, in the class around them),
+XCTest / PHPUnit `testX` methods and swift-testing `@Test` / PHPUnit
+`#[Test]`.
 So `callees 'test *'` says what a test exercises. ExUnit `setup` and
 `describe`, and RSpec / Shoulda `describe`, `context`, `setup` and `before`,
 are fixtures and grouping, not tests. Ruby test files are `*_test.rb`,
@@ -233,8 +261,48 @@ TypeScript class field holding an arrow function (`private onDown = (e) =>
 `if __name__ == "__main__":`) belongs to the file's `<top>`; C++ out-of-line methods, `->` calls and `25'000` digit
 separators; QML functions, `onX:` handlers and component instances (a use of
 `X.qml`); JSX `<Card />` is a call to `Card`; an Elixir sigil (`~w(a b)`) is
-not a call. A file an adapter crashes on is a `config` error finding, never a
-silently empty file.
+not a call. Swift: a SwiftPM target (`Sources/<Target>/**`) is one scope and
+`import X` brings target X in; extensions join their type (across targets),
+protocols are interfaces, `init` is what `Foo(...)` runs. PHP: a file's
+`namespace` is its package, `use A\B\C [as D]` (and `use A\{B, C}`) imports,
+typed and promoted properties and `$this->x = $param` type fields, a trait's
+methods are its users', `new Foo` runs `__construct`; `#` comments,
+heredocs and `?>` HTML are blanked. A file an adapter crashes on is a
+`config` error finding, never a silently empty file.
+
+### How exact it is
+
+`bench/bench.py REPOS_DIR` measures it on shallow clones of open-source repos:
+per language and repo, the share of calls into project code that are exact
+(`stats`' "project calls exact"), and "named-nothing", the calls that reached
+nothing though a project function has that name (a resolver that turns
+guesses into nothing raises the first number and shows in the second). Exact
+edges are also checked by hand: random samples per language, each traced to
+the code.
+
+| language | repo: project calls exact (static, October 2026) |
+|---|---|
+| Python | flask 90.5%, httpx 92.6%, requests 91.6% |
+| Go | cobra 91.2%, fzf 94.2% |
+| Rust | ripgrep 91.3%, bat 91.4% |
+| TypeScript | excalidraw 90.4%, hono 90.4%, plausible 96.8% |
+| JavaScript | express 92.1%, hexpm 97.8%, plausible 92.0% |
+| Java | gson 93.3%, jsoup 92.8% |
+| Kotlin | nowinandroid 93.8%, okhttp 91.9% |
+| C# | Polly 90.8%, Newtonsoft.Json 91.9% |
+| Elixir | plausible 99.9%, hexpm 99.4%, phoenix 99.9% |
+| GDScript | godot-demo-projects 90.6%, tps-demo 92.9% |
+| C++ | flameshot 95.1%, kdeconnect 91.0% |
+| QML | neochat 94.5%, cool-retro-term 96.9%, kdeconnect **79.4%** |
+| Swift | Alamofire 90.4%, swift-argument-parser 91.4% |
+| Ruby | sinatra 92.6%, jekyll 92.6% |
+| PHP | Slim 98.0%, guzzle 93.3% |
+
+kdeconnect's QML pages take their plugin interface as a `property QtObject`
+that a factory fills in when the page is pushed, a different type per page:
+no static reading can type it, and seamcheck leaves those calls as guesses
+rather than pick one. For TypeScript and Python, precise mode (below) goes
+further: hono 93% / 98% (.ts / .tsx), excalidraw 95% / 96%.
 
 ### The Ruby adapter
 
@@ -383,6 +451,11 @@ in this order:
 up); `[[rule]]`, `[[bridge]]`, `[[invariant]]` and `[[contract]]` lists
 concatenate. An id defined twice is an error, and findings name the file a
 rule came from. `[project] packs` adds seamcheck's framework rules (below).
+
+Not read by default: dependency and build folders (`node_modules`, `deps`,
+`_build`, `target`, `dist`, `build`, `.venv`...) and third-party code kept in
+the tree (`vendor/`, `third_party/`, `*.min.js`). Naming one in `include`
+(`include = ["src/**", "vendor/mylib/**"]`) has it read.
 
 Suppress one line: `# seamcheck: allow rule-id` (or `// seamcheck: allow
 rule-id`) on the line or the line above. Every rule takes `severity`
@@ -629,13 +702,41 @@ severity = "error"
 | `react` | `inert-control`, `disabled-by-data` (JSX), `popup-clipped`; `effect-not-async` (an async effect's cleanup never runs), `state-not-assigned` (`this.state.x =` outside the constructor) |
 | `qml` | `unknown-type`, `singleton-import`, `js-shadows-type`, `anchors-in-positioner` |
 | `compose` | `init-order` (`kotlin-init-order`), `inert-control` (Kotlin); `no-global-scope` (warn: a `GlobalScope` coroutine outlives its screen) |
+| `express` | (type knowledge only, below) |
+| `hono` | (type knowledge only, below) |
+
+A pack also says what its framework hands the code, so the call graph can type
+it. That knowledge applies whenever package.json shows the framework, listed
+in `packs` or not (a pack's rules still need listing):
+
+```toml
+[[param]]                          # packs/express.toml
+id = "handler"
+names = ["req", "res"]             # a function or callback taking (req, res...), (err, req, res...)
+types = { req = "express:lib/request", res = "express:lib/response" }
+
+[[param]]                          # packs/hono.toml
+id = "route"
+names = ["c"]
+in_call = ["get", "post", "use", "on"]   # only a callback passed to app.get(...) and the like
+types = { c = "hono:src/context" }
+
+[[returns]]                        # packs/hono.toml: the RPC client is a runtime Proxy
+id = "rpc-client"
+functions = ["hc", "testClient"]
+```
+
+A type names a module of the framework's package: in an app, a call on `res`
+is the library's (no guess at the app's own `send()`); in that package's own
+repo, it is the module itself (`res.send()` in express's tests reaches
+`lib/response.js`).
 
 Pack rules are named `<pack>/<id>` (`seamcheck check --skip react/popup-clipped`
 leaves one out of a run). An unknown pack, or an override naming a rule its
 pack doesn't have, is a config error. `seamcheck init` lists the packs whose
 framework a manifest declares: `:phoenix` in a mix.exs, `react` in a
-package.json, Qt Quick in a CMakeLists.txt beside `.qml` files, Compose in a
-Gradle build. A pack holds only what is true everywhere; a project's taste
+package.json (`express`, `hono` likewise), Qt Quick in a CMakeLists.txt beside
+`.qml` files, Compose in a Gradle build. A pack holds only what is true everywhere; a project's taste
 stays in its own rules.
 
 ## One graph across languages: bridges and impact
