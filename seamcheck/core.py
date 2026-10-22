@@ -1231,8 +1231,9 @@ def _build_edges(project: Project) -> None:
                         ctor = [g for g in ctor if g.name == c.name] or [
                             g for m in tmods for n in ("constructor", "init", "__construct", "new")
                             if (g := project.funcs.get(f"{m}.{n}"))][:1]
+                        ctor = list({g.id: g for g in ctor}.values())
                         if ctor:
-                            targets = [(g, ex and len(ctor) == 1) for g in ctor]
+                            targets = [(g, ex and (len(ctor) == 1 or types.one_type(ctor))) for g in ctor]
                         else:
                             _nothing(project, f, c)  # a project type with no constructor of its own: no function runs
                             continue
