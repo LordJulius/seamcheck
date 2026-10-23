@@ -585,3 +585,17 @@ class GdHoldoutFixes(unittest.TestCase):
         got = {(d, e) for d, _l, e in p.edges.get("Algos.crop", [])}
         self.assertIn(("PixelCel.get_image", True), got)
         self.assertNotIn("AudioCel.get_image", {d for d, _ in got})
+
+
+JS5 = {
+    "test/helpers.js": "import http from 'http';\n\nexport function startServer(handler) {\n  return http.createServer(handler);\n}\n",
+    "lib/response.js": "export class Response {\n  end() {\n    return 1;\n  }\n}\n",
+    "test/s.test.js": "import { startServer } from './helpers.js';\n\nit('x', () => {\n  startServer((req, res) => {\n    res.end('ok');\n  });\n});\n",
+}
+
+
+class JsForwardedCallbackFixes(unittest.TestCase):
+    def test_a_callback_forwarded_to_a_library_gets_its_values(self):
+        p = load(JS5)
+        got = {d for es in p.edges.values() for d, _l, _e in es}
+        self.assertNotIn("lib/response.Response.end", got)
