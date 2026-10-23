@@ -167,7 +167,15 @@ class Project:
             return fh.read()
 
     def find(self, spec: str) -> list[Func]:
-        """'name' (glob ok), 'Module.name', or 'path/glob:funcglob'."""
+        """An id as `find` prints it, 'name' (glob ok), 'Module.name', 'path/glob:funcglob',
+        or 'path/file.ext:LINE' (the function holding that line)."""
+        if spec in self.funcs:  # (an id copied from another answer: `lib/sinatra/base.Sinatra::Helpers.logger`)
+            return [self.funcs[spec]]
+        lm = re.match(r"^(.+?\.\w+):(\d+)$", spec)
+        if lm and lm.group(1) in self.by_file:  # `src/requests/auth.py:150`
+            ln = int(lm.group(2))
+            held = [f for f in self.funcs.values() if f.file == lm.group(1) and f.start <= ln <= f.end and f.kind != "top"]
+            return sorted(held, key=lambda f: f.end - f.start)[:1]
         if ":" in spec:
             pg, _, fg = spec.partition(":")
             return [f for f in self.funcs.values() if glob_re(pg).match(f.file) and fnmatch.fnmatchcase(f.name, fg or "*")]

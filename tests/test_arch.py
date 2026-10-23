@@ -107,6 +107,11 @@ class Arch(unittest.TestCase):
         self.assertIn("src/a/one.ts", f.message)
         self.assertIn("src/b/two.ts", f.message)
 
+    def test_find_takes_the_id_it_prints_and_file_line(self):
+        p = core.load(self.dir.name, os.path.join(self.dir.name, "seamcheck.toml"))
+        self.assertEqual([f.id for f in p.find("src/db/store.save")], ["src/db/store.save"])
+        self.assertEqual([f.id for f in p.find("src/db/store.ts:4")], ["src/db/store.save"])
+
     def test_graph_renders_cycles(self):
         from seamcheck import arch
         p = core.load(self.dir.name, os.path.join(self.dir.name, "seamcheck.toml"))

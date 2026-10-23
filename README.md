@@ -46,6 +46,12 @@ uvx --from git+https://github.com/LordJulius/seamcheck seamcheck stats    # no i
 python3 seamcheck.pyz stats        # one file from a release (Python 3.11+, no dependencies)
 ```
 
+Measured on the 33 benchmark checkouts with no config and an empty cache:
+the release file's first answer (`find`, then `context` on a function) takes
+0.5-9.5 s cold (excalidraw, 62k calls: 9.5 s) and 0.2-1.1 s per question
+after that. Any id an answer prints, or `path/file.ext:LINE`, works as the
+next question's argument.
+
 `seamcheck.pyz` is attached to each release (`python3 tools/build_pyz.py`
 builds it from a checkout); on first run it unpacks itself into
 `~/.cache/seamcheck/` and starts as fast as an install after that. From a
