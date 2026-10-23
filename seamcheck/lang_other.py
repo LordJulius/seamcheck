@@ -17,7 +17,8 @@ _ID = r"[A-Za-z_$][\w$]*"
 # one TS type, as a function type's result reads: `void`, `Promise<T>`, `Foo[]`
 _TS_TYPE = r"(?:void|string|number|boolean|unknown|any|never|null|undefined|bigint|object|[A-Z][\w$.]*(?:<[^()\n]*>)?(?:\[\])?)"
 _JS = [
-    re.compile(rf"\bfunction\s*\*?\s*({_ID})\s*\("),
+    # (`function pointFrom<P extends A | B>(`: generics between the name and its parameters)
+    re.compile(rf"\bfunction\s*\*?\s*({_ID})\s*(?:<(?:[^<>()]|<(?:[^<>()]|<[^<>()]*>)*>)*>)?\s*\("),
     # `exports.foo = function (`, `app.use = function (`, `Foo.prototype.bar = async function (`:
     # an anonymous function stored as a property is called by that property's name
     re.compile(rf"^[ \t]*(?:{_ID}\.)+({_ID})[ \t]*=[ \t]*(?:async[ \t]+)?function[ \t]*\*?[ \t]*\(", re.M),
@@ -25,9 +26,10 @@ _JS = [
     re.compile(rf"^[ \t]*(?:{_ID}\.)+({_ID})[ \t]*=\s*(?:(?:{_ID}\.)+{_ID}[ \t]*=\s*)+(?:async[ \t]+)?function\b[^(\n]*\(", re.M),
     # `this.use = (arg, ...handlers) => {` in a constructor: a member of the class
     re.compile(rf"^[ \t]*this\.({_ID})[ \t]*=[ \t]*(?:async[ \t]+)?(?:\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=\n]+?)?=>|{_ID}[ \t]*=>)", re.M),
-    # (the annotation may be a function type: `const mergePath: (...p: string[]) => string = (`)
+    # (the annotation may be a function type: `const mergePath: (...p: string[]) => string = (`; parameters
+    # may nest three deep: `(...els: ((A | B)[] | C)[]) =>`)
     re.compile(rf"\b(?:const|let|var)\s+({_ID})\s*(?::(?:[^=;]|=>){{1,300}}?)?=\s*(?:async\s+)?"
-               rf"(?:function\b|\((?:[^()]|\([^()]*\))*\)\s*(?::\s*[^=]+)?=>|{_ID}\s*=>)"),
+               rf"(?:function\b|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)\s*(?::\s*[^=]+)?=>|{_ID}\s*=>)"),
     # object-literal members (`applyOp: (op) => {`): a zustand store, a handler table
     # (not a parameter's function type: `fn: (...args: T) => void,`)
     re.compile(rf"^[ \t]*({_ID})[ \t]*:[ \t]*(?:async[ \t]+)?(?:function\b|\([^()\n]*\)[ \t]*(?::[^=\n]+)?=>|{_ID}[ \t]*=>)"
@@ -41,7 +43,7 @@ _JS = [
     # component's handlers, none of which were functions
     re.compile(rf"^[ \t]*(?:(?:public|private|protected|static|readonly|override|declare|export|default|const|let|var)[ \t]+)*({_ID})[ \t]*[?!]?[ \t]*"
                rf"(?::[^=\n<]*(?:<[^;]{{0,800}}?>[^=\n]*)?)?=[ \t]*(?:async[ \t]+)?(?:<[^()]*?>[ \t]*)?"
-               rf"(?:\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=;]+?)?=>|{_ID}[ \t]*=>)", re.M),
+               rf"(?:\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)[ \t]*(?::[^=;]+?)?=>|{_ID}[ \t]*=>)", re.M),
     # a method's start only (`static createElement<T extends X>(\n  {a}: {b?: number;} = {},\n): R & {...} {`):
     # the body scan below matches the brackets, and without a body it is a call
     re.compile(rf"(?P<tsstart>)^[ \t]*(?:(?:public|private|protected|static|async|get|set|override|abstract)[ \t]+)*({_ID})[ \t]*"
@@ -714,6 +716,9 @@ def _js_reexports(mod: Module, rel: str, text: str, lines: list[str]) -> None:
                 src, _, local = _JS_REEXPORT_SKIP.sub("", part.strip()).partition(" as ")
                 if local.strip() and src.strip() and local.strip() != "default":
                     mod.imported.setdefault(local.strip(), (f"js:{d}\0./{os.path.basename(rel)}", src.strip()))
+                    # (what an importer of `local` gets, even when this file imports a `local` of its
+                    # own: test-utils' `import { render }` and `export { renderApp as render }`)
+                    mod.bound["\0export:" + local.strip()] = "export:" + src.strip()
     for m in _JS_REEXPORT.finditer(text):
         ln = text.count("\n", 0, m.start())
         if ln >= len(lines) or not lines[ln].strip().startswith("export"):

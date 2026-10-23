@@ -85,6 +85,40 @@ export function Input(props: { onChange: (value: number) => void }) {
   props.onChange(value);
 }
 """,
+    "src/point.ts": """export function pointFrom<P extends A | B>(x: number, y: number): P;
+export function pointFrom<P extends A | B>(
+  xOrCoords: number | { x: number; y: number },
+  y?: number,
+): P {
+  return [xOrCoords, y] as P;
+}
+""",
+    "src/test-utils.ts": """import { render } from "@testing-library/react";
+
+const renderApp = async (ui: any) => {
+  return render(ui);
+};
+
+export const assertSelected = (
+  ...elements: (
+    | (Element["id"] | Element)[]
+    | Element["id"]
+  )[]
+) => {
+  return elements;
+};
+
+export { renderApp as render };
+""",
+    "src/app.test.ts": """import { pointFrom } from "./point";
+import { assertSelected, render } from "./test-utils";
+
+export function check() {
+  render(null);
+  assertSelected([]);
+  pointFrom(1, 2);
+}
+""",
     "src/use.ts": """import { Scene } from "./scene";
 import type { ElementsMap } from "./types";
 
@@ -146,6 +180,12 @@ class TypeScript(unittest.TestCase):
 
     def test_a_parameter_function_type_is_no_function(self):
         self.assertNotIn("src/hooks.onChange", self.p.funcs)
+
+    def test_generic_function_nested_arrow_params_and_an_export_alias(self):
+        got = {(d, e) for d, _l, e in self.p.edges.get("src/app.test.check", [])}
+        self.assertIn(("src/point.pointFrom", True), got)
+        self.assertIn(("src/test-utils.assertSelected", True), got)
+        self.assertIn(("src/test-utils.renderApp", True), got)  # (`export { renderApp as render }` over its own import)
 
     def test_a_destructured_local_shadows_a_same_named_member(self):
         self.assertEqual({d for d, _l, _e in self.p.edges.get("src/hooks.Input", [])} & {"src/hooks.setValue"}, set())
