@@ -233,10 +233,10 @@ that name on library-typed values):
 |---|---|---|---|---|---|---|
 | requests | Python | 100% / 100% | 88.0% / 100% | 100% / 95.5% | 51.2% / 100% | 51.2% / 100% |
 | httpx | Python | 96.1% / 100% | 66.2% / 100% | 96.1% / 98.8% | 40.0% / 100% | 40.0% / 100% |
-| flask | Python | 100%‡ / 93.2% | 58.5% / 93.2% | 100% / 0.5% | 31.6% / 38.3% | 33.6% / 42.1% |
+| flask | Python | 100%§ / 93.2% | 58.5% / 93.2% | 100% / 0.5% | 31.6% / 38.3% | 33.6% / 42.1% |
 | click (held out) | Python | 100% / 100% | 84.4% / 100% | 100% / 71.1% | 76.0% / 100% | 76.0% / 100% |
-| koa (held out) | JavaScript | 100%‡ / 98.7% | 28.1% / 100% | 100% / 21.8% | 21.5% / 100% | 21.5% / 100% |
-| axios (held out) | JavaScript | 100%‡ / 95.3% | 37.2% / 100% | 100% / 66.6% | 35.9% / 93.8% | 35.1% / 100% |
+| koa (held out) | JavaScript | 100%§ / 98.7% | 28.1% / 100% | 100% / 21.8% | 21.5% / 100% | 21.5% / 100% |
+| axios (held out) | JavaScript | 100%§ / 95.3% | 37.2% / 100% | 100% / 66.6% | 35.9% / 93.8% | 35.1% / 100% |
 | ky (held out) | TypeScript | 100% / 100% | 71.4% / 100% | 100% / 80.0% | 57.1% / 80.0% | 62.5% / 100% |
 | zod (held out) | TypeScript | 100% / 99.2% | 78.8% / 99.9% | 99.2% / 83.1% | 46.2% / 89.3% | 46.2% / 89.3% |
 | javapoet (held out) | Java | 90.7% / 98.4% | 76.1% / 100% | – | 27.5% / 100% | 27.5% / 100% |
@@ -245,7 +245,7 @@ that name on library-typed values):
 | sidekiq (held out) | Ruby | 99.0% / 98.5% | 57.3% / 98.7% | – | 0.0% / 0.0% | 40.1% / 11.6% |
 | Dapper (held out) | C# | 89.9% / 51.3% | 62.9% / 100% | – | 54.8% / 99.2% | 45.1% / 100% |
 
-‡ flask, koa and axios are scored against CodeQL's callers plus every site
+§ flask, koa and axios are scored against CodeQL's callers plus every site
 seamcheck resolves there that CodeQL doesn't, each checked by hand and right
 (277, 60 and 29 of them; `bench/verified/`, how each was checked in its
 README; `vs_grep.py --verified`): flask's `app` is a pytest fixture CodeQL
