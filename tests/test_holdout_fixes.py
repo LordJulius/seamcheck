@@ -375,3 +375,25 @@ class CppHoldoutFixes2(unittest.TestCase):
         self.assertNotIn("include/lib/queue.queue.push_back", add)  # `items_` is a std::vector
         got = {(d, e) for d, _l, e in p.edges.get("bench/main.main", [])}
         self.assertIn(("include/lib/common-inl.drop", True), got)
+
+
+JS3 = {
+    "lib/isAxiosError.js": "export default function isAxiosError(p) {\n  return !!p;\n}\n",
+    "lib/Axios.js": "class Axios {\n  request() {\n    return 1;\n  }\n}\nexport default Axios;\n",
+    "lib/axios.js": "import Axios from './Axios.js';\nimport isAxiosError from './isAxiosError.js';\n\n"
+                    "function createInstance() {\n  const context = new Axios();\n  const instance = bind(context);\n  utils.extend(instance, Axios.prototype);\n"
+                    "  instance.create = function create() {\n    return createInstance();\n  };\n  return instance;\n}\n\n"
+                    "const axios = createInstance();\naxios.isAxiosError = isAxiosError;\nexport default axios;\n",
+    "lib/other.js": "export function isAxiosError() {\n  return 0;\n}\nexport function create() {\n  return 0;\n}\n",
+    "test/a.test.js": "import axios from '../lib/axios.js';\n\nit('x', () => {\n  const api = axios.create();\n"
+                      "  api.request();\n  axios.isAxiosError(1);\n  run((axios) => axios.go());\n});\n",
+}
+
+
+class JsPropertyFunctionFixes(unittest.TestCase):
+    def test_functions_assigned_as_properties(self):
+        p = load(JS3)
+        got = {(d, e) for k, es in p.edges.items() if k.startswith("test/a.test") for d, _l, e in es}
+        self.assertIn(("lib/axios.create", True), got)
+        self.assertIn(("lib/Axios.request", True), got)
+        self.assertIn(("lib/isAxiosError.isAxiosError", True), got)

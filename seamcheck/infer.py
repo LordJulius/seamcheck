@@ -428,7 +428,7 @@ class Types:
             for mn in mods:
                 for a in self.ancestors(mn):
                     sets = self._expando().get((a, name))
-                    if sets:  # `context.response = Object.create(this.response)` where context is one of these
+                    if sets and not sets[0][2][0].startswith("\0fn:"):  # `ctx.response = Object.create(...)`
                         got = {self.chain(m_, f_, ch, depth + 1) for m_, f_, ch in sets}
                         return got.pop() if len(got) == 1 and None not in got else None
         return None
@@ -446,11 +446,22 @@ class Types:
             if not m.file.endswith(_JS_EXTS) or m.file.endswith(".d.ts"):
                 continue
             for f in m.funcs:
-                for x in _EXPANDO.finditer(f.code):
+                code = f.code or ("\n".join(m.code) if f.kind == "top" else "")  # (module-level: the file's code)
+                inner = [(g.start, g.end) for g in m.funcs if g.kind != "top"] if f.kind == "top" else []
+                for x in _EXPANDO.finditer(code):
                     loc = x.group(1)
                     if loc == "this" or not f.bound.get(loc, "").startswith("expr:"):
                         continue
-                    ch = expression(f.code, x.end())
+                    if inner and any(a <= code.count("\n", 0, x.start()) + 1 <= b for a, b in inner):
+                        continue  # (inside a function: its own locals)
+                    ch = expression(code, x.end())
+                    fm_ = re.match(r"\s*(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(", code[x.end():x.end() + 200])
+                    if fm_ and f"{m.name}.{fm_.group(1)}" in self.p.funcs:
+                        ch = ("\0fn:" + f"{m.name}.{fm_.group(1)}",)  # `instance.create = function create(...)`
+                    elif len(ch) == 1 and re.fullmatch(r"[A-Za-z_$][\w$]*", ch[0]) and \
+                            re.match(r"\s*[\w$]+\s*[;\n]", code[x.end():x.end() + 100] + "\n") and \
+                            (g_ := self.bare(m, f, ch[0])) is not None and g_.name == ch[0]:
+                        ch = ("\0fn:" + g_.id,)  # `axios.isAxiosError = isAxiosError;`
                     if not ch:
                         continue
                     v = self.chain(m, f, (loc,), 1)
@@ -458,6 +469,13 @@ class Types:
                             self.p.modules[v[1][0]].file.endswith(_JS_EXTS):
                         idx.setdefault((v[1][0], x.group(2)), []).append((m, f, ch))
         return idx
+
+    def expando_fn(self, mods, name: str):
+        """JS: the one function code assigns as this property of these modules'
+        objects (`instance.create = function create(...)`), or None."""
+        got = {ch[0][4:] for mn in mods for a in self.ancestors(mn) for _m, _f, ch in self._expando().get((a, name), ())
+               if ch[0].startswith("\0fn:")}
+        return self.p.funcs[got.pop()] if len(got) == 1 else None
 
     def forward(self, mod, cur, name: str, depth: int = 0):
         """JS `delegate(proto, 'response').method(name)`: the value of the
@@ -1224,6 +1242,10 @@ class Types:
             return self.held(mod, f, f.bound[f"{seg}@{self.line}"], depth + 1, self_mods)
         if f is not None:
             held = f.bound.get(seg)
+            if held and held.startswith("lam:") and self.line and fm.file.endswith(_JS_EXTS) and \
+                    (seg in fm.imported or seg in fm.bound or seg in fm.aliases) and \
+                    any(k.startswith(seg + "@") for k in f.bound):
+                held = None  # `run((axios) => ...)`: that parameter is on the lambda's lines; here, the import
             if held and held.startswith("expr:") and held[5:].split("\x1f")[0] == seg and self.line \
                     and 0 < self.line <= len(fm.raw) and re.search(
                         rf"\b{re.escape(seg)}\s*=\s*(?:try[!?]?\s+|await\s+)*{re.escape(seg)}\b", fm.raw[self.line - 1]):
@@ -1649,6 +1671,9 @@ class Types:
                     hits, _ = self.method(list(mods), name)
             else:
                 hits, _ = self.method(list(mods), name)
+            if not hits and kind in ("inst", "static") and mod.file.endswith(_JS_EXTS) and \
+                    (g_ := self.expando_fn(mods, name)) is not None:
+                hits = [g_]  # `axios.create()`: `instance.create = function create(...)`
             if mod.file.endswith(".cs") and len(hits) > 1:
                 want = targs or "0"
                 hits = [g for g in hits if not g.targs or want in g.targs.split(",")] or hits

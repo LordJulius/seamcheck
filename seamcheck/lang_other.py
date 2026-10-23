@@ -1626,8 +1626,10 @@ def _bind_param(f: Func, nm_: str, spec: str, body: str, a: int, b: int, first_l
         f.bound[nm_] = spec
     elif held.startswith("lam:") and held != spec:
         f.bound[nm_] = "lam:?"
-    elif not held.startswith("lam:"):
+    elif not held.startswith(("lam:", "expr:")):
         return  # (a framework's `req` / a declared type says more)
+    # (an outer local of that name, `const response = await axios.get()`: the lambda's parameter
+    # shadows it on the lambda's own lines)
     if first_line < 0 or b < a:
         return
     l0 = first_line + body.count("\n", 0, a) + 1
