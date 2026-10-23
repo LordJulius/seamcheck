@@ -1,7 +1,10 @@
 """'Who calls X?' answered by name (ast-grep, Semgrep) and by seamcheck,
 scored against CodeQL's call graph, on one repo.
 
-    python3 bench/vs_grep.py REPO_DIR CODEQL_CSV --lang python [--sg PATH] [--semgrep PATH] [--n 10]
+    python3 bench/vs_grep.py REPO_DIR CODEQL_CSV --lang python [--sg PATH] [--semgrep PATH] [--n 10] [--semgrep-n 3]
+
+(Semgrep scans the whole repo for each question, minutes on a big one:
+--semgrep-n limits it to the first few targets; its matches are ast-grep's.)
 
 CODEQL_CSV is what bench/vs_codeql.py left (<work>/<repo>-<lang>.csv). The
 targets are the project functions CodeQL sees called most whose name more
@@ -60,11 +63,15 @@ def _semgrep(semgrep: str, root: str, lang: str, name: str) -> set:
     made = not os.path.exists(ignore)
     if made:
         open(ignore, "w").close()
+    rule = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"seamcheck-vs-grep-{os.getpid()}.yml")
+    with open(rule, "w") as fh:  # (both patterns in one rule: one scan)
+        fh.write(f"rules:\n- id: calls\n  languages: [{_SEMGREP_LANG[lang]}]\n  severity: INFO\n  message: call\n"
+                 f"  pattern-either:\n  - pattern: $R.{name}(...)\n  - pattern: {name}(...)\n")
     try:
-        outs = [subprocess.run([semgrep, "--metrics=off", "--quiet", "--json", "--no-git-ignore", "--lang", _SEMGREP_LANG[lang],
-                                "-e", pat, "."], capture_output=True, text=True, cwd=root).stdout or "{}"
-                for pat in (f"$R.{name}(...)", f"{name}(...)")]
+        outs = [subprocess.run([semgrep, "--metrics=off", "--quiet", "--json", "--no-git-ignore", "--config", rule, "."],
+                               capture_output=True, text=True, cwd=root).stdout or "{}"]
     finally:
+        os.remove(rule)
         if made:
             os.remove(ignore)
     for out in outs:
@@ -114,7 +121,7 @@ def main() -> None:
             t = time.time()
             row["ast-grep"] = _score(_sg(opt("--sg"), root, lang, g.name), truth)
             times["ast-grep"] += time.time() - t
-        if opt("--semgrep"):
+        if opt("--semgrep") and picks.index((g, truth)) < int(opt("--semgrep-n", 3)):
             t = time.time()
             row["semgrep"] = _score(_semgrep(opt("--semgrep"), root, lang, g.name), truth)
             times["semgrep"] += time.time() - t
