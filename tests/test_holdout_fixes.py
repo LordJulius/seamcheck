@@ -502,3 +502,25 @@ class JsPlainFunctionFixes(unittest.TestCase):
         names = {d for d, _l, _e in p.edges.get("src/app.run", [])}
         self.assertNotIn("src/utils.findIndex", names)  # Array.prototype.findIndex
         self.assertIn("src/utils.close", names)  # (handed on as `helpers.close`: still a candidate)
+
+
+GO2 = {
+    "go.mod": "module example.com/cli\n\ngo 1.22\n",
+    "flag.go": "package cli\n\ntype Flag interface {\n\tNames() []string\n}\n\ntype IntFlag struct{}\n\n"
+               "func (f *IntFlag) Names() []string {\n\treturn nil\n}\n\nfunc (f *IntFlag) SchemaType() string {\n\treturn \"int\"\n}\n\n"
+               "type SchemaTyper interface {\n\tSchemaType() string\n}\n",
+    "other.go": "package cli\n\ntype Other struct{}\n\nfunc (o *Other) Names() []string {\n\treturn nil\n}\n\n"
+                "func (o *Other) SchemaType() string {\n\treturn \"\"\n}\n",
+    "flag_test.go": "package cli\n\nfunc TestFlags(t *testing.T) {\n\ttests := []struct {\n\t\tname string\n\t\tflag *IntFlag\n\t}{\n"
+                    "\t\t{name: \"a\", flag: &IntFlag{}},\n\t}\n\tfor _, tt := range tests {\n\t\ttt.flag.Names()\n\t}\n"
+                    "\tst, ok := any(&IntFlag{}).(SchemaTyper)\n\t_ = ok\n\tst.SchemaType()\n}\n",
+}
+
+
+class GoHoldoutFixes2(unittest.TestCase):
+    def test_table_test_structs_and_type_assertions(self):
+        p = load(GO2)
+        got = {(d, e) for d, _l, e in p.edges.get("flag_test.TestFlags", [])}
+        self.assertIn(("flag.IntFlag.Names", True), got)
+        self.assertNotIn("other.Other.Names", {d for d, _ in got})
+        self.assertIn(("flag.IntFlag.SchemaType", True), got)  # SchemaTyper's implementations

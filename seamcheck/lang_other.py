@@ -2480,6 +2480,26 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 f.bound.setdefault(nm_, held)
             for nm_, held in _loop_bindings(tk, body):
                 f.bound.setdefault(nm_, held)
+            if go:
+                # `st, ok := any(f).(SchemaTyper)`: the asserted type
+                for am_ in re.finditer(r"\b([a-z_]\w*)(?:\s*,\s*\w+)?\s*:?=\s*[^;\n]*?\.\(\s*\*?((?:\w+\.)?[A-Z]\w*)\s*\)\s*$", body, re.M):
+                    f.bound.setdefault(am_.group(1), "type:" + am_.group(2))
+                # a table-driven test: `tests := []struct{ name string; flag *IntSliceFlag }{...}`, `for _, tt := range tests`
+                for tm_ in re.finditer(r"\b([a-zA-Z_]\w*)\s*:?=\s*\[\]struct\s*\{", body):
+                    e_ = lambdas.matching(body, tm_.end() - 1)
+                    sub = f"{mod.name}.{name}${tm_.group(1)}"
+                    if e_ < 0 or sub in mods:
+                        continue
+                    sm_ = Module(sub, rel, len(raw), raw, lines, owner=mod.name, decls=[f"{name}${tm_.group(1)}"],
+                                 aliases=mod.aliases, uses=mod.uses, imported=mod.imported)
+                    sm_.package, sm_.kind = mod.package, "class"
+                    for fl_ in re.finditer(r"^\s*([a-zA-Z_]\w*(?:\s*,\s*[a-zA-Z_]\w*)*)\s+\*?((?:\w+\.)?[A-Za-z_]\w*)\s*$",
+                                           body[tm_.end():e_], re.M):
+                        for fn_ in fl_.group(1).split(","):
+                            sm_.bound[fn_.strip()] = "type:" + fl_.group(2)
+                    if sm_.bound:
+                        mods[sub] = sm_
+                        f.bound.setdefault(tm_.group(1) + "[]", "mod:" + sub)
             if tk in ("rust", "swift") or ext == ".cs":  # `let (ig, err) = b.add_child(p);`: each name is that element of the tuple
                 for tm_ in re.finditer(r"\b(?:let|var)\s+\(\s*([^()=]*?)\s*\)\s*(?::[^=]+)?=(?!=)", body):
                     ch_ = expression(body, tm_.end())
