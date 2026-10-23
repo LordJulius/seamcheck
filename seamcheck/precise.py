@@ -582,7 +582,7 @@ def _outcomes(project, trace: list):
     """(func, call, outcome) per call, from the trace _build_edges wrote in the
     same order it walked the calls (a Python class with no __init__ writes none)."""
     i = 0
-    for f in project.funcs.values():
+    for f in core.walk_order(project):
         for c in f.calls:
             if i < len(trace) and trace[i][:4] == (f.file, c.line, c.name, c.chain):
                 yield f, c, trace[i][4], trace[i][5]

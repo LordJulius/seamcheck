@@ -203,6 +203,10 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                 return ()
             if name in ("await", "return", "new", "throw", "yield", "in", "of", "case", "else", "do"):
                 break
+            if s > 0 and code[s - 1] == "/" and re.fullmatch(r"[dgimsuyv]+", name) and \
+                    re.search(r"(?:^|[=(,:!&|?{};\s])/(?:[^/\\\n]|\\.)+/$", code[max(0, s - 300):s]):
+                segs.append("<literal>")  # `/refused/i.test(m)`: a regex literal with its flags
+                break
             segs.append(name + "()" if closure_call else name)
             i = s
         elif ch == ">" and code[i - 2:i] != "->":  # `Vec::<T>::new`, `Foo<T>::bar`, `Policy<T>.Handle()`

@@ -263,3 +263,28 @@ class JsHoldoutFixes(unittest.TestCase):
         got = {(d, e) for d, _l, e in p.edges[fid]}
         self.assertIn(("lib/response.back", True), got)
         self.assertIn(("lib/context.throw", True), got)
+
+
+JS2 = {
+    "lib/core/InterceptorManager.js": "class InterceptorManager {\n  use (fn) {\n    return 1\n  }\n}\nexport default InterceptorManager\n",
+    "lib/core/Axios.js": "import InterceptorManager from './InterceptorManager.js'\n\nclass Axios {\n  constructor () {\n"
+                         "    this.interceptors = {\n      request: new InterceptorManager(),\n    }\n  }\n\n  request () {\n    return 1\n  }\n}\n"
+                         "export default Axios\n",
+    "lib/axios.js": "import Axios from './core/Axios.js'\nimport utils from './utils.js'\n\nfunction createInstance () {\n"
+                    "  const context = new Axios()\n  const instance = bind(Axios.prototype.request, context)\n"
+                    "  utils.extend(instance, Axios.prototype, context)\n  return instance\n}\n\nconst axios = createInstance()\n"
+                    "export default axios\n",
+    "lib/utils.js": "function extend (a, b) {\n  return a\n}\nexport default { extend }\n",
+    "index.js": "import axios from './lib/axios.js'\nexport { axios as default }\n",
+    "test/i.test.js": "import axios from '../index.js'\n\nit('uses', () => {\n  axios.interceptors.request.use(() => 1)\n"
+                      "  /refused/i.test('x')\n  setTimeout(() => 1)\n})\n",
+}
+
+
+class JsMixinFixes(unittest.TestCase):
+    def test_extend_prototype_object_literal_fields_and_default_import_values(self):
+        p = load(JS2)
+        fid = next(k for k in p.edges if k.startswith("test/i.test."))
+        got = {(d, e) for d, _l, e in p.edges[fid]}
+        self.assertIn(("lib/core/InterceptorManager.use", True), got)
+        self.assertEqual({d for d, _ in got} & {"lib/utils.test"}, set())

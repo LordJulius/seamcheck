@@ -1794,6 +1794,13 @@ def _link(project: Project, precise: bool, use_cache: bool) -> None:
     precise_mod.refine(project, trace, use_cache)
 
 
+def walk_order(project: Project) -> list[Func]:
+    """The order calls are resolved in (and the trace written): innermost
+    function first, so a call in a callback or a nested class's method is
+    counted where it is made, with that function's `this` and locals."""
+    return sorted(project.funcs.values(), key=lambda g: g.end - g.start)
+
+
 def _build_edges(project: Project) -> None:
     _resolve_imports(project)
     _locals_cache.clear()
@@ -1827,7 +1834,7 @@ def _build_edges(project: Project) -> None:
     for m in project.modules.values():
         for a in types.ancestors(m.name)[1:]:
             project.children[a].append(m.name)
-    for f in project.funcs.values():
+    for f in walk_order(project):
         mod = project.modules.get(f.module)
         for c in f.calls:
             targets: list[tuple[Func, bool]] = []
@@ -2140,6 +2147,11 @@ def _build_edges(project: Project) -> None:
                         project.redges[g.id].append((f.id, c.line, True))
                     _nothing(project, f, c)
                     continue
+            if not targets and not q and not c.chain and mod is not None and f.file.endswith(infer._JS_EXTS) and not any(
+                    g.kind != "top" and _family(g.file) & _family(f.file) and not project.modules[g.module].owner
+                    and project.modules[g.module].kind not in ("class", "interface") for g in project.by_name.get(c.name, ())):
+                _nothing(project, f, c)  # `setTimeout(...)`: a JS method needs its receiver; no free function has the name
+                continue
             if not targets:
                 # A method on some object, or an import we can't see: every
                 # function with that name is a candidate (a "fuzzy" edge).

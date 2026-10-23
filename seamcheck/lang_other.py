@@ -1402,6 +1402,9 @@ def _assignments(tk: str, text: str) -> list[tuple[str, str]]:
                 pm = re.match(r"^\s*([A-Za-z_$][\w$]*)\s*(?::\s*([A-Za-z_$][\w$]*))?\s*(?:=.*)?$", part, re.S)
                 if pm:
                     out.append((pm.group(2) or pm.group(1), "expr:" + "\x1f".join(ch + (pm.group(1),))))
+    if tk == "js":  # `utils.extend(instance, Axios.prototype, ...)`: instance has Axios's methods (ahead of its own value)
+        out = [(m.group(1), f"expr:new {m.group(2)}()") for m in re.finditer(
+            r"\b(?:extend|assign|mixin|setPrototypeOf)\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Z][\w$]*)\.prototype\b", text)] + out
     return out
 
 
@@ -2126,7 +2129,24 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                         expr_fields.setdefault(home.name, {}).setdefault(nm_, tuple(held[5:].split("\x1f")))
             if fam == "js" and inside[i] and "this." in ln:  # `this.context = Object.create(context)` in the constructor
                 fn = next((f_ for f_ in found if f_[0] <= i <= f_[1] and f_[2] == "constructor"), None)
-                for m in re.finditer(r"^[ \t]*this\.([A-Za-z_$][\w$]*)[ \t]*=(?![=>])", ln) if fn else ():
+                for m in re.finditer(r"^[ \t]*this\.([A-Za-z_$][\w$]*)[ \t]*=(?![=>])[ \t]*", ln) if fn else ():
+                    o_ = line_start[i] + m.end()
+                    if code[o_:o_ + 1] == "{" and (e_ := lambdas.matching(code, o_)) > 0:
+                        # `this.interceptors = { request: new InterceptorManager() }`: an object of those members
+                        sub = f"{home.name}.{m.group(1)}"
+                        if sub not in mods and sub not in fields.get(home.name, {}):
+                            om_ = Module(sub, rel, len(raw), raw, lines, owner=home.owner or mod.name, decls=[],
+                                         aliases=mod.aliases, uses=mod.uses, imported=mod.imported)
+                            om_.kind = "interface"
+                            for part in lambdas.split_top(code[o_ + 1:e_]):
+                                km = re.match(r"\s*([A-Za-z_$][\w$]*)\s*:", part)
+                                ch_ = expression(part, km.end()) if km else ()
+                                if ch_ and ch_[0] not in ("require()", "import()"):
+                                    om_.bound[km.group(1)] = "expr:" + "\x1f".join(ch_)
+                            if om_.bound:
+                                mods[sub] = om_
+                                fields.setdefault(home.name, {}).setdefault(m.group(1), set()).add("\0mod:" + sub)
+                        continue
                     ch = expression(code, line_start[i] + m.end())
                     if ch and (ch[0] == "this" or ch[0][:1].isupper() or ch[0].startswith("new ") or
                                ch[0] in mod.imported or ch[0] in mod.aliases) and ch[0] not in ("require()", "import()"):
