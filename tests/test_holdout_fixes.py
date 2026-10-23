@@ -850,3 +850,12 @@ class PyMultilineWith(unittest.TestCase):
                   "tests/test_x.py": "from pkg.c import Client, mock\n\ndef test_a():\n    with Client(\n        transport=mock(1)\n"
                                      "    ) as http:\n        http.get('/')\n"})
         self.assertIn(("pkg/c.Client.get", 7, True), p.edges["tests/test_x.test_a"])
+
+
+class GoMethodAndTsGenericFixes(unittest.TestCase):
+    def test_go_method_is_no_extension_and_ts_generic_call_over_lines(self):
+        p = load({"go.mod": "module x\n", "e.go": "package x\n\ntype SliceErr []error\n\nfunc (err SliceErr) Error() string {\n"
+                                                  "\ts := \"\"\n\tfor i := range err {\n\t\ts += err[i].Error()\n\t}\n\treturn s\n}\n",
+                  "c.ts": "export function validate<T>(x: T): T {\n  return x;\n}\nexport const A = validate<[\n  number,\n  string,\n]>([1, 'a']);\n"})
+        self.assertNotIn(("e.SliceErr.Error", 8, True), p.edges.get("e.SliceErr.Error", []))  # (an `error`'s Error, not this one)
+        self.assertIn(("c.validate", 4, True), p.edges["c.<top>"])

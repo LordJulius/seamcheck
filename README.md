@@ -237,11 +237,11 @@ that name on library-typed values):
 | click (held out) | Python | 100% / 100% | 84.4% / 100% | 100% / 71.1% | 76.0% / 100% | 76.0% / 100% |
 | koa (held out) | JavaScript | 22.1%* / 94.4% | 6.5% / 100% | 47.1% / 44.4% | 5.0% / 100% | 5.0% / 100% |
 | axios (held out) | JavaScript | 94.7%* / 95.1% | 35.3% / 100% | 100% / 70.1% | 34.8% / 95.6% | 33.4% / 100% |
-| ky (held out) | TypeScript | 100% / 80.0% | 66.7% / 80.0% | 100% / 80.0% | 57.1% / 80.0% | 62.5% / 100% |
+| ky (held out) | TypeScript | 100% / 100% | 71.4% / 100% | 100% / 80.0% | 57.1% / 80.0% | 62.5% / 100% |
 | zod (held out) | TypeScript | 100% / 99.2% | 78.8% / 99.9% | 99.2% / 83.1% | 46.2% / 89.3% | 46.2% / 89.3% |
 | javapoet (held out) | Java | 90.7% / 98.4% | 76.1% / 100% | – | 27.5% / 100% | 27.5% / 100% |
-| gin (held out) | Go | 100% / 66.7% | 80.0% / 98.8% | – | 100% / 13.6% | 73.0% / 100% |
-| rack (held out) | Ruby | 92.4% / 90.8% | 74.3% / 93.8% | – | 56.4% / 41.9% | (failed) |
+| gin (held out) | Go | 100% / 65.4% | 78.6% / 100% | – | 100% / 13.6% | 73.0% / 100% |
+| rack (held out) | Ruby | 92.4% / 90.8% | 74.3% / 93.8% | – | 56.4% / 41.9% | 56.8% / 46.7% |
 | sidekiq (held out) | Ruby | 99.0% / 98.5% | 57.3% / 98.7% | – | 0.0% / 0.0% | 40.1% / 11.6% |
 | Dapper (held out) | C# | 89.9% / 51.3% | 62.9% / 100% | – | 54.8% / 99.2% | 45.1% / 100% |
 
@@ -258,7 +258,7 @@ seamcheck finds at least as many callers on every one of the eight, and
 every caller it names was right in each repo checked by hand (koa, flask,
 axios, click).
 Semgrep runs once per repo with one rule per question (3-9 minutes a scan
-here); on rack its scan returned nothing.
+here).
 
 What the columns say:
 - A name search (ast-grep, Semgrep) finds every call by that name, of any
@@ -286,18 +286,15 @@ What the columns say:
 - sidekiq's ast-grep row is zero because the pattern `$R.name($$$A)`
   matches a Ruby call only when it is written with parentheses, and the
   targets' calls there aren't (`@config.redis do |conn|`).
-- Against the name searches: on every repo but two, one of seamcheck's two
+- Against the name searches: on every one of the 13, one of seamcheck's two
   answers is at least as precise and finds at least as much as both ast-grep
-  and Semgrep (`--wide` where a search finds everything: javapoet 76.1% / 100%
-  against 27.5% / 100%, Dapper 62.9% / 100% against 54.8% / 99.2% and
-  45.1% / 100%; the exact answer where it doesn't: gin 100% / 66.7% against
-  ast-grep's 100% / 13.6%). The two: Semgrep finds one gin caller `--wide`
-  misses (98.8%, at 73.0% precision against 80.0%) and ky's one generic call
-  written over several lines (`validate<[\n ...]>(...)`) plus a call through
-  a stored `clone` (80% against 100%, at 62.5% precision against seamcheck's
-  100%). Sites are compared at the line their whole call expression starts on,
-  as CodeQL and the searches place a call; `.d.ts` declarations are no
-  targets (no code runs there).
+  and Semgrep: `--wide` where a search finds everything (javapoet 76.1% / 100%
+  against 27.5% / 100%, gin 78.6% / 100% against Semgrep's 73.0% / 100%,
+  Dapper 62.9% / 100% against 54.8% / 99.2% and 45.1% / 100%), the exact answer
+  where it doesn't (rack 92.4% / 90.8% against 56.8% / 46.7%, sidekiq 99.0% /
+  98.5% against 40.1% / 11.6%). Sites are compared at the line their whole call
+  expression starts on, as CodeQL and the searches place a call; `.d.ts`
+  declarations are no targets (no code runs there).
 - **Module edges**: on express, seamcheck's file-to-file imports and
   dependency-cruiser's are the same 153 (comparing them found two seamcheck
   bugs: a `require()` inside an expression, and one in a doc comment).
