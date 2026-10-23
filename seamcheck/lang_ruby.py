@@ -403,6 +403,7 @@ def parse(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         m.funcs.append(top)
     _attrs(fm, mods, blocks, home, body_blk, lines, funcs)
     _lets(fm, mods, blocks, home, code, starts, lines, funcs)
+    scopes = _scopes(fm, mods, blocks, home, lines, funcs)
 
     # calls, locals and bindings, function by function
     ends = {b["end_pos"]: b for b in blocks if b["kind"] == "do"}
@@ -421,6 +422,11 @@ def parse(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             mine = set(idx)
             f.code = "\n".join(lines[i] if i in mine else "" for i in range(len(lines)))
         _collect(f, b, code, starts, idx, lines, raw, ends)
+    for f in scopes:  # (the lambda's calls were collected as the class body's)
+        top = tops.get(f.module)
+        if top is not None:
+            f.calls = [c for c in top.calls if c.line == f.start]
+            top.calls = [c for c in top.calls if c.line != f.start]
     # globals reach nothing in the project: `$stdout.puts`
     for g in set(re.findall(r"(?<![\w$])\$([A-Za-z_]\w*)", code)):
         fm.aliases["$" + g] = "ext:"
@@ -492,6 +498,28 @@ def _attrs(fm, mods, blocks, home, body_blk, lines, funcs) -> None:
                     f.calls.append(Call(nm, "." if seg.startswith("@") else via, i + 1, (seg,), max(0, ln.find(nm))))
                     funcs[(cm.name, nm)] = f
                     cm.funcs.append(f)
+
+
+_SCOPE = re.compile(r"^\s*scope\s+:(\w+[?!]?)\s*,\s*(?:->|lambda)\s*(?:\([^)]*\))?\s*(?:\{|do\b)")
+
+
+def _scopes(fm, mods, blocks, home, lines, funcs) -> list:
+    """Rails `scope :hits_by_ip, ->(ip, col = "*") { select(col).where(...) }`: a class
+    method of that name whose body is the lambda (on its line)."""
+    out = []
+    for i, ln in enumerate(lines):
+        m = _SCOPE.match(ln)
+        if not m:
+            continue
+        cls = [b for b in blocks if b["a"] <= i <= b["b"] and b["kind"] in ("class", "module")]
+        mod = home[max(cls, key=lambda b: b["a"])["i"]] if cls else fm
+        if (mod.name, m.group(1)) in funcs:
+            continue
+        f = Func(mod.name, m.group(1), mod.file, i + 1, i + 1, ln)
+        funcs[(mod.name, m.group(1))] = f
+        (mods.get(mod.name) or fm).funcs.append(f)
+        out.append(f)
+    return out
 
 
 def _lets(fm, mods, blocks, home, code, starts, lines, funcs) -> None:
