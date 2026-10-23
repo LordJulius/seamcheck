@@ -420,7 +420,7 @@ def parse_python(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         nested = {i for (a2, b2, _, kind2, _) in blocks if kind2 == "def" and a < a2 <= b for i in range(a2, b2 + 1)}
         _py_collect(f, lines, a, b, first=True, skip=nested)
         _py_types(f, lines, a, b, test_file, fixture=any(
-            re.match(r"\s*@(?:pytest\.)?fixture\b", lines[j]) for j in range(max(0, a - 3), a)))
+            re.match(r"\s*@(?:pytest\.)?fixture\b", lines[j]) for j in range(max(0, a - 3), a)), raw=raw)
     top = Func(fm.name, "<top>", rel, 1, len(lines), "", kind="top")
     for i, ln in enumerate(lines):
         if not inside[i] and ln.strip() and not ln.lstrip().startswith(("class ", "import ", "from ")):
@@ -431,6 +431,9 @@ def parse_python(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     fm.bound.setdefault(am.group(1), "type:" + type_name(am.group(2)))
                 for nm_, held in _assignments("py", ln):
                     fm.bound.setdefault(nm_, held)
+            else:  # an `if __name__ == "__main__":` / `with` / `for` block's names, for the module's own calls
+                for nm_, held in _assignments("py", ln.strip()):
+                    top.bound.setdefault(nm_, held)
     fm.funcs.append(top)
     # declared types: the class's `self.x = Foo()` / `self.x: Foo` for its methods
     for k, (a, b, ind, kind, name) in enumerate(blocks):
@@ -484,7 +487,7 @@ def parse_python(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     return [fm] + [m for m in mods.values() if m is not fm]
 
 
-def _py_types(f: Func, lines: list[str], a: int, b: int, test_file: bool, fixture: bool) -> None:
+def _py_types(f: Func, lines: list[str], a: int, b: int, test_file: bool, fixture: bool, raw=None) -> None:
     """What a Python function returns (`-> Foo`, else its last `return` /
     a fixture's `yield`), what its locals are assigned, and in a test file
     each plain parameter: the pytest fixture of that name."""
@@ -492,11 +495,32 @@ def _py_types(f: Func, lines: list[str], a: int, b: int, test_file: bool, fixtur
     while "):" not in head and ")->" not in head.replace(" ", "") and k < b:
         k += 1
         head += " " + lines[k].strip()
+    k_end = k
     rm = re.search(r"\)\s*->\s*([^:]+?)\s*:\s*$", head)
     ann = rm.group(1) if rm else ""
+    if raw is not None and ann.strip().startswith(("'", '"')):  # `-> "Color"`: a forward reference (blanked in code)
+        rhead = " ".join(raw[j].strip() for j in range(a, k + 1))
+        rrm = re.search(r"\)\s*->\s*['\"]([^'\"]+)['\"]\s*:", rhead)
+        ann = rrm.group(1) if rrm else ann
     if ann and any(re.match(r"\s*@(?:contextlib\.)?(?:async)?contextmanager\b", lines[j]) for j in range(max(0, a - 3), a)):
         # a @contextmanager's `-> Iterator[Response]`: `with f() as r` gives a Response
         ann = re.sub(r"^(?:[\w.]+\.)?(?:Async)?(?:Iterator|Generator)\[(.*)\]$", r"\1", ann.strip()).split(",")[0]
+    if ann and "|" in ann:  # `Group | t.Callable[[F], Group]`: the one class among the alternatives
+        alts, d_, cur = [], 0, ""
+        for ch in ann:
+            d_ += ch in "[("
+            d_ -= ch in "])"
+            if ch == "|" and d_ == 0:
+                alts.append(cur)
+                cur = ""
+            else:
+                cur += ch
+        alts.append(cur)
+        named = {type_name(x) for x in alts if x.strip() and not re.match(r"\s*(?:None\b|(?:t\.|typing\.)?Callable\b)", x)}
+        named.discard("")
+        named.discard(None)
+        if len(named) == 1:
+            ann = named.pop()
     if ann and type_name(ann):
         f.returns = type_name(ann)
     sig = head[head.find("(") + 1:]
@@ -509,10 +533,26 @@ def _py_types(f: Func, lines: list[str], a: int, b: int, test_file: bool, fixtur
             last = k + 1
             if depth < 0:
                 break
+    # the same head from the raw lines, at the same offsets: a quoted annotation (`console: "Console"`,
+    # a forward reference or a TYPE_CHECKING import) is blanked in the code
+    rsig = ""
+    if raw is not None:
+        rhead = raw[a] if a < len(raw) else ""
+        for j in range(a + 1, k_end + 1):
+            lead = len(lines[j]) - len(lines[j].lstrip())
+            rhead += " " + raw[j][lead:len(lines[j].rstrip())]
+        rsig = rhead[head.find("(") + 1:] if len(rhead) == len(head) else ""
+    off = 0
     for prm in parts:
         pm = re.match(r"\s*([A-Za-z_]\w*)\s*:\s*([^=]+?)\s*(?:=.*)?$", prm, re.S)
-        if pm and (ty := type_name(pm.group(2))):
+        ann_ = pm.group(2) if pm else ""
+        if pm and rsig and ann_.strip()[:1] in ("'", '"'):
+            rp = rsig[off:off + len(prm)]
+            qm = re.match(r"\s*[A-Za-z_]\w*\s*:\s*['\"]([^'\"]+)['\"]", rp)
+            ann_ = qm.group(1) if qm else ann_
+        if pm and (ty := type_name(ann_)):
             f.bound.setdefault(pm.group(1), "type:" + ty)  # `app: flask.Flask`, `options: dict[str, t.Any]`
+        off += len(prm) + 1
     for m in re.finditer(r"[(,]\s*(\*\*?)([A-Za-z_]\w*)", head):
         f.bound[m.group(2)] = "type:dict" if m.group(1) == "**" else "type:tuple"  # `**kwargs`, `*args`
     body = "\n".join(lines[a:b + 1])

@@ -109,3 +109,53 @@ class HoldoutFixes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+PY = {
+    "app/core.py": """class Group:
+    def command(self):
+        return self
+
+
+class ConsoleOptions:
+    def update_width(self, w):
+        return self
+
+
+def group() -> "Group | None":
+    return Group()
+
+
+def make() -> "Group":
+    return Group()
+""",
+    "tests/test_cli.py": """from app.core import group
+
+
+def test_group():
+    @group()
+    def cli():
+        pass
+
+    @cli.command()
+    def sub():
+        pass
+""",
+    "app/render.py": """def render(console: "Console", options: "ConsoleOptions") -> "Group":
+    return options.update_width(3)
+
+
+if __name__ == "__main__":
+    from app.core import make
+    g = make()
+    g.command()
+""",
+}
+
+
+class PythonHoldoutFixes(unittest.TestCase):
+    def test_decorated_value_quoted_annotations_and_main_block(self):
+        p = load(PY)
+        self.assertIn(("app/core.Group.command", True), {(d, e) for d, _l, e in p.edges.get("tests/test_cli.test_group", [])})
+        self.assertIn(("app/core.ConsoleOptions.update_width", True), {(d, e) for d, _l, e in p.edges.get("app/render.render", [])})
+        self.assertIn(("app/core.Group.command", True), {(d, e) for d, _l, e in p.edges.get("app/render.<top>", [])})

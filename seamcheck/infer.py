@@ -1154,6 +1154,26 @@ class Types:
                 return self.held(p.modules[target], None, p.modules[target].bound[seg], depth + 1)
             if target in p.modules:
                 return ("static", (target,), True)
+        if fm.file.endswith(".py") and not (f is not None and seg in f.bound) and seg not in fm.bound:
+            # a function of this file used as a value: one defined inside the function first
+            # (`@click.group()\n def cli():` in a test), else the module's own
+            defs = [g for g in fm.funcs if g.name == seg and g.kind != "top"]
+            inner = [g for g in defs if f is not None and g is not f and f.start < g.start <= f.end]
+            outer = [g for g in defs if not any(o is not g and o.kind != "top" and o.start < g.start <= o.end for o in fm.funcs)]
+            pick = inner[-1:] if inner else (outer if len(outer) == 1 else [])
+            if not inner and f is not None and f.kind != "top" and depth < _MAX:
+                # a decorated def inside this function the parser kept as part of it
+                raw_ = "\n".join(fm.raw[f.start - 1:f.end])
+                dm_ = re.search(rf"^[ \t]*@([^\n]+)\n(?:[ \t]*@[^\n]+\n)*[ \t]*(?:async[ \t]+)?def[ \t]+{re.escape(seg)}[ \t]*\(", raw_, re.M)
+                if dm_:
+                    from .chains import expression
+                    ch_ = expression(dm_.group(1).strip() + " ", 0)
+                    if ch_ and ch_[-1].endswith("()") and ch_[0].split("(")[0] not in fm.external:
+                        got_ = self.chain(fm, None, tuple(ch_), depth + 1)
+                        if got_ is not None and got_ is not UNKNOWN and got_[0] == "inst" and not is_ext(got_):
+                            return got_
+            if pick and seg not in fm.imported:
+                return self._py_function_value(pick[0])
         if seg in fm.imported:
             from .core import _defining_module
             w, n = fm.imported[seg]
@@ -1253,10 +1273,12 @@ class Types:
         decos = []
         j = g.start - 2
         ind = len(raw[g.start - 1]) - len(raw[g.start - 1].lstrip()) if 0 < g.start <= len(raw) else 0
+        full = []
         while 0 <= j < len(raw) and raw[j].strip():
             ln = raw[j]
             if ln.lstrip().startswith("@"):
                 decos.append(ln.strip()[1:].split("(")[0])
+                full.append(ln.strip()[1:])
             elif not (len(ln) - len(ln.lstrip()) > ind or ln.lstrip().startswith(")")):
                 break  # (an argument line of a multi-line decorator is indented deeper, or closes it)
             j -= 1
@@ -1266,7 +1288,23 @@ class Types:
         root = decos[-1].split(".")[0]  # the outermost decorator says what the name holds
         if root in fm.external or root in ("functools", "staticmethod", "classmethod", "property"):
             return EXT
-        return None  # a project decorator: what it returns, we don't know
+        # a project decorator: what the outermost one, as written, evaluates to (`@click.group()`,
+        # `@cli.command("x")`: a Group, a Command) when that is a project class's instance
+        from .chains import expression
+        top = full[-1]
+        ch = expression(top + " ", 0) if top else ()
+        if ch and len(ch) <= 6:
+            key = ("\0pydeco", g.id)
+            if key in self.cache:
+                return self.cache[key]
+            self.cache[key] = None
+            got = self.chain(fm, None, tuple(ch), 1)
+            if not ch[-1].endswith("()") and got is not None and got[0] == "fn":
+                got = None
+            if got is not None and got is not UNKNOWN and got[0] in ("inst",) and not is_ext(got):
+                self.cache[key] = got
+                return got
+        return None  # what it returns, we don't know
 
     def _element(self, mod, f, name: str, owner, depth: int):
         """The element type a container `name` was declared with (`name[]`):
