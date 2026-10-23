@@ -145,6 +145,13 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                 cast = re.search(r"\bas[!?]?\s+([A-Z][\w.]*)\s*[?]?\s*$", inner) or \
                     re.match(r"\s*\(\s*([A-Z][\w.]*)(?:<[^()]*>)?\s*\)\s*[\w$]", inner)  # Java / C# `((Foo) x).y()`
                 aw = re.match(r"^\s*(?:await|try[?!]?)\s+([A-Za-z_$][\w$]*)\s*$", inner)
+                # `(&Command{...}).Run()` (Go), `(new Foo(x)).bar()`: the value the literal builds
+                lit = re.match(r"^\s*&?((?:[A-Za-z_]\w*\.)?[A-Z]\w*)\s*\{", inner) or \
+                    re.match(r"^\s*new\s+([A-Z][\w.]*)\s*(?:<[^()]*>)?\s*\(", inner)
+                if lit and not cast:
+                    segs.append(f"new {lit.group(1).split('.')[-1]}()")
+                    i = s
+                    break
                 if cast:
                     segs.append(f"<as:{cast.group(1)}>")  # `($Timer as Timer).start()`: a Timer
                 elif aw:
