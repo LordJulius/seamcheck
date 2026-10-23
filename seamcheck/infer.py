@@ -1346,6 +1346,35 @@ class Types:
         if name in m.imported:
             w, n = m.imported[name]
             return self._var_module(w, n, depth + 1)
+        if m.file.endswith(_JS_EXTS):  # `export * from "./types.js"`
+            for w in m.reexports:
+                got = self._var_module(w, name, depth + 1)
+                if got is not None:
+                    return got
+        return None
+
+    def func_ref(self, mods, name: str, depth: int = 0):
+        """JS: the function a module-level name holds as a value
+        (`const stringType = ZodString.create; export { stringType as string }`), or None."""
+        from .core import _in_scope
+        for mn in mods:
+            vm = self._var_module(mn, name)
+            if vm is None or depth > _MAX:
+                continue
+            m, n = vm
+            held = m.bound.get(n, "")
+            ch = tuple(held[5:].split("\x1f")) if held.startswith("expr:") else ()
+            if not ch or ch[-1].endswith(("()", "]")) or not re.fullmatch(r"[A-Za-z_$][\w$]*", ch[-1]):
+                continue
+            if len(ch) == 1:
+                g = self.bare(m, None, ch[0])
+                return g if g is not None and g.name == ch[0] else None
+            v = self.chain(m, None, ch[:-1], depth + 1)
+            if v and v[0] in ("static", "inst"):
+                hits = [h for x in v[1] for h in _in_scope(self.p, x, ch[-1])] if v[0] == "static" else []
+                hits = hits or self.method(list(v[1]), ch[-1])[0]
+                if len(hits) == 1:
+                    return hits[0]
         return None
 
     def bare(self, mod, f, name: str):
@@ -1594,6 +1623,8 @@ class Types:
                 if nested:  # `Request.Builder()`: builds the nested class (`httpx.Client()`: the class the package exports)
                     return ("inst", tuple(nested), len(nested) == 1)
                 hits = [h for mn in mods for h in _in_scope(self.p, mn, name)]
+                if not hits and mod.file.endswith(_JS_EXTS) and (g_ := self.func_ref(mods, name, depth + 1)) is not None:
+                    hits = [g_]  # `z.string()`: the function `string` names (`ZodString.create`)
                 if not hits:
                     hits, _ = self.method(list(mods), name)
             else:
@@ -1647,6 +1678,12 @@ class Types:
                 vm = self._var_module(mn, seg) if not m.owner else None
                 if vm is not None:  # `flask.g`: the package re-exports globals.g
                     return self.held(vm[0], None, vm[0].bound[vm[1]], depth + 1)
+            if mod.file.endswith(_JS_EXTS):
+                from .core import _defining_module
+                for mn in mods:  # `z.coerce` with `export * as coerce from "./coerce.js"` (through `export *`)
+                    dm = _defining_module(self.p, mn, seg)
+                    if dm and dm != mn and not self.p.modules[dm].owner and seg not in self.p.modules[mn].bound:
+                        return ("static", (dm,), True)
             if mod.file.endswith(_JS_EXTS):  # a module's object given a property elsewhere (`ctx.response = ...`)
                 got = self.field(list(mods), seg, depth)
                 return None if got is UNKNOWN else got

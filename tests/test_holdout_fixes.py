@@ -309,3 +309,23 @@ class TsTypeLiteralFixes(unittest.TestCase):
         got = {d for k, es in p.edges.items() if k.startswith("test/t.test") for d, _l, _e in es}
         self.assertNotIn("src/other.text", got)
         self.assertIn("test/t.test.test x", p.funcs)
+
+
+ZOD = {
+    "src/types.ts": "export class ZodString {\n  static create = (p?: object): ZodString => {\n    return new ZodString();\n  };\n"
+                    "  min(n: number): ZodString {\n    return this;\n  }\n}\nexport enum Kind {\n  ZodString = \"ZodString\",\n}\n"
+                    "const stringType = ZodString.create;\nexport { stringType as string };\n",
+    "src/coerce.ts": "export function number(): number {\n  return 1;\n}\n",
+    "src/external.ts": "export * from \"./types.js\";\nexport * as coerce from \"./coerce.js\";\n",
+    "src/index.ts": "import * as z from \"./external.js\";\nexport { z };\n",
+    "test/s.test.ts": "import { z } from \"../src/index.js\";\n\ntest(\"s\", () => {\n  z.string().min(1);\n  z.coerce.number();\n});\n",
+}
+
+
+class ZodPatternFixes(unittest.TestCase):
+    def test_function_values_namespace_reexports_and_ts_enums(self):
+        p = load(ZOD)
+        got = {(d, e) for k, es in p.edges.items() if k.startswith("test/s.test") for d, _l, e in es}
+        self.assertIn(("src/types.ZodString.create", True), got)
+        self.assertIn(("src/types.ZodString.min", True), got)
+        self.assertIn(("src/coerce.number", True), got)
