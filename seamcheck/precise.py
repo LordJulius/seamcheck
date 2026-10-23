@@ -365,6 +365,8 @@ class TsServer:
 
 def _which(exe: str) -> str | None:
     hit = shutil.which(exe)
+    if hit and os.path.basename(os.path.realpath(hit)).startswith("rustup") and not _rustup_has(exe):
+        return None  # rustup's proxy for a component that isn't installed (GitHub's runners have one)
     if hit or os.sep in exe:
         return hit
     if exe == "gopls":  # `go install` puts it in GOPATH/bin, often not on PATH
@@ -376,6 +378,13 @@ def _which(exe: str) -> str | None:
         if os.path.exists(js) and (node := shutil.which("node")):
             return f"{node}\0{js}"
     return None
+
+
+def _rustup_has(exe: str) -> bool:
+    try:
+        return subprocess.run(["rustup", "which", exe], capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def servers(config: dict) -> tuple[dict[str, tuple[str, ...]], list[str]]:
