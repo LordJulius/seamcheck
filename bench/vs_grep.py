@@ -2,7 +2,7 @@
 scored against CodeQL's call graph, on one repo.
 
     python3 bench/vs_grep.py REPO_DIR CODEQL_CSV --lang python [--sg PATH] [--semgrep PATH] [--n 10] [--semgrep-n 3]
-        [--scip INDEX.scip [--scip-prefix DIR]]
+        [--scip INDEX.scip [--scip-prefix DIR]] [--verified SITES.tsv]
 
 (--scip: a SCIP index, as `scip-typescript index` / `scip-python index` write it, which
 is what Sourcegraph's precise "find references" serves: a reference written as a call counts.)
@@ -321,6 +321,17 @@ def main() -> None:
         t = time.time()
         sg_all = _semgrep_all(opt("--semgrep"), root, lang, sorted({g.name for g, _ in picks}))
         times["semgrep"] += time.time() - t
+    if opt("--verified"):
+        # call sites checked by hand that CodeQL leaves unresolved (`target<TAB>file:line`): truth for
+        # every tool, so a tool isn't scored down for a right answer CodeQL can't see
+        extra_truth = collections.defaultdict(set)
+        with open(opt("--verified")) as fh:
+            for row in fh:
+                if "\t" in row:
+                    tid, site = row.rstrip("\n").split("\t")
+                    f_, _, l_ = site.rpartition(":")
+                    extra_truth[tid].add((f_, int(l_)))
+        picks = [(g, truth | {x for x in extra_truth.get(g.id, ()) if x[0] in seen}) for g, truth in picks]
     for g, truth in picks:
         mine = {(p.funcs[s].file, ln) for s, es in p.edges.items() if s in p.funcs
                 for d, ln, ex in es if ex and d == g.id}
