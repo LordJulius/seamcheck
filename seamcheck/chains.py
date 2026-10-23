@@ -135,6 +135,8 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                     arity = "`" + str(1 + _top_commas(code[g + 1:j - 1]))
                     j = _skip_back_ws(code, g)
             s = _ident_back(code, j)
+            if s < j and code[s:j] in ("return", "await", "throw", "yield", "case", "in", "else", "and", "or", "not"):
+                s = j  # `return (x ?? y).ToString()`: a keyword before a parenthesized expression, no call
             if s == j and j > 1 and code[j - 1] == "!" and code[j - 2] in _IDENT_CH and code[j - 2:j] != "!!":
                 ms = _ident_back(code, j - 1)  # Rust `arg!(...)`: a macro's value starts the chain
                 segs.append(code[ms:j - 1] + "!()")

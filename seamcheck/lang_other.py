@@ -127,7 +127,10 @@ _TS_INSTANCE_TYPE = re.compile(r"^\s*(?:(?:private|public|protected|readonly|sta
 _TS_PARAM_FIELD = re.compile(r"\b(?:private|public|protected|readonly)\s+([a-z_$][\w$]*)\s*\??\s*:\s*([A-Z][\w$]*(?:<[^<>\n]*(?:<[^<>\n]*>[^<>\n]*)*>)?)(?![\w$.<\[])")
 # `Client client(...);` at a statement start, `QString name` as a parameter
 _CPP_VALUE = re.compile(r"(?:^|[(,])\s*(?:(?:const|final|this|using|await\s+using|out|ref|in|params|scoped|readonly)\s+)*"
-                        r"([A-Z]\w*(?:\.[A-Z]\w*)*(?:<[^;=(){}]*>)?)\s+([a-z_]\w*)\s*(?=[({;=,)]|:(?!:)|in\s)", re.M)
+                        r"([A-Z]\w*(?:\.[A-Z]\w*)*(?:<[^;=(){}]*>)?)\??\s+([a-z_]\w*)\s*(?=[({;=,)]|:(?!:)|in\s)", re.M)
+_CS_KEYWORD_TYPED = re.compile(r"(?:^|[(,])\s*(?:(?:const|final|this|out|ref|in|params|scoped|readonly)\s+)*"
+                               r"(string|object|int|uint|long|ulong|short|ushort|byte|sbyte|bool|char|decimal|double|float)"
+                               r"\??\s+([a-z_]\w*)\s*(?=[;=,)])", re.M)
 # C / C++ with any type name (snake_case, `ns::type`, `struct x`): `const details::log_msg &msg`,
 # `memory_buf_t &dest`, `struct node *n`, `buffer b;` (keywords and built-in types aren't types)
 _CPP_ANY_TYPED = re.compile(r"(?<![\w:>.])(?:(?:const|struct|class|union|enum|volatile)\s+)*((?:\w+::)*[A-Za-z_]\w*(?:<[^;=(){}<>]*(?:<[^;=(){}<>]*>)?[^;=(){}<>]*>)?)"
@@ -225,6 +228,8 @@ def _typed(tk: str, text: str) -> list[tuple[str, str]]:
                     and (t := type_name(m.group(1))) and t not in _CPP_NOT_TYPE]
         if tk == "jvm":
             out += [(m.group(1), m.group(2)) for m in _JV_NEW.finditer(text)]
+            have = {n for n, _ in out}  # `int sourceMember`, `string? name`: the language's own value types
+            out += [(m.group(2), m.group(1)) for m in _CS_KEYWORD_TYPED.finditer(text) if m.group(2) not in have]
         return out
     if tk == "rust":
         return [(m.group(1), m.group(2)) for pat in (_RS_TYPED, _RS_NEW) for m in pat.finditer(text)
@@ -1227,6 +1232,9 @@ def _return_text(tk: str, prefix: str, sig: str) -> str:
     if pat:
         m = pat.search(sig, _after_params(sig))
         return m.group(1).strip() if m else ""
+    if tk == "jvm" and prefix.rstrip().endswith(")") and (o_ := prefix.rstrip().rfind("(")) >= 0 \
+            and lambdas.matching(prefix.rstrip(), o_) == len(prefix.rstrip()) - 1 and "," in prefix[o_:]:
+        return prefix.rstrip()[o_:]  # C# `(List<X> Variables, List<Y> Expressions) Scratchpad(`: a tuple
     if tk in ("jvm", "cpp"):
         p = re.sub(r"\[[^\]]*\]|@\w+(?:\([^)]*\))?", " ", prefix) if tk == "jvm" else prefix
         p = re.sub(r"\b\w+::\s*$", "", p.rstrip()).rstrip()
@@ -2388,8 +2396,10 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 f.returns = "callret:" + crm.group(1)
             if tk == "rust" and _RS_WRAPPED.match(rtext_):  # `-> Option<Foo>`: a method on it is Option's until unwrapped
                 f.returns = "opt:" + f.returns
-            elif tk in ("rust", "swift") and rtext_.startswith("(") and lambdas.matching(rtext_, 0) == len(rtext_) - 1:
+            elif (tk in ("rust", "swift") or ext == ".cs") and rtext_.startswith("(") and lambdas.matching(rtext_, 0) == len(rtext_) - 1:
                 parts_ = lambdas.split_top(rtext_[1:-1])  # `-> (Ignore, Option<Error>)`: each element's type
+                if ext == ".cs":  # `(List<ParameterExpression> Variables, List<Expression> Expressions)`: names after types
+                    parts_ = [re.sub(r"\s+[A-Za-z_]\w*\s*$", "", p_.strip()) for p_ in parts_]
                 if len(parts_) > 1:
                     f.returns = "tuple:" + "|".join(("opt:" if _RS_WRAPPED.match(p_) else "") + type_name(p_.split(":")[-1])
                                                     for p_ in parts_)
@@ -2427,7 +2437,7 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 f.bound.setdefault(nm_, held)
             for nm_, held in _loop_bindings(tk, body):
                 f.bound.setdefault(nm_, held)
-            if tk in ("rust", "swift"):  # `let (ig, err) = b.add_child(p);`: each name is that element of the tuple
+            if tk in ("rust", "swift") or ext == ".cs":  # `let (ig, err) = b.add_child(p);`: each name is that element of the tuple
                 for tm_ in re.finditer(r"\b(?:let|var)\s+\(\s*([^()=]*?)\s*\)\s*(?::[^=]+)?=(?!=)", body):
                     ch_ = expression(body, tm_.end())
                     if ch_ and ch_[-1].endswith("()"):

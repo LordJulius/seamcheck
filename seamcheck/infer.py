@@ -83,6 +83,14 @@ class Types:
         if hit is not None:
             return hit
         hit = self._type_modules(mod, name)
+        if len(hit[0]) > 1 and "." not in name and mod.owner and not mod.file.endswith(".py"):
+            o = mod.name  # several `Source` classes in a test file: the enclosing classes' own nested one
+            while o in self.p.modules and self.p.modules[o].owner and self.p.modules[o].file == mod.file:
+                if f"{o}.{name}" in hit[0]:
+                    if f"{o}.{name}" != mod.name:  # (its own name: the class itself, every partial part)
+                        hit = ([f"{o}.{name}"], True, True)
+                    break
+                o = o.rsplit(".", 1)[0]
         self.cache[key] = hit
         return hit
 
@@ -685,7 +693,7 @@ class Types:
             if v[0] == "ext":
                 hits = (self.ext_fns.get((v[1][0], name)) or self.ext_fns.get((v[1][0].split("`")[0], name), [])) if v[1] else []
                 shift = 1  # (C#: `this T x` is the first parameter)
-                if not hits and mod.file.endswith(_JS_EXTS[:-1]):
+                if not hits and mod.file.endswith(_JS_EXTS[:-1] + (".cs",)):
                     self.cache[key] = EXT  # `http.createServer((req, res) => ...)`: what a library hands its callback
                     return EXT
             elif v[0] == "static":
@@ -965,6 +973,8 @@ class Types:
             if mods is None:
                 return EXT
             return ("inst", tuple(mods), True) if mods else None
+        if ty in _CS_KEYWORD_TYPES and mod.file.endswith((".cs", ".java")):
+            return EXT  # `int n`, `string s`: the language's own
         mods, exact, declared = self.type_modules(mod, ty)
         if not declared and mod.file.endswith(_JS_EXTS) and ty in self._file_mod(mod).imported:
             from .core import _defining_module  # `const Koa = require('../lib/application')`; `new Koa()`
@@ -1129,6 +1139,8 @@ class Types:
             prim = self._primary(own[0])
             sup = [b for b in self.ancestors(own[0])[1:] if self._primary(b) != prim][:1]
             return ("inst", tuple(sup), True) if sup else (EXT if self.external_base(own[0]) else None)
+        if seg == "typeof()" and fm.file.endswith(".cs"):
+            return ("ext", ("Type",), True)  # `typeof(X).ShouldBeThrownBy(...)`: a System.Type (its extension methods)
         if seg.startswith("new "):
             return self.instance(mod, seg[4:-2], self_mods)
         if seg.startswith(("$", "%")) and fm.file.endswith(".gd"):
@@ -1311,6 +1323,8 @@ class Types:
             return EXT  # `std::...`, `serde_json::from_str`: a crate the project depends on, not one of its own
         if seg in ("std", "boost") and fm.file.endswith((".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".c")):
             return EXT  # `std::unique_ptr<X509>(...)`: the standard library's
+        if fm.file.endswith(".cs") and seg in _CS_KEYWORD_TYPES and not (f is not None and seg in f.bound):
+            return EXT  # `string.Join(...)`, `object.ReferenceEquals(a, b)`: System's
         if fm.file.endswith(".py") and seg in _PY_BUILTIN_NAMES:
             return EXT  # `int.__new__`, `object.__repr__`: Python's own
         if seg in _JS_GLOBALS and fm.file.endswith(_JS_EXTS):
@@ -1829,6 +1843,9 @@ _DOM_PROPS = {"classList", "style", "dataset"}
 _EXPANDO = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)[ \t]*=(?![=>])")
 _EXPLICIT_SELF = (".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".php")
 _PY_BUILTIN_NAMES = set(dir(__import__("builtins")))
+# C#'s keyword names for System types
+_CS_KEYWORD_TYPES = {"string", "object", "int", "uint", "long", "ulong", "short", "ushort", "byte", "sbyte", "bool",
+                     "char", "decimal", "double", "float", "nint", "nuint", "dynamic"}
 _PY_BUILTIN_CALLS = {"vars", "dict", "list", "set", "frozenset", "tuple", "str", "bytes", "bytearray", "sorted",
                      "reversed", "enumerate", "zip", "map", "filter", "range", "iter", "repr", "format", "getattr",
                      "type", "open", "globals", "locals", "dir", "int", "float", "bool", "len", "id", "hash"}

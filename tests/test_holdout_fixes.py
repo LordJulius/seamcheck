@@ -329,3 +329,27 @@ class ZodPatternFixes(unittest.TestCase):
         self.assertIn(("src/types.ZodString.create", True), got)
         self.assertIn(("src/types.ZodString.min", True), got)
         self.assertIn(("src/coerce.number", True), got)
+
+
+CS2 = {
+    "src/Ext.cs": "using System;\nusing System.Collections.Generic;\npublic static class Ext\n{\n"
+                  "    public static void ShouldBeThrownBy(this Type t, Action a) { }\n"
+                  "    public static (List<int> Variables, List<string> Expressions) Scratchpad(this IConfig c) => (null, null);\n}\npublic interface IConfig { }\n",
+    "src/Things.cs": "public class Item\n{\n    public void Add(int x) { }\n    public override string ToString() => \"\";\n}\n",
+    "tests/Spec.cs": "using System;\npublic class Spec\n{\n    class Source { public int Value; }\n"
+                     "    public void Run(int n, string? name, IConfig cfg)\n    {\n        typeof(Spec).ShouldBeThrownBy(() => { });\n"
+                     "        n.ToString();\n        string.Join(\",\", name);\n        name.GetType();\n"
+                     "        var (vars, statements) = cfg.Scratchpad();\n        statements.Add(\"x\");\n        new Source();\n    }\n}\n"
+                     "public class Other\n{\n    class Source { public Source() { } }\n}\n",
+}
+
+
+class CsHoldoutFixes2(unittest.TestCase):
+    def test_keyword_types_typeof_tuples_and_nested_types(self):
+        p = load(CS2)
+        got = {(d, e) for d, _l, e in p.edges.get("tests/Spec.Run", [])}
+        self.assertIn(("src/Ext.ShouldBeThrownBy", True), got)
+        names = {d for d, _ in got}
+        self.assertNotIn("src/Things.Item.ToString", names)  # `n.ToString()` on an int
+        self.assertNotIn("src/Things.Item.Add", names)  # `statements` is a List<string>
+        self.assertNotIn("tests/Spec.Other.Source.Source", names)  # its own nested Source has no constructor
