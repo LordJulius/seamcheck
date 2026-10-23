@@ -616,3 +616,20 @@ class JsPackageMainFixes(unittest.TestCase):
         self.assertIn(("lib/application.constructor", True), got)
         self.assertIn(("lib/application.use", True), got)
         self.assertNotIn("lib/application.default", {d for d, _ in got})
+
+
+CS4 = {
+    "src/SqlMapper.cs": "using System.Data;\npublic static class SqlMapper\n{\n    public static int Execute(this IDbConnection cnn, string sql) => 0;\n"
+                        "    public static int Execute(this IDbConnection cnn, string sql, object p) => 0;\n}\n",
+    "src/Other.cs": "public class Other\n{\n    public int Execute(string s) => 1;\n}\n",
+    "tests/T.cs": "using System.Data.Common;\npublic class T\n{\n    protected DbConnection connection;\n"
+                  "    public void Run()\n    {\n        connection.Execute(\"x\");\n    }\n}\n",
+}
+
+
+class CsLibraryInterfaceExtensionFixes(unittest.TestCase):
+    def test_extension_on_a_library_interface_the_value_implements(self):
+        p = load(CS4)
+        got = {(d, e) for d, _l, e in p.edges.get("tests/T.Run", [])}
+        self.assertIn(("src/SqlMapper.Execute", True), got)
+        self.assertNotIn("src/Other.Execute", {d for d, _ in got})
