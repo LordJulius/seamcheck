@@ -11,6 +11,8 @@ parts. Deterministic, local, language-agnostic.
   seamcheck find NAME                    where a function is defined
   seamcheck context NAME                 before editing it: source, callers, what it calls, tests to run
   seamcheck dead                         functions nothing calls or references
+  seamcheck graph [GLOB...] [--level file|dir] [--via import|call|any] [--format dot|mermaid|json]
+                                         the dependency graph (cycles marked), for docs or review
   seamcheck stats                        size, parse time, graph density
   seamcheck matrix [RULE] [--all]        a fanout rule's token x view grid (all fanout rules if none;
                                          --all also shows what views handle that nothing produces)
@@ -112,13 +114,16 @@ def _main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="seamcheck", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"seamcheck {__version__}")
     ap.add_argument("cmd", choices=["init", "serve", "check", "map", "callers", "callees", "path", "find", "context", "dead", "stats", "deps", "matrix", "tidy", "tests", "test-only", "unused", "dups", "split", "hotspots", "remove", "refs", "impact", "gate",
-                                    "trace", "run", "fuzz", "tighten"])
+                                    "trace", "run", "fuzz", "tighten", "graph"])
     ap.add_argument("args", nargs="*")
     ap.add_argument("-C", dest="root", default=".")
     ap.add_argument("--config", action="append", default=[])
     ap.add_argument("--json", action="store_true", help="same as --format json")
-    ap.add_argument("--format", choices=["text", "json", "sarif", "github"], default="text",
-                    help="check / gate: json, sarif (code scanning) or github (Actions annotations on the diff)")
+    ap.add_argument("--format", choices=["text", "json", "sarif", "github", "dot", "mermaid"], default="text",
+                    help="check / gate: json, sarif (code scanning) or github (Actions annotations on the diff); "
+                         "graph: dot, mermaid or json")
+    ap.add_argument("--level", choices=["file", "dir"], default="dir", help="graph: files or folders")
+    ap.add_argument("--via", choices=["import", "call", "any"], default="import", help="graph: what makes a dependency")
     ap.add_argument("--hook", action="store_true", help="init: also install the pre-commit gate")
     ap.add_argument("--force", action="store_true", help="init: overwrite an existing seamcheck.toml")
     ap.add_argument("--html")
@@ -292,6 +297,20 @@ def _main(argv=None) -> int:
         for f in queries.find(p, a.args[0] if a.args else "*"):
             print(f"{f['id']}  {f['file']}:{f['start']}-{f['end']}  calls={f['calls']} "
                   f"callers: {f['exact_callers']} exact, {f['guess_callers']} name-guess")
+        return 0
+
+    if a.cmd == "graph":
+        from . import arch
+        g = arch.graph(p, a.level, a.via, a.args or None)
+        fmt = "json" if a.json else a.format
+        if fmt in ("dot", "mermaid", "json"):
+            print(arch.render(g, fmt))
+            return 0
+        cyc = {n for comp in arch._sccs(g) if len(comp) > 1 for n in comp}
+        for src in sorted(g):
+            print(f"{src}{'  (in a cycle)' if src in cyc else ''}")
+            for dst, w in sorted(g[src].items()):
+                print(f"  -> {dst}" + (f"  ({w} files)" if a.level == "dir" else ""))
         return 0
 
     if a.cmd == "dead":

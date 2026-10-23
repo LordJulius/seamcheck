@@ -2289,7 +2289,8 @@ def run_rules(project: Project, only: list[str] | None = None, skip: list[str] |
         kind = r.get("kind", "forbid")
         fn = {"forbid": _forbid, "together": _together, "reach": _reach, "coverage": _coverage,
               "require": _require, "deps": _deps, "fanout": _fanout, "lint": _lint,
-              "essential": _essential, "command": _command}.get(kind)
+              "essential": _essential, "command": _command,
+              "depend": _arch("depend"), "layers": _arch("layers"), "cycles": _arch("cycles")}.get(kind)
         if fn is None:
             out.append(Finding(rid, "error", r.get("_file", "seamcheck.toml"), 0, "", f"unknown rule kind {kind!r}"))
             continue
@@ -2404,6 +2405,14 @@ def _require(project: Project, r: dict) -> list[Finding]:
                     if r.get("ordered"):
                         pos = m.end()
     return out
+
+
+def _arch(kind: str):
+    """Architecture rules (arch.py): depend, layers, cycles."""
+    def run(project: Project, r: dict) -> list[Finding]:
+        from . import arch
+        return getattr(arch, kind)(project, r)
+    return run
 
 
 def _deps(project: Project, r: dict) -> list[Finding]:

@@ -177,17 +177,28 @@ call through a variable); Semgrep's OSS matching gave ast-grep's answers on
 the targets it was run on (requests: 59.4% / 100% on two), at about three
 minutes a question here against seamcheck's one loaded graph.
 
-### Module dependencies, against dependency-cruiser
+### Architecture rules, against dependency-cruiser and ArchUnit
 
-On express, seamcheck's file-to-file import edges and dependency-cruiser's
-are the same 153 (comparing them found two seamcheck bugs: a `require()`
-inside an expression, and one in a doc comment).
+- **Module edges**: on express, seamcheck's file-to-file imports and
+  dependency-cruiser's are the same 153 (comparing them found two seamcheck
+  bugs: a `require()` inside an expression, and one in a doc comment).
+- **Import cycles** (`kind = "cycles"` against dependency-cruiser's
+  `no-circular`, runtime imports, excalidraw's packages): every one of the 172
+  files dependency-cruiser puts in a cycle, plus `excalidraw-app/data/index.ts`
+  and `firebase.ts`, a real cycle through `import { x } from "."` that it
+  doesn't follow. 7 s each.
+- **Package cycles** (`level = "dir"` against ArchUnit's
+  `slices().matching("org.jsoup.(**)").should().beFreeOfCycles()` on jsoup's
+  compiled classes): the same five packages, helper, internal, nodes,
+  parser and select. ArchUnit needs the build first (Maven: 18 s, then 1.8 s);
+  seamcheck reads the source (3.6 s), and the same rule works on a Python,
+  Go, Rust or C# repo.
 
 ### What each tool is for
 
 | | seamcheck | CodeQL | Semgrep (OSS) | ast-grep | Sourcegraph / SCIP | ArchUnit | dependency-cruiser |
 |---|---|---|---|---|---|---|---|
-| answers | callers, callees, impact, contracts | any query over code + data flow | pattern findings | pattern matches / rewrites | navigation, search | Java architecture tests | JS/TS module rules |
+| answers | callers, callees, impact, contracts, architecture rules | any query over code + data flow | pattern findings | pattern matches / rewrites | navigation, search | Java architecture tests | JS/TS module rules |
 | needs | Python 3.11 | a database per language; C#/C++/Java/Kotlin/Swift builds | itself | itself | a server and an indexer per language | a JVM test build | Node |
 | languages in one graph | 16, across language and process seams (HTTP, D-Bus, QML↔C++) | one per database | n/a | n/a | per indexer | Java | JS/TS |
 | call graph | yes, exact or marked guess | yes, most precise | no (Pro: some) | no | via indexers | classes, not calls | modules only |
@@ -661,6 +672,37 @@ func = "start*"                        # optional: in each matching function
 pattern = ['maybe_inject\(', 'enqueue\(']
 ordered = true                         # optional: in this order
 ```
+
+**Architecture rules** (what ArchUnit checks in Java and dependency-cruiser
+in JS / TS, for every language here): a file depends on another when it
+imports it or exactly calls into it (`via = "import" | "call" | "any"`; a call
+through an interface depends on the interface, not on each implementation;
+TypeScript's `import { type X }` is erased, so it is no dependency).
+
+```toml
+[[rule]]
+id = "ui-not-db"                       # depend: nothing in `from` may depend on `to`
+kind = "depend"
+from = ["src/ui/**"]
+to = ["src/db/**"]
+allow = ["src/ui/admin/**"]
+
+[[rule]]
+id = "layers"                          # layers: top first; each may use only the ones after it
+kind = "layers"
+layers = [{ name = "web", in = ["lib/web/**"] },
+          { name = "domain", in = ["lib/domain/**"] },
+          { name = "repo", in = ["lib/repo/**"] }]
+
+[[rule]]
+id = "no-cycles"                       # cycles: one finding per cycle, its shortest loop shown
+kind = "cycles"
+in = ["src/**"]
+level = "dir"                          # file (default) | dir: packages / folders, like ArchUnit's slices
+```
+
+`seamcheck graph [GLOB...] --level dir --format dot|mermaid|json` draws the
+same graph (cycles in red) for docs or a review.
 
 A `together` rule also takes `func` (only functions with these names) and
 `depth = N` (a `then` may match in what the function calls, N exact calls deep:
