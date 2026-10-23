@@ -421,3 +421,27 @@ class CppHoldoutFixes3(unittest.TestCase):
         self.assertTrue(any(d.endswith("registry.set_level") and e for d, e in got), got)
         self.assertTrue(any(d.endswith("logger.set_level") and e for d, e in got), got)
         self.assertFalse(any(d.endswith(".what") for d, _ in got), got)
+
+
+CPP4 = {
+    "include/gt/gtest.h": "#pragma once\n#include <string>\nnamespace testing {\nclass Message {\npublic:\n    Message();\n"
+                          "    Message(const Message& m) { }\n    std::string GetString() const;\n};\nclass FilePath {\n"
+                          "    bool IsRoot() const;\n    std::string pathname_;\n};\n}\n",
+    "src/all.cc": "#include \"gt/gtest.h\"\n#include <cstdio>\nnamespace testing {\nMessage::Message() { }\n"
+                  "std::string Message::GetString() const { return \"\"; }\nbool FilePath::IsRoot() const {\n"
+                  "    return pathname_.c_str()[0] == 0;\n}\nstd::string Format(int n) {\n    ::std::stringstream ss;\n"
+                  "    fclose(nullptr);\n    Message().GetString().c_str();\n    return ss.str();\n}\n}\n",
+    "src/string.cc": "namespace other {\nclass string {\npublic:\n    const char *c_str() { return \"\"; }\n    int str() { return 0; }\n};\n}\n",
+    "test/mock.cc": "namespace test {\nint fclose(void *f);\n}\nint test::fclose(void *f) { return 0; }\n",
+}
+
+
+class CppHoldoutFixes4(unittest.TestCase):
+    def test_std_types_out_of_line_classes_and_unseen_namespaced_functions(self):
+        p = load(CPP4)
+        got = {(d, e) for k, es in p.edges.items() if k.startswith("src/all") for d, _l, e in es}
+        names = {d for d, _ in got}
+        self.assertNotIn("src/string.other.string.c_str", names)  # std::string's, never a project `string`
+        self.assertNotIn("src/string.other.string.str", names)
+        self.assertFalse(any(d.endswith("fclose") for d in names), got)  # libc's
+        self.assertTrue(any(d.endswith("Message.Message") and e for d, e in got), got)

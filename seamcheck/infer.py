@@ -135,6 +135,8 @@ class Types:
                 if name in seen_:
                     break
                 seen_.add(name)
+        if "." in name and fm.file.endswith(_C_EXTS) and name.split(".")[0] in ("std", "boost", "absl"):
+            return [], False, False  # `std::string`: the library's, never a project class named string
         if "." in name and fm.file.endswith(".rs") and name.split(".")[0] in self._rs_external():
             return [], False, False  # `walkdir::DirEntry`: that crate's, not the project's own DirEntry
         if "." in name:  # `pkg.Type`, `Outer.Inner`, `ns.Type`
@@ -229,6 +231,11 @@ class Types:
         are one per namespace and name."""
         m = self.p.modules[mn]
         if m.file.endswith((".h", ".hpp", ".hh", ".cpp", ".cc", ".cxx", ".c")):
+            if m.kind == "ext" and m.owner and m.decls:  # `Message::Message()` in a .cc: the one class Message declared
+                own = [o for o in self.by_type.get(m.decls[0], ()) if self.p.modules[o].kind != "ext"
+                       and self.p.modules[o].file.endswith((".h", ".hpp", ".hh", ".cpp", ".cc", ".cxx", ".c"))]
+                if len(own) == 1 and own[0] != mn:
+                    return self._primary(own[0])
             return os.path.splitext(m.file)[0] + "\0" + (m.decls[0] if m.owner and m.decls else "")  # Foo.h + Foo.cpp: one class
         if m.kind == "ext" and m.decls:
             # a Swift extension / Rust impl of the project's one type of that name is part of it
