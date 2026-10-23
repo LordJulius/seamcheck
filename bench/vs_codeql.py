@@ -50,6 +50,24 @@ def _codeql(path: str) -> dict:
     return sites
 
 
+def _align(sites: dict, cq: dict, reach: int = 20) -> dict:
+    """seamcheck places a call on the line of its name (`.create(` in a builder
+    chain), CodeQL on the line its whole expression starts (`new GsonBuilder()`):
+    a seamcheck site with no CodeQL site of its own moves to the nearest
+    same-named CodeQL site starting at most `reach` lines above it."""
+    starts = collections.defaultdict(list)
+    for f, ln, n in cq:
+        starts[(f, n)].append(ln)
+    out = collections.defaultdict(set)
+    for (f, ln, n), v in sites.items():
+        if (f, ln, n) not in cq:
+            above = [l0 for l0 in starts.get((f, n), ()) if ln - reach <= l0 < ln and (f, l0, n) not in sites]
+            if above:
+                ln = max(above)
+        out[(f, ln, n)] |= set(v)
+    return out
+
+
 def _run_codeql(root: str, lang: str, codeql: str, work: str) -> tuple[str, float, float]:
     """(csv path, seconds to build the database, seconds to run the query)."""
     os.makedirs(work, exist_ok=True)
@@ -114,6 +132,8 @@ def main() -> None:
             if g is None:
                 continue
             (exact if ex else guess)[(f.file, ln, g.name)].add(g.id)
+    exact = _align(exact, cq)
+    guess = _align(guess, cq)
     files = {k[0] for k in cq}
     raws = {}
 

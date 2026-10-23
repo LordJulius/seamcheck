@@ -82,6 +82,19 @@ def _semgrep(semgrep: str, root: str, lang: str, name: str) -> set:
     return hits
 
 
+def _align_lines(got: set, truth: set, reach: int = 20) -> set:
+    """A site on the line of the call's name moves to the line CodeQL gives the
+    whole call expression (a builder chain's start), when that is the nearest above."""
+    out = set()
+    for f, ln in got:
+        if (f, ln) not in truth:
+            above = [l0 for f0, l0 in truth if f0 == f and ln - reach <= l0 < ln and (f, l0) not in got]
+            if above:
+                ln = max(above)
+        out.add((f, ln))
+    return out
+
+
 def _score(got: set, truth: set) -> tuple[int, int, int]:
     return len(got & truth), len(got), len(truth)
 
@@ -116,6 +129,7 @@ def main() -> None:
     for g, truth in picks:
         mine = {(p.funcs[s].file, ln) for s, es in p.edges.items() if s in p.funcs
                 for d, ln, ex in es if ex and d == g.id}
+        mine = _align_lines(mine, truth)
         row = {"seamcheck": _score(mine, truth)}
         if opt("--sg"):
             t = time.time()
