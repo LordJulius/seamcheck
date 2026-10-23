@@ -2,6 +2,10 @@
 scored against CodeQL's call graph, on one repo.
 
     python3 bench/vs_grep.py REPO_DIR CODEQL_CSV --lang python [--sg PATH] [--semgrep PATH] [--n 10] [--semgrep-n 3]
+        [--scip INDEX.scip [--scip-prefix DIR]]
+
+(--scip: a SCIP index, as `scip-typescript index` / `scip-python index` write it, which
+is what Sourcegraph's precise "find references" serves: a reference written as a call counts.)
 
 (Semgrep scans the whole repo for each question, minutes on a big one:
 --semgrep-n limits it to the first few targets; its matches are ast-grep's.)
@@ -20,6 +24,7 @@ import collections
 import csv
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -83,6 +88,110 @@ def _semgrep(semgrep: str, root: str, lang: str, name: str) -> set:
     return hits
 
 
+def _pb(buf: bytes):
+    """(field, wire type, value) of one protobuf message (value: int or bytes)."""
+    i, n = 0, len(buf)
+
+    def varint():
+        nonlocal i
+        shift = out = 0
+        while True:
+            b = buf[i]
+            i += 1
+            out |= (b & 0x7F) << shift
+            if b < 0x80:
+                return out
+            shift += 7
+    while i < n:
+        key = varint()
+        field, wt = key >> 3, key & 7
+        if wt == 0:
+            yield field, wt, varint()
+        elif wt == 2:
+            ln = varint()
+            yield field, wt, buf[i:i + ln]
+            i += ln
+        elif wt == 5:
+            i += 4
+        elif wt == 1:
+            i += 8
+        else:
+            return
+
+
+def _packed(buf: bytes) -> list[int]:
+    out, shift, cur = [], 0, 0
+    for b in buf:
+        cur |= (b & 0x7F) << shift
+        shift += 7
+        if b < 0x80:
+            out.append(cur)
+            cur = shift = 0
+    return out
+
+
+def _scip(path: str, prefix: str = "") -> dict:
+    """A SCIP index (Sourcegraph's precise navigation): {file: [(line0, col0, end_col, symbol, roles)]}."""
+    docs = {}
+    with open(path, "rb") as fh:
+        data = fh.read()
+    for field, _wt, doc in _pb(data):
+        if field != 2:
+            continue
+        rel, occs = "", []
+        for f2, _w2, v2 in _pb(doc):
+            if f2 == 1:
+                rel = v2.decode()
+            elif f2 == 2:
+                rng, sym, roles = [], "", 0
+                for f3, w3, v3 in _pb(v2):
+                    if f3 == 1:
+                        rng = _packed(v3) if w3 == 2 else rng + [v3]
+                    elif f3 == 2:
+                        sym = v3.decode()
+                    elif f3 == 3:
+                        roles = v3
+                if len(rng) >= 3:
+                    occs.append((rng[0], rng[1], rng[-1], sym, roles))
+        docs[os.path.normpath(os.path.join(prefix, rel))] = occs
+    return docs
+
+
+def _scip_callers(docs: dict, root: str, g) -> set:
+    """The call sites SCIP's references give for the function g: the symbol defined at g's
+    name, each non-definition occurrence of it written as a call (`name(` / `name<T>(`)."""
+    texts = {}
+
+    def lines(rel):
+        if rel not in texts:
+            try:
+                with open(os.path.join(root, rel), errors="replace") as fh:
+                    texts[rel] = fh.read().split("\n")
+            except OSError:
+                texts[rel] = []
+        return texts[rel]
+    syms = {sym for l0, c0, c1, sym, roles in docs.get(g.file, ())
+            if roles & 1 and g.start - 2 <= l0 <= g.start + 1 and l0 < len(lines(g.file))
+            and lines(g.file)[l0][c0:c1] == g.name}  # (the name at its definition: a `local N` symbol too)
+    if not syms:
+        return set()
+    out = set()
+    for rel, occs in docs.items():
+        for l0, _c0, c1, sym, roles in occs:
+            if sym not in syms or roles & 1 or (sym.startswith("local ") and rel != g.file):
+                continue
+            if rel not in texts:
+                try:
+                    with open(os.path.join(root, rel), errors="replace") as fh:
+                        texts[rel] = fh.read().split("\n")
+                except OSError:
+                    texts[rel] = []
+            ln = texts[rel][l0] if l0 < len(texts[rel]) else ""
+            if re.match(r"\s*(?:\?\.)?\s*(?:<[^()]*>)?\s*\(", ln[c1:]):
+                out.add((rel, l0 + 1))
+    return out
+
+
 def _align_lines(got: set, truth: set, p, reach: int = 20) -> set:
     """A site on the line of the call's name moves to the line CodeQL gives the
     whole call expression (a builder chain's start), when that is the nearest
@@ -125,11 +234,21 @@ def main() -> None:
         return None
     picks = []
     for (tf, tl, name), sites in sorted(callers.items(), key=lambda kv: -len(kv[1])):
+        if name in ("exports", "constructor", "<init>", "__init__", "default"):
+            continue  # (called as `new X` / by the importer's name: no tool asks by this name)
         if names[name] > 1 and not name.startswith("__") and (g := func_at(tf, tl, name)) is not None:
-            picks.append((g, sites))
+            if any(g is g0 for g0, _ in picks):  # (an overload CodeQL lists apart: the same function here)
+                picks = [(g0, t0 | sites if g0 is g else t0) for g0, t0 in picks]
+                continue
+            picks.append((g, set(sites)))
         if len(picks) == n:
             break
-    tools = {"seamcheck": [0, 0, 0], "ast-grep": [0, 0, 0], "semgrep": [0, 0, 0]}
+    tools = {"seamcheck": [0, 0, 0], "ast-grep": [0, 0, 0], "semgrep": [0, 0, 0], "scip": [0, 0, 0]}
+    docs = _scip(opt("--scip"), opt("--scip-prefix", "")) if opt("--scip") else None
+    if docs is not None:  # (every tool scored on the files both CodeQL and the SCIP indexer read)
+        seen &= set(docs)
+        picks = [(g, {x for x in truth if x[0] in seen}) for g, truth in picks]
+        picks = [(g, truth) for g, truth in picks if truth]
     times = collections.Counter()
     print(f"{os.path.basename(root)}: {len(picks)} functions with shared names, scored against CodeQL's callers")
     for g, truth in picks:
@@ -141,6 +260,8 @@ def main() -> None:
             t = time.time()
             row["ast-grep"] = _score({x for x in _sg(opt("--sg"), root, lang, g.name) if x[0] in seen}, truth)
             times["ast-grep"] += time.time() - t
+        if docs is not None:
+            row["scip"] = _score(_align_lines({x for x in _scip_callers(docs, root, g) if x[0] in seen}, truth, p), truth)
         if opt("--semgrep") and picks.index((g, truth)) < int(opt("--semgrep-n", 3)):
             t = time.time()
             row["semgrep"] = _score({x for x in _semgrep(opt("--semgrep"), root, lang, g.name) if x[0] in seen}, truth)
