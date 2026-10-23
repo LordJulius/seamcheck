@@ -281,10 +281,10 @@ What the columns say:
   matches a Ruby call only when it is written with parentheses, and the
   targets' calls there aren't (`@config.redis do |conn|`).
 - `--wide` is what to compare with a name search: it finds what the search
-  finds (recall at or above ast-grep's on 11 of the 13; javapoet 97.1% against
-  100%; Dapper 100% against 99.2%) and is at least as precise on 11 of 13
-  (Dapper 51.4% against 54.8%; gin 79.8% against ast-grep's 100% at 13.6%
-  recall), with the exact tier first. The exact column is
+  finds (recall at or above ast-grep's on 12 of the 13; javapoet 97.1% against
+  100%) and is at least as precise on 11 of 13 (Dapper 51.7% against 54.8%;
+  gin 79.8% against ast-grep's 100% at 13.6% recall, where seamcheck's exact
+  tier is 100% / 65.4%), with the exact tier first. The exact column is
   the answer to act on without reading.
 
 ### Architecture rules, against dependency-cruiser and ArchUnit
