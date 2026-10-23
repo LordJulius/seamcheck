@@ -487,3 +487,18 @@ class ZodPatternFixes2(unittest.TestCase):
         got = {(d, e) for k, es in p.edges.items() if k.startswith("test/c.test") for d, _l, e in es}
         self.assertIn(("src/types.ZodString.parse", True), got)
         self.assertIn(("src/schemas.ZodIPv6.safeParse", True), got)
+
+
+JS4 = {
+    "src/utils.js": "export function findIndex(arr, fn) {\n  return -1;\n}\nfunction close(server) {\n  server.close();\n}\n"
+                    "export const helpers = { close };\n",
+    "src/app.js": "export function run(items, srv) {\n  items.findIndex((x) => x);\n  srv.close();\n}\n",
+}
+
+
+class JsPlainFunctionFixes(unittest.TestCase):
+    def test_a_plain_function_declaration_is_no_method(self):
+        p = load(JS4)
+        names = {d for d, _l, _e in p.edges.get("src/app.run", [])}
+        self.assertNotIn("src/utils.findIndex", names)  # Array.prototype.findIndex
+        self.assertIn("src/utils.close", names)  # (handed on as `helpers.close`: still a candidate)
