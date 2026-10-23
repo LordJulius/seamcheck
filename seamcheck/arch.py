@@ -308,26 +308,44 @@ def path(project, r: dict) -> list:
     starts = []
     for spec in (r["from"] if isinstance(r["from"], list) else [r["from"]]):
         starts.extend(project.find(spec))
+    bound, readers = {}, None  # entry id -> the parameters the framework fills from the request
     if source is not None:  # taint starts where the source is read
         from . import tidy
+        # a handler the framework passes request values to: `@GetMapping` + `String cmd`, `[HttpPost]` + `[FromBody] T x`
+        entry = re.compile(r["source_entry"]) if r.get("source_entry") else None
+        param = re.compile(r["source_param"]) if r.get("source_param") else None
+        if entry is not None and param is not None:
+            for f in starts:
+                if f.kind != "top" and entry.search(_annotations(project, f)):
+                    got = frozenset(n for n, d in _param_decls(project, f) if param.search(d))
+                    if got:
+                        bound[f.id] = got
+        # a helper that reads the request and returns it: `getCookie(request, "x")`, `WebUtils.getRequestBody(request)`
+        rd = sorted({f.name for f in project.funcs.values() if f.kind != "top" and re.match(r"[A-Za-z_]\w*$", f.name)
+                     and not tidy.is_test(project, f.file) and re.search(r"\breturn\b", _own_code(project, f))
+                     and source.search(_own_code(project, f, raw=True))})
+        readers = re.compile(rf"(?<![\w$])((?:[A-Za-z_]\w*\.)?)(?:{'|'.join(rd)})\s*\(") if rd else None
         # (raw text: `"#{params[:id]}"` reads the source inside a string)
-        starts = [f for f in starts if not tidy.is_test(project, f.file) and source.search(_own_code(project, f, raw=True))]
+        starts = [f for f in starts if not tidy.is_test(project, f.file)
+                  and (f.id in bound or source.search(_own_code(project, f, raw=True)) or _reads(readers, _own_code(project, f)))]
     out, best = [], {}
     for s in sorted({f.id: f for f in starts}.values(), key=lambda f: f.id):
         if s.name in unless:
             continue
         prev = {s.id: None}
-        given = {s.id: frozenset()}  # (taint) the parameters each function was passed a tainted value in
+        given = {s.id: bound.get(s.id, frozenset())}  # (taint) the parameters each function was passed a tainted value in
         frontier, hits = [s.id], {}
         for _ in range(depth + 1):
             nxt = []
             for fid in frontier:
                 f = project.funcs[fid]
-                taint = _Taint(project, f, source, clean, given[fid]) if source is not None else None
+                taint = _Taint(project, f, source, clean, given[fid], readers) if source is not None else None
                 for c in f.calls:
-                    text = (f"{c.qual}." if c.qual and c.qual not in (".", "self") else "") + c.name  # (Ruby's bare `system`)
+                    # (Ruby's bare `system`; a chained call on its own line, `.FromSql(q)`, keeps its dot)
+                    text = (f"{c.qual}." if c.qual and c.qual not in (".", "self") else "." if c.qual == "." else "") + c.name
                     if any(p.search(text) for p in sinks) and (f.file, c.line) not in hits \
-                            and (source is None or _carries(project, f, c, source, clean, taint.at(c.line), sink=True)):
+                            and (source is None or _carries(project, f, c, source, clean, taint.at(c.line), sink=True)) \
+                            and not (source is not None and taint.downstream(project, f, c, {ln for (fl, ln) in hits if fl == f.file})):
                         hits[(f.file, c.line)] = (fid, text)
                 for dst, ln, exact in project.edges.get(fid, []):
                     if not (exact or fuzzy) or dst in prev or dst not in project.funcs or project.funcs[dst].name in unless:
@@ -358,6 +376,22 @@ def path(project, r: dict) -> list:
     return out + [f for _, f in sorted(best.values(), key=lambda x: (x[1].file, x[1].line))]
 
 
+def _close(code: str, k: int) -> int:
+    """Where the bracket open before offset k closes."""
+    d = 1
+    while k < len(code) and d:
+        d += code[k] in "([{"
+        d -= code[k] in ")]}"
+        k += 1
+    return k - 1
+
+
+def _reads(readers, text: str) -> bool:
+    """text calls a request-reading helper bare or on a type (`WebUtils.getRequestBody(req)`), not as
+    any value's method (`d.get(k)` is not a helper `get`)."""
+    return bool(readers) and any(not q or q[0].isupper() for q in readers.findall(text))
+
+
 def _own_code(project, f, raw: bool = False) -> str:
     """f's code (comments and strings blanked, or `raw`, at the same offsets); a file's
     `<top>`: its lines outside functions."""
@@ -378,10 +412,13 @@ class _Taint:
     request.args[...]` taints x, `x = escape(x)` cleans it again: the last assignment
     before the line decides; branches and loops are read top to bottom)."""
 
-    def __init__(self, project, f, source, clean, given: frozenset):
+    def __init__(self, project, f, source, clean, given: frozenset, readers=None):
         code, raw = _own_code(project, f), _own_code(project, f, raw=True)  # (f"dig {domain}": the raw text has the name)
+        # (no interpolation: `"... where username = ?"` holds no value named username)
+        no_interp = f.file.endswith((".java", ".go"))
         self.steps = []  # (line, name, dirty, indent)
         self.given = set(given)
+        self.source = source
         self.start, self.lines = f.start, code.split("\n")
         found = []  # (offset, indent, names, the value's offset)
         # `x = `, `$x = ` (PHP), `@x = ` (Ruby), `const x = ` / `String x = ` (declared), `x := ` (Go)
@@ -393,16 +430,62 @@ class _Taint:
                               r"\s*=(?!=)\s*(.+)$", code, re.M):
             names = [re.findall(r"[$\w]+", part.split(":")[-1].split("=")[0])[-1:] for part in am.group(2).strip("{}[]").split(",")]
             found.append((am.start(), am.group(1), [n[0] for n in names if n], am.start(3)))
+        # in a condition: `if ((cmd = req.getParameter("c")) != null)`, `while ((line = r.readLine()) != null)`
+        conds = {}  # value offset -> where it ends, when not at the statement's end
+        for am in re.finditer(r"\(\s*([A-Za-z_]\w*)[ \t]*=(?!=)\s*", code):
+            bol = code.rfind("\n", 0, am.start()) + 1
+            indent = re.match(r"[ \t]*", code[bol:]).group()
+            found.append((am.start(), indent, [am.group(1)], am.end()))
+            conds[am.end()] = _close(code, am.end())
+        # only ever taint: a value put into an object (`sb.append(id)`, `doc.Load(Request.Body)`, `xs.push(q)`)
+        # and a loop variable over a tainted collection (`for (T x : xs)`, `foreach (var x in xs)`, `for x in xs:`)
+        adds = set()
+        for am in re.finditer(r"^([ \t]*)([$@]?[A-Za-z_]\w*)\.(?:append|add|addAll|put|push|extend|insert|concat|write|"
+                              r"Append|AppendFormat|AppendLine|Add|AddRange|Insert|Load|LoadXml|Write)[ \t]*\(", code, re.M):
+            found.append((am.start(), am.group(1), [am.group(2)], am.end()))
+            adds.add(am.end())
+            conds[am.end()] = _close(code, am.end())
+        for am in re.finditer(r"^([ \t]*)(?:[\w}]+[ \t]+)?for(?:each)?[ \t]*\([ \t]*(?:(?:const|let|var|final)[ \t]+)?(?:[\w<>\[\],.?]+[ \t]+)?"
+                              r"([A-Za-z_]\w*)[ \t]+(?:in|of|:)[ \t]+", code, re.M):
+            found.append((am.start(), am.group(1), [am.group(2)], am.end()))
+            adds.add(am.end())
+            conds[am.end()] = _close(code, am.end())
+        for am in re.finditer(r"^([ \t]*)(?:async[ \t]+)?for[ \t]+([A-Za-z_]\w*)(?:[ \t]*,[ \t]*[A-Za-z_]\w*)*[ \t]+in[ \t]+(.+?):?[ \t]*$", code, re.M):
+            found.append((am.start(), am.group(1), [am.group(2)], am.start(3)))
+            adds.add(am.start(3))
+            conds[am.start(3)] = am.end(3)
         for start, indent, names, val in sorted(found):
-            rhs = raw[val:_statement_end(code, val, len(indent.expandtabs(4)))]
+            end = conds.get(val) or _statement_end(code, val, len(indent.expandtabs(4)))
+            rhs = (code if no_interp else raw)[val:end]
             ln = f.start + code.count("\n", 0, start)
-            dirty = _dirty(rhs, source, clean, self.at(ln))
+            dirty = _dirty(rhs, source, clean, self.at(ln)) or (_reads(readers, rhs) and not
+                                                                     (clean and any(c.search(rhs) for c in clean)))
+            if val in adds and not dirty:
+                continue  # (adding a clean value cleans nothing)
             self.steps += [(ln, name, dirty, len(indent.expandtabs(4))) for name in names]
 
     def _inside(self, a: int, b: int, indent: int) -> bool:
         """Line b is still in the block line a opened at `indent` (no line between dedents below it)."""
         for t in self.lines[a - self.start + 1:b - self.start + 1]:
             if t.strip() and len(t[:len(t) - len(t.lstrip())].expandtabs(4)) < indent and not t.lstrip()[:1] in ")]}":
+                return False
+        return True
+
+    def downstream(self, project, f, c, sunk: set) -> bool:
+        """Every tainted name call c uses was assigned from a sink already reported (`st =
+        con.prepareStatement(sql)`, then `st.executeQuery()`): the same injection, reported once."""
+        m = project.modules.get(f.module)
+        line = m.code[c.line - 1] if m is not None and c.line <= len(m.code) else ""
+        used = [t for t in self.at(c.line) if _names(t, line)]
+        if not used or not sunk:
+            return False
+        for t in used:
+            ln = max((ln for ln, name, _, _ in self.steps if name == t and ln < c.line), default=None)
+            if ln not in sunk:
+                return False
+            # (`file = params[:type].constantize.new(path)` brings in a second value: path still counts)
+            rhs = m.code[ln - 1].split("=", 1)[-1] if m is not None else ""
+            if sum(_names(u, rhs) for u in self.at(ln)) + bool(self.source and self.source.search(m.raw[ln - 1])) > 1:
                 return False
         return True
 
@@ -446,7 +529,10 @@ def _call_args(project, f, c) -> list[str]:
     # bounds from the blanked code (a `,` or `)` in a string is no boundary), text from the raw lines
     text = "\n".join(m.code[c.line - 1:c.line + 60])  # (a callback argument spans lines)
     raw = "\n".join(m.raw[c.line - 1:c.line + 60])
-    nm = re.search(rf"(?<![\w$]){re.escape(c.name)}(?!\w)\s*", text)
+    # (the occurrence that is called: `ProcessBuilder pb = new ProcessBuilder(cmd)` declares the type first)
+    eol = text.find("\n") % (len(text) + 1)
+    nm = re.compile(rf"(?<![\w$]){re.escape(c.name)}(?!\w)\s*(?=\()").search(text, 0, eol) \
+        or re.search(rf"(?<![\w$]){re.escape(c.name)}(?!\w)\s*", text)
     if nm is None:
         return []
     k = nm.end()
@@ -545,6 +631,23 @@ def _carries(project, f, c, source, clean, tainted: set, sink: bool = False) -> 
 
 def _params(project, g) -> list[str]:
     """g's parameter names, in order (`self` / `cls` / `this` left out)."""
+    return [n for n, _ in _param_decls(project, g)]
+
+
+def _annotations(project, g) -> str:
+    """The annotation / attribute lines just above g (`@GetMapping("/x")`, `[HttpPost]`)."""
+    m = project.modules.get(g.module)
+    out = []
+    for ln in range(g.start - 2, max(g.start - 9, -1), -1):
+        t = m.raw[ln].strip() if m is not None and ln < len(m.raw) else ""
+        if not t.startswith(("@", "[")):
+            break
+        out.append(t)
+    return "\n".join(reversed(out))
+
+
+def _param_decls(project, g) -> list[tuple[str, str]]:
+    """g's parameters as (name, its declaration as written), in order."""
     m = project.modules.get(g.module)
     if m is None:
         return []
@@ -571,18 +674,20 @@ def _params(project, g) -> list[str]:
         else:
             cur += ch
     for p in parts + [cur]:
-        p = p.split("=")[0]
+        decl = p.strip()
+        p = re.sub(r"@[\w.]+(?:\([^()]*\))?|\[\w+(?:\([^()]*\))?\]", " ", p.split("=")[0])  # (`@RequestParam`, `[FromBody]`)
         if ext not in (".go",) and ":" in p.replace("::", ""):
             p = p.replace("::", "").split(":")[0]
         names = re.findall(r"[$@]?[A-Za-z_]\w*", p)
+        names = [n for n in names[:-1] if n not in ("params",)] + names[-1:]  # (C#'s `params T[] xs`; a name `params` stays)
         names = [n for n in names if n not in ("self", "cls", "this", "final", "const", "mut", "ref", "out", "in",
-                                               "params", "readonly", "public", "private", "protected", "val", "var")]
+                                               "readonly", "public", "private", "protected", "val", "var")]
         if not names:
             continue
         dollar = [n for n in names if n.startswith("$")]
-        out.append(dollar[0] if dollar else names[0] if ext in (".go", ".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".rb",
-                                                                     ".kt", ".rs", ".swift", ".ex", ".exs") else names[-1])
-    return [n.lstrip("*&") for n in out]
+        out.append((dollar[0] if dollar else names[0] if ext in (".go", ".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".rb",
+                                                                      ".kt", ".rs", ".swift", ".ex", ".exs") else names[-1], decl))
+    return [(n.lstrip("*&"), d) for n, d in out]
 
 
 def _passed(project, f, c, g, params: list[str], source, clean, tainted: set) -> set:

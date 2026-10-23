@@ -178,6 +178,10 @@ def _main(argv=None) -> int:
 
     if a.cmd in ("check", "map"):
         only, skip = (a.only.split(",") if a.only else None), (a.skip.split(",") if a.skip else None)
+        ids = [r["id"] for r in p.config.get("rule", [])]
+        for name in (only or []) + (skip or []):
+            if not any(core.picked(i, [name]) for i in ids):
+                print(f"seamcheck: no rule or pack named {name!r} (rules: {', '.join(ids)})", file=sys.stderr)
         findings = (queries.check(p, only, skip, a.errors_only) if a.cmd == "check"
                     else core.run_rules(p, only, skip) if a.html else [])
         if a.html:

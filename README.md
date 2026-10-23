@@ -32,9 +32,9 @@ the project writes down about how its parts fit together.
 - **Finds injections with no config.** In a repo with no `seamcheck.toml`,
   `seamcheck check` runs the built-in security pack: request data reaching a
   shell, `eval`, SQL, a deserializer, a file path, a redirect or an outbound
-  request, in Python, JS/TS, PHP, Ruby, Go, Java and C#. On six deliberately
-  vulnerable apps it found 36 of the 38 injections CodeQL's security-extended
-  suites report there (the other 2 are guarded paths), plus 3 real ones CodeQL doesn't, in under 4 s per app;
+  request, in Python, JS/TS, PHP, Ruby, Go, Java and C#. On eight deliberately
+  vulnerable apps it found 78 of the 84 injections CodeQL's security-extended
+  suites report there, plus 6 real ones CodeQL doesn't, in under 4 s per app;
   on the 37 ordinary benchmark repos it reports nothing.
 - **Many repos, one graph.** Put several checkouts (or symlinks to them) in one
   folder and run seamcheck there: a service's call into a library repo is an
@@ -325,9 +325,16 @@ point, and a sink counts only when its arguments carry that value, through
 assignments in order (`x = escape(x)` cleans x for the rest of its block),
 into the parameters a call passes it to, and across files by exact call
 edges. A constant first argument (a parameterized query, a same-site
-redirect) is clean.
+redirect) is clean. A framework handler's parameters are request data too
+(`@GetMapping` + `String cmd` in Spring, `[HttpPost]` + `[FromBody] T x` in
+ASP.NET: `source_entry` / `source_param` in a rule), and so is what a helper
+that reads the request returns (`WebUtils.getRequestBody(request)`). A value
+put into an object (`sb.append(id)`, `doc.Load(Request.Body)`) or a loop
+variable over a tainted collection carries it; a later call on a sink's own
+result (`st.executeQuery()` after `con.prepareStatement(sql)`) is the same
+injection and isn't reported again.
 
-Against CodeQL 2.23's `*-security-extended` suites on six deliberately
+Against CodeQL 2.23's `*-security-extended` suites on eight deliberately
 vulnerable apps, counting CodeQL's findings of the kinds both look for
 (command, code, SQL / NoSQL, deserialization, path, redirect, SSRF, template
 injection):
@@ -340,7 +347,9 @@ injection):
 | dvna | JavaScript | 4 | 4 | 0 | 10 s + 39 s | 0.2 s |
 | railsgoat | Ruby | 9 | 9 | 2: `send_file` of a request path, an open redirect | 6 s + 28 s | 2.3 s |
 | govwa | Go | 2 | 2 | 0 | 19 s + 18 s | 3.9 s |
-| **total** | | **38** | **36 (95%)** | **3** | | |
+| java-sec-code | Java (Spring) | 44 | 40 | 3: QLExpress `runner.execute`, Shiro `rememberMe` cookie deserialized, okhttp SSRF | 102 s + 96 s | 0.8 s |
+| dvcsharp-api | C# (ASP.NET Core) | 2 | 2 | 0 | 191 s + 56 s | 0.3 s |
+| **total** | | **84** | **78 (93%)** | **6** | | |
 
 The 2 seamcheck doesn't report are pygoat file reads behind
 `os.path.realpath` and a `startswith` check against the base directory; the
@@ -348,6 +357,14 @@ check holds, so they read as CodeQL false positives. A sanitizer applies to
 its own part of a string: `"#{params[:id].to_i}.png"` is clean, `"cp #{file}
 #{Time.now.to_i}"` still carries `file`. govwa's template XSS is reported where `template.HTML(...)`
 is called on the value, CodeQL reports it at the wrapper.
+
+java-sec-code's 4: Jackson `readValue` (unsafe only with default typing on,
+which seamcheck doesn't read, so it isn't a sink), a `Location` header set
+with `setHeader`, `IOUtils.toByteArray(URI.create(url))`, and a second
+`FileOutputStream` on a path already reported one line up. seamcheck also
+reports 5 there that aren't injections: the app's "safe" variants (YAML with
+`SafeConstructor`, SpEL with `SimpleEvaluationContext`, a QLExpress runner
+with its security strategy on) and `new File(name).getName()` in a helper.
 
 PHP, which CodeQL doesn't read, against DVWA's own labels (each lab has low,
 medium and high levels that are vulnerable by design and an "impossible" one

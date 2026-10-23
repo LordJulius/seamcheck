@@ -2899,6 +2899,11 @@ def _text_for(project: Project, rel: str, mode: str) -> list[str]:
     return out
 
 
+def picked(rid: str, ids: list[str] | None) -> bool:
+    """`--only` / `--skip` name a rule by its id or a pack by its name (`security` is every `security/...`)."""
+    return bool(ids) and any(rid == i or rid.startswith(i.rstrip("/") + "/") for i in ids)
+
+
 def run_rules(project: Project, only: list[str] | None = None, skip: list[str] | None = None) -> list[Finding]:
     out: list[Finding] = [Finding("config", "error", pr.split(":")[0], 0, "", pr) for pr in project.config_problems]
     out += [Finding("config", "warn", n.split(":")[0], 0, "", n) for n in getattr(project, "env_notes", [])]
@@ -2906,12 +2911,12 @@ def run_rules(project: Project, only: list[str] | None = None, skip: list[str] |
     # start them all at once, then collect in rule order
     from concurrent.futures import ThreadPoolExecutor
     cmds = [r for r in project.config.get("rule", []) if r.get("kind") == "command"
-            and not (only and r["id"] not in only) and not (skip and r["id"] in skip)]
+            and not (only and not picked(r["id"], only)) and not picked(r["id"], skip)]
     pool = ThreadPoolExecutor(max_workers=max(1, min(8, len(cmds)))) if cmds else None
     pending = {r["id"]: pool.submit(_command, project, r) for r in cmds} if pool else {}
     for r in project.config.get("rule", []):
         rid = r["id"]
-        if (only and rid not in only) or (skip and rid in skip):
+        if (only and not picked(rid, only)) or picked(rid, skip):
             continue
         kind = r.get("kind", "forbid")
         fn = {"forbid": _forbid, "together": _together, "reach": _reach, "coverage": _coverage,
