@@ -136,10 +136,26 @@ def parse(path: str, rel: str, text: str, res_of) -> list[Module]:
         _collect(f, lines, idx, end, str_by_line)
         for m in _PARAM.finditer(header):
             f.bound["" + m.group(1)] = "type:" + m.group(2)
+        for m in re.finditer(r"[(,]\s*([A-Za-z_]\w*)\s*:=\s*", header):  # `project := Global.current_project`: its default's type
+            ch = expression(header, m.end())
+            if ch:
+                f.bound.setdefault(m.group(1), "expr:" + "\x1f".join(ch))
         _types(f.bound, f.code)
         rm = _RETURNS.search(header)
         if rm:
             f.returns = type_name(rm.group(1))
+        em_ = re.search(r"\)\s*->\s*Array\[\s*([A-Z][\w.]*)\s*\]\s*:", header)
+        if em_:  # `-> Array[PixelCel]`: iterating it gives PixelCels
+            f.relem = em_.group(1)
+        for lm in re.finditer(r"^[ \t]*for[ \t]+([A-Za-z_]\w*)(?:[ \t]*:[ \t]*([A-Z][\w.]*))?[ \t]+in[ \t]+", f.code, re.M):
+            if lm.group(2):  # `for cel: PixelCel in cels:`
+                f.bound.setdefault(lm.group(1), "type:" + lm.group(2))
+                continue
+            eol = f.code.find("\n", lm.end())
+            src_ = f.code[lm.end():eol if eol >= 0 else len(f.code)].rstrip()
+            ch = expression(src_[:-1] if src_.endswith(":") else src_, 0)  # (the loop's `:` is no part of it)
+            if ch and not (len(ch) == 1 and ch[0].endswith("()") and ch[0][:-2] in ("range",)):
+                f.bound.setdefault(lm.group(1), "elem:" + "\x1f".join(ch))  # `for cel in project.get_all_pixel_cels():`
         mod.funcs.append(f)
         covered.update(range(idx, end + 1))
     top_lines = [ln if i not in covered else "" for i, ln in enumerate(lines)]
