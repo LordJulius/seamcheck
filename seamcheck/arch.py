@@ -492,7 +492,10 @@ def _dirty(arg: str, source, clean, tainted: set) -> bool:
     if clean:
         call, method = clean
         if re.search(rf"{method.pattern}\s*(?:\([^()]*\))?\s*$", arg.strip()):
-            return False  # `params[:id].to_i` (the whole value), not `"cp #{f} #{Time.now.to_i}"`
+            return False  # `params[:id].to_i`: the whole value
+        # a sanitized part (`#{params[:image].to_i}`) is clean; the rest still counts
+        # (`"cp #{file} #{Time.now.to_i}"` carries file)
+        arg = re.sub(rf"[\w@$:.\[\]'\"]+?{method.pattern}(?:\([^()]*\))?", " ", arg)
         for m in reversed(list(call.finditer(arg))):
             d, j = 0, m.end() - 1
             while j < len(arg):

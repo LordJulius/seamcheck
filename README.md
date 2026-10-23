@@ -33,8 +33,8 @@ the project writes down about how its parts fit together.
   `seamcheck check` runs the built-in security pack: request data reaching a
   shell, `eval`, SQL, a deserializer, a file path, a redirect or an outbound
   request, in Python, JS/TS, PHP, Ruby, Go, Java and C#. On six deliberately
-  vulnerable apps it found 33 of the 38 injections CodeQL's security-extended
-  suites report there, plus 3 real ones CodeQL doesn't, in under 4 s per app;
+  vulnerable apps it found 36 of the 38 injections CodeQL's security-extended
+  suites report there (the other 2 are guarded paths), plus 3 real ones CodeQL doesn't, in under 4 s per app;
   on the 37 ordinary benchmark repos it reports nothing.
 - **Many repos, one graph.** Put several checkouts (or symlinks to them) in one
   folder and run seamcheck there: a service's call into a library repo is an
@@ -335,17 +335,18 @@ injection):
 | app | language | CodeQL | seamcheck found | only seamcheck (real) | CodeQL: database + analysis | seamcheck |
 |---|---|---|---|---|---|---|
 | Vulnerable-Flask-App | Python | 2 | 2 | 0 | not timed | 0.4 s |
-| pygoat | Python | 13 | 10 | 1: `ImageMath.eval(request value)` | not timed | 0.3 s |
-| NodeGoat | JavaScript | 8 | 7 | 0 | 12 s + 50 s | 0.4 s |
+| pygoat | Python | 13 | 11 | 1: `ImageMath.eval(request value)` | not timed | 0.3 s |
+| NodeGoat | JavaScript | 8 | 8 | 0 | 12 s + 50 s | 0.4 s |
 | dvna | JavaScript | 4 | 4 | 0 | 10 s + 39 s | 0.2 s |
-| railsgoat | Ruby | 9 | 8 | 2: `send_file` of a request path, an open redirect | 6 s + 28 s | 2.3 s |
+| railsgoat | Ruby | 9 | 9 | 2: `send_file` of a request path, an open redirect | 6 s + 28 s | 2.3 s |
 | govwa | Go | 2 | 2 | 0 | 19 s + 18 s | 3.9 s |
-| **total** | | **38** | **33 (87%)** | **3** | | |
+| **total** | | **38** | **36 (95%)** | **3** | | |
 
-What seamcheck misses: a NoSQL `$where` string built inside a closure and
-returned to the query (NodeGoat), sinks the pack
-doesn't name (pygoat's `os.path.isfile` / `os.path.exists`), and a Rails
-`scope` lambda. govwa's template XSS is reported where `template.HTML(...)`
+The 2 seamcheck doesn't report are pygoat file reads behind
+`os.path.realpath` and a `startswith` check against the base directory; the
+check holds, so they read as CodeQL false positives. A sanitizer applies to
+its own part of a string: `"#{params[:id].to_i}.png"` is clean, `"cp #{file}
+#{Time.now.to_i}"` still carries `file`. govwa's template XSS is reported where `template.HTML(...)`
 is called on the value, CodeQL reports it at the wrapper.
 
 PHP, which CodeQL doesn't read, against DVWA's own labels (each lab has low,
