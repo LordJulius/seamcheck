@@ -45,7 +45,7 @@ _JS = [
     # a method's start only (`static createElement<T extends X>(\n  {a}: {b?: number;} = {},\n): R & {...} {`):
     # the body scan below matches the brackets, and without a body it is a call
     re.compile(rf"(?P<tsstart>)^[ \t]*(?:(?:public|private|protected|static|async|get|set|override|abstract)[ \t]+)*({_ID})[ \t]*"
-               rf"(?:<[^<>\n]*(?:<[^<>\n]*(?:<[^<>\n]*>[^<>\n]*)*>[^<>\n]*)*>)?[ \t]*\(", re.M),
+               rf"(?:<[^<>]{{0,400}}?(?:<[^<>]{{0,200}}(?:<[^<>\n]*>[^<>\n]*)*>[^<>]{{0,400}}?)*>)?[ \t]*\(", re.M),
 ]
 _RUST = [re.compile(r"\bfn\s+([A-Za-z_]\w*)")]
 _KOTLIN = [re.compile(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?([A-Za-z_]\w*)\s*\(")]
