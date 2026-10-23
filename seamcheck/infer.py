@@ -1424,6 +1424,44 @@ class Types:
             return EXT  # `console`, `window`, `document`: the runtime's (no project name took it)
         return self._rb_named(mod, seg)
 
+    def yielded(self, g, depth: int):
+        """Ruby: the value a method yields to its block (`yield conn`, `block.call(x)`, or
+        the block handed on, `config.redis(&block)`), or None."""
+        if depth > _MAX:
+            return None
+        gm = self.p.modules.get(g.module)
+        if gm is None:
+            return None
+        key = ("\0yield", g.id)
+        if key in self.cache:
+            return self.cache[key]
+        self.cache[key] = None  # (a recursion through itself)
+        got = set()
+        for m in re.finditer(r"(?:\byield\b[ \t(]*|\b[a-z_]\w*\.call\(\s*)(@{0,2}[a-z_]\w*(?:\.[a-z_]\w*[?!]?)*)?"
+                             r"|(?:\([^()\n]*\|\|\s*)?(@{0,2}[a-z_]\w*(?:\.[a-z_]\w*[?!]?)*)\)?\.([a-z_]\w*[?!]?)\(&\w*\)",
+                             g.code[g.code.find("\n") + 1:]):
+            # (`(Thread.current[:capsule] || default_configuration).redis(&block)`: the default's)
+            if m.group(3):
+                text, last = m.group(2), m.group(3) + "{}"
+            elif m.group(0).startswith("yield") or re.match(r"(?:block|blk|b|callback|cb)\.call", m.group(0)):
+                text, last = m.group(1), None
+            else:
+                continue
+            if not text:
+                got.add(None)
+                continue
+            segs = []
+            for k, w in enumerate(text.split(".")):
+                local = w.startswith("@") or w == "self" or (k == 0 and w in g.bound) or k == 0 and re.search(
+                    rf"(?:\(|,|\|)\s*{re.escape(w)}\s*[,)|=]", g.code[:g.code.find("\n") + 1] if k == 0 else "")
+                segs.append(w if local and k == 0 else w + "()")
+            if last:
+                segs.append(last)
+            got.add(self.chain(gm, g, tuple(segs), depth + 1))
+        out = got.pop() if len(got) == 1 else None
+        self.cache[key] = out
+        return out
+
     def _rb_named(self, mod, name: str):
         """Ruby, an untyped receiver named after a class (`site`, `@document`,
         `collection`): by the language's convention it holds that class, when
@@ -1439,9 +1477,20 @@ class Types:
             for d, mns in self.by_type.items():
                 for mn in mns:
                     if self.p.modules[mn].file.endswith(".rb") and self.p.modules[mn].kind != "ext":
-                        short.setdefault(d.rsplit("::", 1)[-1], set()).add(mn)
-        mods = short.get(cls, set())
-        return ("inst", tuple(mods), True) if len(mods) == 1 else None
+                        short.setdefault(d.rsplit("::", 1)[-1], {}).setdefault(d, set()).add(mn)
+        quals = short.get(cls, {})
+        if len(quals) > 1:
+            # `Sidekiq::Config` and `Sidekiq::Web::Config`: the one the name `Config`
+            # means where the receiver is used, by Ruby's lexical constant lookup
+            stem = os.path.splitext(mod.file)[0]
+            here = mod.name[len(stem) + 1:].split("::") if mod.name.startswith(stem + ".") else []
+            for k in range(len(here), -1, -1):
+                q = "::".join(here[:k] + [cls])
+                if q in quals:
+                    quals = {q: quals[q]}
+                    break
+        mods = {mn for mns in quals.values() for mn in mns}
+        return ("inst", tuple(mods), True) if len(quals) == 1 and len(mods) == 1 else None
 
     def _var_module(self, where: str, name: str, depth: int = 0):
         """(module, its name there) for a module-level variable, through re-exports."""
@@ -1723,6 +1772,14 @@ class Types:
                 return self.returns(hits[0], None, depth + 1) if len(hits) == 1 else None
             got = [mn for mn in self.by_type.get(seg, ()) if self._pkg_of(mn) == mods[0]]
             return ("static", tuple(got), True) if got else None
+        if seg.endswith("{}") and mod.file.endswith(_RB_EXTS):
+            # Ruby `x.redis { |conn| }`: what the project method redis yields to its block
+            hits, _ = self.method(list(mods), seg[:-2])
+            if kind == "static":
+                from .core import _in_scope
+                hits = [h for mn in mods for h in _in_scope(self.p, mn, seg[:-2])] or hits
+            got = {self.yielded(h, depth + 1) for h in hits}
+            return got.pop() if len(got) == 1 else None
         if seg.endswith("()"):
             name, targs = seg[:-2], None
             if "`" in name:  # C# `Handle<E>()`: the overloads taking one type argument

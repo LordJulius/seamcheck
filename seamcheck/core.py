@@ -431,6 +431,7 @@ def load(root: str, config_path: str | list[str] | None = None, use_cache: bool 
         previous = None
     _link(project, precise, use_cache)
     project.__dict__.pop("_counted", None)  # (only for counting while linking)
+    project.__dict__.pop("_site_out", None)
     _apply_bridges(project)
     project.config_problems += project.bridge_problems
     if use_cache:
@@ -1786,6 +1787,7 @@ def _nothing(project: Project, f: Func, c) -> None:
     """A call that reaches no project function. Counted apart when a project
     function in the caller's language has that name: the share stats shows
     so a resolver can't look better by turning guesses into nothing."""
+    project.__dict__.setdefault("_site_out", {})[(f.file, c.line, c.col, c.name)] = []
     if not _first_count(project, f, c):
         return
     res = project.resolution[os.path.splitext(f.file)[1]]
@@ -1924,12 +1926,22 @@ def _build_edges(project: Project) -> None:
     infer.resolve_bases(project)
     types = infer.Types(project)
     pending: list = []
+    site_out = project.__dict__["_site_out"] = {}  # a call site's callees, once resolved
     for m in project.modules.values():
         for a in types.ancestors(m.name)[1:]:
             project.children[a].append(m.name)
     for f in walk_order(project):
         mod = project.modules.get(f.module)
         for c in f.calls:
+            done = site_out.get((f.file, c.line, c.col, c.name))
+            if done is not None:
+                # a call inside a nested function (a callback, an object literal's method) was
+                # resolved there, with that function's parameters and locals: the enclosing
+                # functions reach the same callees
+                for tid, exact in done:
+                    project.edges[f.id].append((tid, c.line, exact))
+                    project.redges[tid].append((f.id, c.line, exact))
+                continue
             targets: list[tuple[Func, bool]] = []
             recv: tuple = ()  # the receiver's type, when known: overrides only in its subtypes run
             q = c.qual
@@ -2399,6 +2411,7 @@ def _build_edges(project: Project) -> None:
                     more.append((inner, True))
             seen_t = {t.id for t, _ in targets}
             more = [(o, e) for o, e in more if o.id not in seen_t and not seen_t.add(o.id)]
+            site_out[(f.file, c.line, c.col, c.name)] = [(t.id, exact) for t, exact in targets + more]
             for t, exact in targets + more:
                 project.edges[f.id].append((t.id, c.line, exact))
                 project.redges[t.id].append((f.id, c.line, exact))
