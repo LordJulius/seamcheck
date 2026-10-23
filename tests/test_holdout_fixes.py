@@ -524,3 +524,16 @@ class GoHoldoutFixes2(unittest.TestCase):
         self.assertIn(("flag.IntFlag.Names", True), got)
         self.assertNotIn("other.Other.Names", {d for d, _ in got})
         self.assertIn(("flag.IntFlag.SchemaType", True), got)  # SchemaTyper's implementations
+
+
+KT = {
+    "src/Reader.kt": "class Reader {\n  fun peek(): Int = 0\n  private fun nextQuoted(): String = \"\"\n"
+                     "  fun next(): String {\n    return when (peek()) {\n      1 -> nextQuoted()\n      else -> nextQuoted()\n    }\n  }\n}\n",
+}
+
+
+class KotlinWhenArrowFixes(unittest.TestCase):
+    def test_a_when_arrow_is_no_member_access(self):
+        p = load(KT)
+        got = {(d, e) for d, _l, e in p.edges.get("src/Reader.next", [])}
+        self.assertIn(("src/Reader.nextQuoted", True), got)
