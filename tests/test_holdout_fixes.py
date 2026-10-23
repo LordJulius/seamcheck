@@ -649,3 +649,23 @@ class CppTemplateQualifierFixes(unittest.TestCase):
         p = load(CPP5)
         fid = next(k for k in p.funcs if k.endswith("base_sink.set_pattern"))
         self.assertTrue(any(d.endswith("set_pattern_") and e for d, _l, e in p.edges.get(fid, [])))
+
+
+TS2 = {
+    "package.json": "{\"name\": \"ky\", \"main\": \"./distribution/index.js\"}\n",
+    "source/index.ts": "type Inst = { create: (o?: object) => Inst; (url: string): void };\n"
+                       "const createInstance = (defaults?: object): Inst => {\n  const ky = ((url: string) => {}) as Inst;\n"
+                       "  ky.create = (newDefaults?: object) => createInstance(newDefaults);\n  return ky;\n};\n"
+                       "const ky = createInstance();\nexport default ky;\n",
+    "source/other.ts": "export class Queue {\n  close() {\n    return 1;\n  }\n}\n",
+    "test/t.ts": "import ky from 'ky';\n\ntest('x', () => {\n  const api = ky.create({});\n"
+                 "  const s = new ReadableStream<Uint8Array>({\n    start(controller) {\n      controller.close();\n    },\n  });\n});\n",
+}
+
+
+class TsPropertyArrowFixes(unittest.TestCase):
+    def test_arrows_stored_as_properties_and_library_options_methods(self):
+        p = load(TS2)
+        got = {(d, e) for k, es in p.edges.items() if k.startswith("test/t") for d, _l, e in es}
+        self.assertIn(("source/index.create", True), got)
+        self.assertNotIn("source/other.Queue.close", {d for d, _ in got})

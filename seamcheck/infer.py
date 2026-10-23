@@ -468,14 +468,23 @@ class Types:
                 for x in _EXPANDO.finditer(code):
                     loc = x.group(1)
                     held_ = f.bound.get(loc, "") or (m.bound.get(loc, "") if f.kind == "top" else "")
-                    if loc == "this" or not held_.startswith(("expr:", "mod:")):
+                    if loc == "this" or not held_.startswith(("expr:", "mod:", "type:")):
                         continue
+                    if held_.startswith("type:") and not re.match(r"\s*(?:async\s+)?(?:function\b|\((?:[^()]|\([^()]*\))*\)\s*(?::[^=\n]+?)?=>)",
+                                                                  code[x.end():x.end() + 300]):
+                        continue  # (a typed local: only the functions stored on it, the rest is its type's)
                     if inner and any(a < code.count("\n", 0, x.start()) + 1 <= b for a, b in inner):
                         continue  # (inside a function: its own locals)
                     ch = expression(code, x.end())
                     fm_ = re.match(r"\s*(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(", code[x.end():x.end() + 200])
+                    am_ = None if fm_ else re.match(r"\s*(?:async\s+)?(?:\((?:[^()]|\([^()]*\))*\)\s*(?::[^=\n]+?)?=>|[A-Za-z_$][\w$]*\s*=>)",
+                                                    code[x.end():x.end() + 300])
+                    ln_ = (f.start if f.code else 1) + code.count("\n", 0, x.start())
+                    arrow = next((g for g in m.funcs if g.name == x.group(2) and g.start == ln_), None) if am_ else None
                     if fm_ and f"{m.name}.{fm_.group(1)}" in self.p.funcs:
                         ch = ("\0fn:" + f"{m.name}.{fm_.group(1)}",)  # `instance.create = function create(...)`
+                    elif arrow is not None:
+                        ch = ("\0fn:" + arrow.id,)  # `ky.create = (defaults) => createInstance(defaults)`
                     elif len(ch) == 1 and re.fullmatch(r"[A-Za-z_$][\w$]*", ch[0]) and \
                             re.match(r"\s*[\w$]+\s*[;\n]", code[x.end():x.end() + 100] + "\n") and \
                             (g_ := self.bare(m, f, ch[0])) is not None and g_.name == ch[0]:
