@@ -277,7 +277,7 @@ _KT_IMPORT = re.compile(r"^[ \t]*import[ \t]+(?:static[ \t]+)?([\w.]+?)(\.\*)?(?
 _JSX = re.compile(r"<(?:([A-Za-z_$][\w$]*)\.)?([A-Z][\w$]*)(?=[\s/>]|$)")
 _NOT_FUNC = {"if", "for", "while", "switch", "catch", "return", "function", "else", "do", "try", "with", "new",
              "typeof", "match", "loop", "when", "sizeof", "constructor_", "super"}
-_CALL = re.compile(rf"(?:({_ID})\s*(?:\.|::|\?\.|->)\s*)?\b({_ID})\s*(?:::<[^()]*>|<[\w\s,<>\[\]]*>)?\s*\(")
+_CALL = re.compile(rf"(?:({_ID})\s*(?:\.|::|\?\.|->(?![ \t]))\s*)?\b({_ID})\s*(?:::<[^()]*>|<[\w\s,<>\[\]]*>)?\s*\(")
 _CALL_SKIP = _NOT_FUNC | {"async", "await", "catch", "require", "import", "print", "println", "Some", "Ok", "Err", "Box", "Vec",
                           "String", "assert", "setOf", "listOf", "mapOf"}
 
@@ -2536,6 +2536,8 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     chain = receiver(body, off + m.start(2))
                     before = ln[:m.start(2)].rstrip()
                     q = m.group(1) or ("." if before.endswith((".", "->")) and not before.endswith("...") else "")
+                    if q == "." and not chain and before.endswith("->") and ln[:m.start(2)][-1:] in " \t":
+                        q = ""  # `x == null -> knownNotNull(d)`: a Kotlin `when` arrow, then a bare call
                     if chain and q and q != ".":
                         last = chain[-1]
                         q = last if re.match(r"^[\w$]+$", last) else "."

@@ -90,6 +90,8 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
     newlines (`builder\\n  .a()\\n  .b()`)."""
     segs: list[str] = []
     i = _skip_back_ws(code, pos)
+    if i < pos and code[max(0, i - 2):i] == "->" and code[pos - 1:pos] in " \t":
+        return ()  # `x == null -> knownNotNull(d)`: a Kotlin `when` / lambda arrow (C++ / PHP `p->f()` has no space)
     while len(segs) < max_segs:
         op = ""
         for o in ("?.", "!.", "->", "::", "."):
@@ -145,7 +147,7 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                 break
             if s == j:  # `(expr).x`: a parenthesized expression
                 inner = code[k + 1:i - 1]
-                cast = re.search(r"\bas[!?]?\s+([A-Z][\w.]*)\s*[?]?\s*$", inner) or \
+                cast = re.search(r"\bas[!?]?\s+([A-Z][\w.]*|`[^`\n]+`)\s*[?]?\s*$", inner) or \
                     re.match(r"\s*\(\s*([A-Z][\w.]*|byte|sbyte|short|ushort|int|uint|long|ulong|char|bool|decimal|double|float|string|object)"
                              r"(?:<[^()]*>)?\s*\)\s*[\w$(]", inner)  # Java / C# `((Foo) x).y()`, `((byte)value).ToString()`
                 aw = re.match(r"^\s*(?:await|try[?!]?)\s+([A-Za-z_$][\w$]*)\s*$", inner)
@@ -157,7 +159,10 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                     i = s
                     break
                 if cast:
-                    segs.append(f"<as:{cast.group(1)}>")  # `($Timer as Timer).start()`: a Timer
+                    cn_ = cast.group(1)
+                    if cn_.startswith("`"):  # Kotlin's backtick name, as the parser names it
+                        cn_ = re.sub(r"\W", "_", cn_.strip("`"))
+                    segs.append(f"<as:{cn_}>")  # `($Timer as Timer).start()`: a Timer
                 elif aw:
                     segs.append(aw.group(1))  # `(await res).toString()`: what res holds
                 elif (nc_ := re.match(r"^[^?()]*(?:\([^()]*\)[^?()]*)*\?\?\s*", inner)) and \
