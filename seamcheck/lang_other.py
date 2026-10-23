@@ -681,11 +681,14 @@ def _js_imports(mod: Module, rel: str, text: str, lines: list[str]) -> None:
         named = re.search(r"\{([^}]*)\}", clause)
         if named:
             for part in named.group(1).split(","):
+                typed = bool(_JS_REEXPORT_SKIP.match(part.strip()))
                 part = _JS_REEXPORT_SKIP.sub("", part.strip())
                 if not part:
                     continue
                 src, _, local = part.partition(" as ")
                 mod.imported[(local or src).strip()] = (where, src.strip())
+                if typed:  # `import { type Foo }`: for reading types, erased at runtime (no dependency)
+                    mod.__dict__.setdefault("type_imports", set()).add((local or src).strip())
             clause = clause[:named.start()] + clause[named.end():]
         ns = re.search(r"\*\s+as\s+([A-Za-z_$][\w$]*)", clause)
         if ns:
