@@ -55,7 +55,8 @@ _KOTLIN = [re.compile(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?([A-Za-z_]\w*)\s*\("
 # (Allman braces, the C# default: every C# method was missed); a C# body may
 # be `=> expr;`, a constructor may chain `: base(x)`.
 _STMT = r"(?!(?:return|new|else|throw|await|yield|case|goto|using|lock|fixed|checked|unchecked)\b)"
-_JAVA = [re.compile(rf"^[ \t]*(?:@\w+(?:\([^)\n]*\))?[ \t]+)*{_STMT}(?:[\w<>\[\],.?]+[ \t]+){{1,6}}([A-Za-z_]\w*)[ \t]*"
+# (a type-use annotation may sit among the modifiers: `public @Nullable Document ownerDocument()`)
+_JAVA = [re.compile(rf"^[ \t]*(?:@\w+(?:\([^)\n]*\))?[ \t]+)*{_STMT}(?:(?:@[\w.]+(?:\([^)\n]*\))?|[\w<>\[\],.?]+)[ \t]+){{1,7}}([A-Za-z_]\w*)[ \t]*"
                     r"\((?:[^;{}()]|\([^()]*\))*\)[ \t]*(?:throws [\w., ]+)?\s*\{", re.M)]
 _CS = [re.compile(rf"^[ \t]*(?:\[[^\]\n]*\][ \t]*)*{_STMT}(?:(?:[\w<>\[\],.?]+|[\w.]*<?\((?:[^()\n;{{}}=]|\([^()\n]*\))*\)[>?\[\]]*)[ \t]+){{1,6}}([A-Za-z_]\w*)[ \t]*(?:<[^>\n]*>)?[ \t]*"
                   r"\((?:[^;{}()]|\([^()]*\))*\)[ \t]*(?::[ \t]*(?:base|this)[ \t]*\((?:[^;{}()]|\([^()]*\))*\))?"
