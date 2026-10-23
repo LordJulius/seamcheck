@@ -445,3 +445,25 @@ class CppHoldoutFixes4(unittest.TestCase):
         self.assertNotIn("src/string.other.string.str", names)
         self.assertFalse(any(d.endswith("fclose") for d in names), got)  # libc's
         self.assertTrue(any(d.endswith("Message.Message") and e for d, e in got), got)
+
+
+CS3 = {
+    "src/Lib.csproj": "<Project><ItemGroup><Using Include=\"System.Linq.Expressions.Expression\" Static=\"true\"/></ItemGroup></Project>\n",
+    "src/Builder.cs": "public static class Other\n{\n    public static object Default(object t) => t;\n}\n"
+                      "public class MappingBase<T>\n{\n    public void ConvertUsing(object t) { }\n}\n"
+                      "public interface IMapping { }\n"
+                      "public sealed class Mapping(int n) : MappingBase<object>(), IMapping { }\n",
+    "src/Use.cs": "public class Use\n{\n    public string Run(Mapping m, object value)\n    {\n        Default(value);\n"
+                  "        m.ConvertUsing(value);\n        switch (value)\n        {\n            case 1: return ((byte)value).ToString();\n        }\n"
+                  "        return \"\";\n    }\n}\n",
+}
+
+
+class CsHoldoutFixes3(unittest.TestCase):
+    def test_using_static_primary_ctor_bases_and_keyword_casts(self):
+        p = load(CS3)
+        got = {(d, e) for d, _l, e in p.edges.get("src/Use.Run", [])}
+        names = {d for d, _ in got}
+        self.assertNotIn("src/Builder.Other.Default", names)  # Expression.Default, through the .csproj's static using
+        self.assertIn(("src/Builder.MappingBase`1.ConvertUsing", True), got)
+        self.assertFalse(any(d.endswith("ToString") for d in names), got)

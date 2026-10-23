@@ -136,7 +136,7 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                     j = _skip_back_ws(code, g)
             s = _ident_back(code, j)
             if s < j and code[s:j] in ("return", "await", "throw", "yield", "case", "in", "else", "and", "or", "not") \
-                    and code[:s].rstrip()[-1:] not in (".", ":", ">", "$"):  # (`callback.await()` is a method)
+                    and not code[:s].rstrip().endswith((".", "::", "->", "$")):  # (`callback.await()` is a method)
                 s = j  # `return (x ?? y).ToString()`: a keyword before a parenthesized expression, no call
             if s == j and j > 1 and code[j - 1] == "!" and code[j - 2] in _IDENT_CH and code[j - 2:j] != "!!":
                 ms = _ident_back(code, j - 1)  # Rust `arg!(...)`: a macro's value starts the chain
@@ -146,7 +146,8 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
             if s == j:  # `(expr).x`: a parenthesized expression
                 inner = code[k + 1:i - 1]
                 cast = re.search(r"\bas[!?]?\s+([A-Z][\w.]*)\s*[?]?\s*$", inner) or \
-                    re.match(r"\s*\(\s*([A-Z][\w.]*)(?:<[^()]*>)?\s*\)\s*[\w$]", inner)  # Java / C# `((Foo) x).y()`
+                    re.match(r"\s*\(\s*([A-Z][\w.]*|byte|sbyte|short|ushort|int|uint|long|ulong|char|bool|decimal|double|float|string|object)"
+                             r"(?:<[^()]*>)?\s*\)\s*[\w$(]", inner)  # Java / C# `((Foo) x).y()`, `((byte)value).ToString()`
                 aw = re.match(r"^\s*(?:await|try[?!]?)\s+([A-Za-z_$][\w$]*)\s*$", inner)
                 # `(&Command{...}).Run()` (Go), `(new Foo(x)).bar()`: the value the literal builds
                 lit = re.match(r"^\s*&?((?:[A-Za-z_]\w*\.)?[A-Z]\w*)\s*\{", inner) or \
