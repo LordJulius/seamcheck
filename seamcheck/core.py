@@ -1799,6 +1799,31 @@ def _link(project: Project, precise: bool, use_cache: bool) -> None:
     precise_mod.refine(project, trace, use_cache)
 
 
+def _cs_static_usings(project: Project, mod) -> set:
+    """C#: the simple names of the types a file's bare calls may name through
+    `using static X;` (the file's own, `global using static`, and a .csproj's
+    `<Using Include="X" Static="true"/>`)."""
+    glob = project.__dict__.get("_cs_global_static")
+    if glob is None:
+        glob = project.__dict__["_cs_global_static"] = set()
+        for m in project.modules.values():
+            if m.file.endswith(".cs") and not m.owner:
+                glob.update(x.rsplit(".", 1)[-1] for x in re.findall(r"^[ \t]*global[ \t]+using[ \t]+static[ \t]+([\w.]+)", "\n".join(m.code), re.M))
+        for dirpath, dirs, files in os.walk(project.root):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("node_modules", "bin", "obj")]
+            for fn in files:
+                if fn.endswith((".csproj", ".props")):
+                    try:
+                        with open(os.path.join(dirpath, fn), encoding="utf-8", errors="replace") as fh:
+                            glob.update(x.rsplit(".", 1)[-1] for x in re.findall(
+                                r"<Using\s+Include=\"([\w.]+)\"\s+Static=\"[Tt]rue\"", fh.read()))
+                    except OSError:
+                        pass
+    fm = project.modules.get(mod.owner, mod) if mod.owner else mod
+    own = {x.rsplit(".", 1)[-1] for x in re.findall(r"^[ \t]*using[ \t]+static[ \t]+([\w.]+)", "\n".join(fm.code), re.M)}
+    return glob | own
+
+
 def walk_order(project: Project) -> list[Func]:
     """The order calls are resolved in (and the trace written): innermost
     function first, so a call in a callback or a nested class's method is
@@ -2167,6 +2192,23 @@ def _build_edges(project: Project) -> None:
                     for g in _c_macro_targets(project, f.file, c.name):
                         project.edges[f.id].append((g.id, c.line, True))
                         project.redges[g.id].append((f.id, c.line, True))
+                    _nothing(project, f, c)
+                    continue
+            if not targets and not q and not c.chain and mod is not None and f.file.endswith(".cs") and c.name[:1].isupper():
+                # C# has no free functions: a bare call is the enclosing classes' (or their bases'),
+                # or a `using static` type's (`Call(...)`, `Default(...)`: System.Linq.Expressions.Expression's)
+                statics = _cs_static_usings(project, mod)
+                scope, o = set(), mod.name
+                while o in project.modules:
+                    scope.update(types.ancestors(o))
+                    if not project.modules[o].owner:
+                        break
+                    o = o.rsplit(".", 1)[0]
+                cands_ = [g for g in project.by_name.get(c.name, ()) if g.file.endswith(".cs") and g.kind != "top"]
+                if cands_ and not any(g.module in scope or (project.modules[g.module].decls and
+                                                            project.modules[g.module].decls[0].split("`")[0] in statics)
+                                      for g in cands_) and c.name not in {m_.decls[0].split("`")[0] for m_ in
+                                                                          (project.modules[g.module] for g in cands_) if m_.decls}:
                     _nothing(project, f, c)
                     continue
             if not targets and not q and not c.chain and mod is not None and f.file.endswith((".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh")):

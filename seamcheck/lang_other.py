@@ -1139,6 +1139,7 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
                             if ch2 == "," and depth == 0:
                                 parts.append(raw_tail[1][last:k2])
                                 last = k2 + 1
+                        parts = [re.sub(r"\s*\((?:[^()]|\([^()]*\))*\)\s*$", "", x) for x in parts]  # `Base<T>(a, b)`: C# 12's base call
                         gb = [generic_name(x).split(".")[-1] for x in parts if generic_name(x)]
                         bases = [b for b in gb if b.split("`")[0] not in _BASE_SKIP] or bases
         span = None
