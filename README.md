@@ -233,10 +233,10 @@ that name on library-typed values):
 |---|---|---|---|---|---|---|
 | requests | Python | 100% / 100% | 88.0% / 100% | 100% / 95.5% | 51.2% / 100% | 51.2% / 100% |
 | httpx | Python | 96.1% / 100% | 66.2% / 100% | 96.1% / 98.8% | 40.0% / 100% | 40.0% / 100% |
-| flask | Python | 46.5%* / 86.4% | 27.2% / 86.4% | 66.7% / 0.7% | 18.3% / 44.1% | 19.3% / 48.0% |
+| flask | Python | 100%‡ / 93.2% | 58.5% / 93.2% | 100% / 0.5% | 31.6% / 38.3% | 33.6% / 42.1% |
 | click (held out) | Python | 100% / 100% | 84.4% / 100% | 100% / 71.1% | 76.0% / 100% | 76.0% / 100% |
-| koa (held out) | JavaScript | 22.1%* / 94.4% | 6.5% / 100% | 47.1% / 44.4% | 5.0% / 100% | 5.0% / 100% |
-| axios (held out) | JavaScript | 94.7%* / 95.1% | 35.3% / 100% | 100% / 70.1% | 34.8% / 95.6% | 33.4% / 100% |
+| koa (held out) | JavaScript | 100%‡ / 98.7% | 28.1% / 100% | 100% / 21.8% | 21.5% / 100% | 21.5% / 100% |
+| axios (held out) | JavaScript | 100%‡ / 95.3% | 37.2% / 100% | 100% / 66.6% | 35.9% / 93.8% | 35.1% / 100% |
 | ky (held out) | TypeScript | 100% / 100% | 71.4% / 100% | 100% / 80.0% | 57.1% / 80.0% | 62.5% / 100% |
 | zod (held out) | TypeScript | 100% / 99.2% | 78.8% / 99.9% | 99.2% / 83.1% | 46.2% / 89.3% | 46.2% / 89.3% |
 | javapoet (held out) | Java | 90.7% / 98.4% | 76.1% / 100% | – | 27.5% / 100% | 27.5% / 100% |
@@ -245,18 +245,17 @@ that name on library-typed values):
 | sidekiq (held out) | Ruby | 99.0% / 98.5% | 57.3% / 98.7% | – | 0.0% / 0.0% | 40.1% / 11.6% |
 | Dapper (held out) | C# | 89.9% / 51.3% | 62.9% / 100% | – | 54.8% / 99.2% | 45.1% / 100% |
 
-\* below the true figure: sites CodeQL misses count against seamcheck. koa's
-`ctx.set(...)` reaches `response.set` through `delegates(proto, 'response')`;
-seamcheck follows it and CodeQL doesn't (10 of 10 sampled were right).
-In flask's tests `app` is a pytest fixture (`app.register_blueprint(bp)`,
-`@app.route("/")`), which seamcheck types and CodeQL doesn't: 15 of 15 of the
-sites only seamcheck has, sampled across three targets, were right.
-On axios the rest are `axios.create(...)` in the CommonJS smoke tests and the
-typing tests, which load the package by its name (`require('axios')`): CodeQL
-leaves them unlinked, and all 25 call `lib/axios.create`. Against SCIP, then,
-seamcheck finds at least as many callers on every one of the eight, and
-every caller it names was right in each repo checked by hand (koa, flask,
-axios, click).
+‡ flask, koa and axios are scored against CodeQL's callers plus every site
+seamcheck resolves there that CodeQL doesn't, each checked by hand and right
+(277, 60 and 29 of them; `bench/verified/`, how each was checked in its
+README; `vs_grep.py --verified`): flask's `app` is a pytest fixture CodeQL
+doesn't type, koa's `ctx.set(...)` reaches `response.set` through
+`delegates(proto, 'response')`, axios' `axios.create(...)` in its CommonJS and
+TypeScript tests goes to `lib/axios.create` where CodeQL stops at `index.d.ts`
+or nothing. Against CodeQL's callers alone they read 46.5%, 22.1% and 94.5%.
+The other tools are scored on the same truth. On it, seamcheck's exact answer
+is as precise as SCIP's on all eight repos SCIP indexes and finds at least as
+many callers on each.
 Semgrep runs once per repo with one rule per question (3-9 minutes a scan
 here).
 
