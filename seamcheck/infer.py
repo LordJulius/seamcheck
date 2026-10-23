@@ -692,6 +692,9 @@ class Types:
                 hits = [h for mn in v[1] for h in _in_scope(self.p, mn, name)] or self.method(list(v[1]), name)[0]
             elif v[0] == "inst":
                 hits = self.method(list(v[1]), name)[0]
+                if not hits and mod.file.endswith(_JS_EXTS[:-1]) and any(self.external_base(mn) for mn in v[1]):
+                    self.cache[key] = EXT  # `server.post('/', (req, res) => ...)` on `{...} & express.Express`
+                    return EXT
         else:
             if name == "new" and f is not None and mod.file.endswith(".cs"):
                 name = self._target_typed_new(mod, f, spec) or name  # `Foo x = new(b => ...)`, `=> new(b => ...)`
@@ -1147,6 +1150,10 @@ class Types:
             held = f.bound.get(name, "") if f is not None else ""
             if held.startswith("call:"):  # a closure: calling it gives its body's value
                 return self.chain(mod, f, tuple(held[5:].split("\x1f")), depth + 1, self_mods)
+            if held and not held.startswith("lam:") and fm.file.endswith(_JS_EXTS) and depth < _MAX:
+                v = self.held(mod, f, held, depth + 1, self_mods)  # `api(url)` with `api: KyInstance`: its call signature's
+                if v and v[0] == "inst" and (got := self.field(list(v[1]), "()", depth + 1)) not in (None, UNKNOWN):
+                    return got
             if name in self._lib_results():
                 return EXT  # `hc<App>(url)`: a runtime proxy (packs' [[returns]])
             g = self.bare(mod, f, name)
@@ -1606,6 +1613,10 @@ class Types:
                 return self.returns(hits[0], sm_, depth + 1, targs)
             if hits and kind == "inst" and {g.returns for g in hits if g.returns} == {"Self"} and mod.file.endswith(".swift"):
                 return cur  # `request.validate()`: each overload declared returns `Self` (the rest unread)
+            if not hits and kind == "inst" and mod.file.endswith(_JS_EXTS) and depth < _MAX:
+                got = self.field(list(mods), name + "()", depth)  # a TS member signature `get: (u) => ResponsePromise`
+                if got is not None and got is not UNKNOWN:
+                    return got
             if not hits and kind == "static" and mod.file.endswith(_JS_EXTS) and depth < _MAX:
                 alt = self._js_default_reexport(mods)
                 if alt:  # `require('express')` is index.js, `module.exports = require('./lib/express')`

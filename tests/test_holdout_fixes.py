@@ -288,3 +288,23 @@ class JsMixinFixes(unittest.TestCase):
         got = {(d, e) for d, _l, e in p.edges[fid]}
         self.assertIn(("lib/core/InterceptorManager.use", True), got)
         self.assertEqual({d for d, _ in got} & {"lib/utils.test"}, set())
+
+
+TS = {
+    "src/types.ts": "export type Resp = {\n  text: () => Promise<string>;\n  blob(): Promise<Blob>;\n} & Promise<Response>;\n"
+                    "export type Inst = {\n  (url: string): Resp;\n  get: (url: string) => Resp;\n  extend: (o: object) => Inst;\n};\n"
+                    "export type Server = {\n  url: string;\n} & express.Express;\n",
+    "src/index.ts": "import type {Inst} from './types.js';\n\nconst make = (): Inst => {\n  return null as any;\n};\n"
+                    "const ky = make();\nexport default ky;\n",
+    "src/other.ts": "export function text() {\n  return 1;\n}\n",
+    "test/t.test.ts": "import ky from '../src/index.js';\nimport type {Server} from '../src/types.js';\n\n"
+                      "test('x', (server: Server) => {\n  const api = ky.extend({});\n  api('u').text();\n  ky.get('u').text();\n"
+                      "  server.post('/', (req, res) => { res.status(500); });\n});\n",
+}
+
+
+class TsTypeLiteralFixes(unittest.TestCase):
+    def test_object_type_aliases_are_interfaces_with_member_signatures(self):
+        p = load(TS)
+        fid = next(k for k in p.edges if k.startswith("test/t.test."))
+        self.assertNotIn("src/other.text", {d for d, _l, _e in p.edges[fid]})

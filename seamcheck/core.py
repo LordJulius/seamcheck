@@ -1919,6 +1919,10 @@ def _build_edges(project: Project) -> None:
                     elif kind != "pkg" and any(types.external_base(mn) for mn in mods_):
                         _nothing(project, f, c)  # inherited from a library supertype
                         continue
+                    elif kind == "inst" and mods_ and f.file.endswith(infer._JS_EXTS) and any(
+                            project.modules[mn].kind == "interface" and c.name in project.modules[mn].methods for mn in mods_):
+                        _nothing(project, f, c)  # a TS type's member no project class implements: an object's, unknown
+                        continue
                     elif kind == "inst" and mods_ and all(project.modules[mn].kind == "interface" and (
                             project.modules[mn].file.endswith(".d.ts") and not types._es_module(project.modules[mn].file)
                             or (project.modules[mn].decls or [""])[0] in _DOM_GLOBALS) for mn in mods_):
