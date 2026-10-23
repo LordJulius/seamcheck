@@ -1,0 +1,43 @@
+name: seamcheck
+description: Check the contracts between a codebase's parts, and injections, with no config. Annotations on the diff or code-scanning alerts.
+branding: { icon: check-square, color: green }
+inputs:
+  mode:
+    description: "gate (may this change land? annotations on the diff) or check (every rule)"
+    default: gate
+  format:
+    description: "github (annotations) or sarif (written to the sarif-file output)"
+    default: github
+  args:
+    description: extra arguments, e.g. "--errors-only" or "--only security"
+    default: ""
+outputs:
+  sarif-file:
+    description: the SARIF file, when format is sarif
+    value: ${{ steps.run.outputs.sarif }}
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        FORMAT: ${{ inputs.format }}
+        ARGS: ${{ inputs.args }}
+        BASE: ${{ github.base_ref }}
+        PYTHONPATH: ${{ github.action_path }}
+      run: |
+        py=python3
+        "$py" -c 'import sys; sys.exit(sys.version_info < (3, 11))' || { echo "::error::seamcheck needs Python 3.11+ (add actions/setup-python)"; exit 1; }
+        cmd=("$py" -m seamcheck "$MODE")
+        if [ "$MODE" = gate ] && [ -n "$BASE" ]; then
+          git fetch -q --depth=1 origin "$BASE" || true
+          cmd+=(--since "origin/$BASE")
+        fi
+        if [ "$FORMAT" = sarif ]; then
+          out="$RUNNER_TEMP/seamcheck.sarif"
+          "${cmd[@]}" --format sarif $ARGS > "$out" || true
+          echo "sarif=$out" >> "$GITHUB_OUTPUT"
+        else
+          "${cmd[@]}" --format "$FORMAT" $ARGS
+        fi
