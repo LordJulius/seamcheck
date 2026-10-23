@@ -467,3 +467,23 @@ class CsHoldoutFixes3(unittest.TestCase):
         self.assertNotIn("src/Builder.Other.Default", names)  # Expression.Default, through the .csproj's static using
         self.assertIn(("src/Builder.MappingBase`1.ConvertUsing", True), got)
         self.assertFalse(any(d.endswith("ToString") for d in names), got)
+
+
+ZOD2 = {
+    "src/types.ts": "export class ZodString {\n  static create = (p?: object): ZodString => {\n    return new ZodString();\n  };\n"
+                    "  parse(x: unknown): string {\n    return \"\";\n  }\n}\n"
+                    "export const coerce = {\n  string: ((arg) => ZodString.create({ ...arg })) as (typeof ZodString)[\"create\"],\n};\n",
+    "src/schemas.ts": "export function ipv6(params?: string): ZodIPv6 {\n  return new ZodIPv6();\n}\n"
+                      "export class ZodIPv6 {\n  safeParse(x: unknown) {\n    return 1;\n  }\n}\n"
+                      "export const ZodStringProto = {\n    ipv6(params) {\n      return this.check(params);\n    },\n};\n",
+    "test/c.test.ts": "import { coerce } from \"../src/types\";\nimport { ipv6 } from \"../src/schemas\";\n\n"
+                      "test(\"c\", () => {\n  coerce.string().parse(1);\n  ipv6().safeParse(\"x\");\n});\n",
+}
+
+
+class ZodPatternFixes2(unittest.TestCase):
+    def test_object_of_arrows_and_top_level_definition_wins(self):
+        p = load(ZOD2)
+        got = {(d, e) for k, es in p.edges.items() if k.startswith("test/c.test") for d, _l, e in es}
+        self.assertIn(("src/types.ZodString.parse", True), got)
+        self.assertIn(("src/schemas.ZodIPv6.safeParse", True), got)
