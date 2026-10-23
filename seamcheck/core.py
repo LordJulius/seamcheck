@@ -1831,7 +1831,7 @@ def _js_plain_function(project: Project, g: Func) -> bool:
     m = project.modules.get(g.module)
     if m is None or m.owner or m.kind or not 0 < g.start <= len(m.raw):
         return False
-    if not re.match(rf"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\s*\*?\s*{re.escape(g.name)}\s*[(<]|"
+    if not re.match(rf"^\s*(?:export\s+)?(?:default\s+)?(?:return\s+)?(?:async\s+)?(?:function\s*\*?\s*{re.escape(g.name)}\s*[(<]|"
                     rf"(?:const|let|var)\s+{re.escape(g.name)}\s*=)", m.raw[g.start - 1]):
         return False
     stored = project.__dict__.setdefault("_js_stored_names", {})
