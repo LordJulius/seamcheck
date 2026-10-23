@@ -633,3 +633,19 @@ class CsLibraryInterfaceExtensionFixes(unittest.TestCase):
         got = {(d, e) for d, _l, e in p.edges.get("tests/T.Run", [])}
         self.assertIn(("src/SqlMapper.Execute", True), got)
         self.assertNotIn("src/Other.Execute", {d for d, _ in got})
+
+
+CPP5 = {
+    "include/sinks/base_sink.h": "#pragma once\nnamespace sinks {\ntemplate <typename Mutex>\nclass base_sink {\npublic:\n"
+                                 "    void set_pattern(int p);\nprotected:\n    virtual void set_pattern_(int p);\n};\n}\n",
+    "include/sinks/base_sink-inl.h": "#pragma once\n#include \"base_sink.h\"\ntemplate <typename Mutex>\n"
+                                     "void sinks::base_sink<Mutex>::set_pattern(int p) {\n    set_pattern_(p);\n}\n"
+                                     "template <typename Mutex>\nvoid sinks::base_sink<Mutex>::set_pattern_(int p) {\n}\n",
+}
+
+
+class CppTemplateQualifierFixes(unittest.TestCase):
+    def test_out_of_line_template_members_are_functions(self):
+        p = load(CPP5)
+        fid = next(k for k in p.funcs if k.endswith("base_sink.set_pattern"))
+        self.assertTrue(any(d.endswith("set_pattern_") and e for d, _l, e in p.edges.get(fid, [])))
