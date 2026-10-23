@@ -38,6 +38,20 @@ GOOD = {
                           "app.get('/', function (req, res) {\n  res.send('hi')\n})\n"},
     "hono": {"package.json": '{"name": "api", "dependencies": {"hono": "^4"}}',
              "src/index.ts": "import { Hono } from 'hono'\nconst app = new Hono()\napp.get('/', (c) => c.text('hi'))\n"},
+    # request data that goes only through a parameterized query, an int(), a sanitizer, or a fixed command
+    "security": {"app.py": ("from flask import request\nimport subprocess\n\n\ndef show(db):\n"
+                            "    uid = request.args.get(\"id\")\n    db.execute(\"SELECT * FROM t WHERE id = ?\", (uid,))\n"
+                            "    n = int(request.args.get(\"n\"))\n    subprocess.run(\"seq %d\" % n, shell=True)\n"
+                            "    subprocess.run(\"date\")\n    log(uid)\n\n\ndef log(text):\n    print(text)\n"),
+                 "server.js": ("const { exec } = require(\"child_process\");\n"
+                               "function list(req, res) {\n  const dir = sanitizePath(req.query.dir);\n  exec(\"ls \" + dir);\n"
+                               "  db.query(\"SELECT * FROM t WHERE id = $1\", [req.params.id]);\n  res.redirect(\"/home\");\n}\n"),
+                 "page.php": "<?php\n$id = intval($_GET['id']);\nmysqli_query($db, \"SELECT * FROM t WHERE id = $id\");\n",
+                 "app/controllers/users_controller.rb": ("class UsersController\n  def show\n"
+                                                         "    @user = User.where(id: params[:id]).first\n"
+                                                         "    redirect_to :login\n  end\nend\n"),
+                 "tests/test_app.py": "import subprocess\nfrom flask import request\n\n\ndef test_x():\n"
+                                      "    subprocess.run(request.args[\"c\"], shell=True)\n"},
     "compose": {"app/src/main/java/LauncherViewModel.kt": VM_AFTER,
                 "app/src/main/java/Sync.kt": "class Sync(val vm: VM) {\n  fun start() {\n    vm.viewModelScope.launch { run() }\n  }\n}\n",
                 "app/src/test/java/SyncTest.kt": "fun go() {\n  GlobalScope.launch { }\n}\n"},
@@ -60,6 +74,26 @@ BAD = {
             "singleton-import": {**QML_FILES, "qml/VButton.qml": "import QtQuick\nRectangle {\n  radius: Tokens.gap\n}\n"},
             "js-shadows-type": {**QML_FILES, "qml/HubMove.js": ".pragma library\nfunction ok() { return 1 }\n"},
             "unknown-type": {**QML_FILES, "qml/Main.qml": "import QtQuick\nItem {\n  Sheet { }\n}\n"}},
+    "security": {
+        # the value reaches the shell through a helper's parameter
+        "python-injection": {"app.py": ("from flask import request\nimport subprocess\n\n\ndef ping():\n"
+                                        "    host = request.args.get(\"host\")\n    run(host)\n\n\n"
+                                        "def run(h):\n    subprocess.run(\"ping \" + h, shell=True)\n")},
+        "js-injection": {"server.js": ("const { exec } = require(\"child_process\");\n"
+                                       "function ping(req, res) {\n  const host = req.query.host;\n  exec(`ping ${host}`);\n}\n")},
+        "php-injection": {"page.php": "<?php\n$id = $_GET['id'];\nmysqli_query($db, \"SELECT * FROM t WHERE id = $id\");\n"},
+        "ruby-injection": {"app/controllers/users_controller.rb": ("class UsersController\n  def show\n"
+                                                                   "    @user = User.where(\"id = #{params[:id]}\").first\n"
+                                                                   "  end\nend\n")},
+        "go-injection": {"main.go": ("package main\n\nimport (\n\t\"net/http\"\n\t\"os/exec\"\n)\n\n"
+                                     "func handler(w http.ResponseWriter, r *http.Request) {\n"
+                                     "\thost := r.URL.Query().Get(\"host\")\n\texec.Command(\"sh\", \"-c\", \"ping \"+host).Run()\n}\n")},
+        "java-injection": {"src/Ping.java": ("public class Ping {\n    public void doGet(HttpServletRequest request) throws Exception {\n"
+                                             "        String host = request.getParameter(\"host\");\n"
+                                             "        Runtime.getRuntime().exec(\"ping \" + host);\n    }\n}\n")},
+        "csharp-injection": {"PingController.cs": ("public class PingController {\n    public void Get() {\n"
+                                                   "        var host = Request.Query[\"host\"];\n"
+                                                   "        Process.Start(\"cmd.exe\", \"/c ping \" + host);\n    }\n}\n")}},
     "compose": {"init-order": {"app/src/main/java/LauncherViewModel.kt": VM_BEFORE},
                 "inert-control": {"app/src/main/java/Bar.kt": "@Composable\nfun Bar() {\n  IconButton(onClick = {}) { }\n}\n"},
                 "no-global-scope": {"app/src/main/java/Sync.kt": "class Sync {\n  fun start() {\n"
@@ -136,8 +170,8 @@ class InitDetectsPacks(unittest.TestCase):
             with open(os.path.join(root, "desk/Main.qml"), "w") as fh:
                 fh.write("import QtQuick\nItem { }\n")
             text, summary = init.render(root)
-            self.assertIn('packs = ["compose", "phoenix", "qml", "react"]', text)
-            self.assertIn("rule packs: compose, phoenix, qml, react", summary)
+            self.assertIn('packs = ["compose", "phoenix", "qml", "react", "security"]', text)
+            self.assertIn("rule packs: compose, phoenix, qml, react, security", summary)
             with open(os.path.join(root, "seamcheck.toml"), "w") as fh:
                 fh.write(text)
             cfg, problems = config.load(root)

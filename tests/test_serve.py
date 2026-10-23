@@ -25,7 +25,7 @@ FILES = {
     "src/app/view.py": "from .store import save\n\n\ndef show(x):\n    return save(x)\n",
     "tests/test_view.py": "from app.view import show\n\n\ndef test_show():\n    show(1)\n",
 }
-TOOLS = {"check", "gate", "callers", "callees", "path", "find", "context", "refs", "impact", "stats", "unused", "tests"}
+TOOLS = {"check", "gate", "callers", "callees", "path", "find", "context", "refs", "impact", "stats", "unused", "tests", "search"}
 
 
 def git(root, *args):

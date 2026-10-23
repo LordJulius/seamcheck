@@ -1532,7 +1532,7 @@ _TS_SIGNATURE = re.compile(r"^\s*(?:(?:public|private|protected|static|readonly|
 
 
 def _top_calls(top: Func, mods_: list, code: str, lines: list[str], tk: str, fam: str) -> None:
-    """JS / TS: the calls a module makes outside its functions: `const app = express()`,
+    """JS / TS / PHP: the calls a file makes outside its functions: `const app = express()`,
     `app.use(router)`, and a test file's `describe` / `before` callbacks (not
     functions of their own), so who calls `createApp` counts them."""
     covered = set()
@@ -2310,7 +2310,7 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             imod.kind, imod.methods = "interface", names
             mods[iname] = imod
     top = Func(mod.name, "<top>", rel, 1, len(lines), "", kind="top")
-    if fam == "js" and ext != ".qml" and not rel.endswith(".d.ts"):
+    if (fam == "js" and ext != ".qml" and not rel.endswith(".d.ts")) or php:  # (PHP: a page script's code)
         _top_calls(top, [mod, *mods.values()], code, lines, tk, fam)
     if fam == "js":  # module-level callbacks (`app.get('/', function (req, res) {` at the top of a file)
         top.code = code

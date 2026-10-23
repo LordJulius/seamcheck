@@ -9,7 +9,7 @@ the repo). All are merged in that order:
 - `[[rule]]`, `[[invariant]]`, `[[contract]]` lists: concatenated. Each entry
   remembers the file it came from (`_file`), and an id used twice is an error.
 - `[project] packs = ["phoenix"]`: the rules of `seamcheck/packs/phoenix.toml`
-  join as `phoenix/<id>`. A project rule with a pack rule's id overrides that
+  join as `phoenix/<id>`. With no config file at all, DEFAULT_PACKS (security) run. A project rule with a pack rule's id overrides that
   rule's keys (`severity = "warn"`, `gate = "off"`, a narrower `in`).
 """
 from __future__ import annotations
@@ -36,6 +36,7 @@ SEVERITIES = {"error", "warn", "info"}
 TABLES = ("project", "runtime", "deps", "tidy", "gate", "precise")
 # keys whose lists add up across files instead of the last file winning
 ADDITIVE = ("include", "exclude", "packs")
+DEFAULT_PACKS = ("security",)  # what `check` runs in a repo with no config at all
 PACKS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "packs")
 
 
@@ -62,7 +63,10 @@ def load(root: str, extra: list[str] | None = None) -> tuple[dict, list[str]]:
     problems = []
     seen: dict[tuple[str, str], str] = {}
     listed: dict[str, str] = {}  # pack name -> the config file that listed it
-    for path in files_for(root, extra):
+    paths = files_for(root, extra)
+    if not paths:  # a repo with no config yet: the rules true for any project
+        listed = {name: "(no seamcheck.toml: built-in default)" for name in DEFAULT_PACKS}
+    for path in paths:
         rel = os.path.relpath(path, root) if path.startswith(root) else path
         try:
             with open(path, "rb") as fh:

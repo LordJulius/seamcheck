@@ -259,7 +259,8 @@ def list_files(root: str, include: list[str], exclude: list[str]) -> list[str]:
     try:
         # ripgrep filters up front (and honours .gitignore): listing is most of
         # the cost on big repos otherwise.
-        args = ["rg", "--files", "--hidden", "-g", "!.git"]
+        # (--follow: a workspace folder of symlinks to checkouts is one graph across them)
+        args = ["rg", "--files", "--hidden", "--follow", "-g", "!.git"]
         for g in include:
             args += ["-g", g]
         for g in exclude:
@@ -270,12 +271,36 @@ def list_files(root: str, include: list[str], exclude: list[str]) -> list[str]:
         # and _build, 164 s instead of 14): git's own listing honours .gitignore
         out = _git_files(root)
         if out is None:
-            out = []
-            for dp, dn, fn in os.walk(root):
+            out, seen = [], set()
+            for dp, dn, fn in os.walk(root, followlinks=True):
+                real = os.path.realpath(dp)
+                if real in seen:  # (a symlink loop)
+                    dn[:] = []
+                    continue
+                seen.add(real)
                 dn[:] = [d for d in dn if d not in (".git", "node_modules", "_build", "deps", ".gradle", "build")]
                 for f in fn:
                     out.append(os.path.relpath(os.path.join(dp, f), root))
-    return sorted(p for p in out if match_any(p, include) and not match_any(p, exclude))
+    return _one_copy(root, sorted(p for p in out if match_any(p, include) and not match_any(p, exclude)))
+
+
+def _one_copy(root: str, files: list[str]) -> list[str]:
+    """Each real file once: a symlink inside the repo to a folder it already holds
+    (swift-argument-parser's Plugins/*/GenerateCommon) would define everything twice.
+    The path without a link wins; a link to code outside the root (a workspace) stays."""
+    real_root = os.path.realpath(root)
+    seen, out = {}, []
+    for rel in files:
+        real = os.path.realpath(os.path.join(root, rel))
+        direct = real == os.path.join(real_root, rel)
+        if real in seen:
+            if direct and not seen[real][1]:
+                out[seen[real][0]] = rel
+                seen[real] = (seen[real][0], True)
+            continue
+        seen[real] = (len(out), direct)
+        out.append(rel)
+    return sorted(out)
 
 
 def _stamp(root: str, rel: str):

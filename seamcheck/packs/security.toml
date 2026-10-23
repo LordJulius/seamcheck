@@ -1,0 +1,105 @@
+# Security: a request value that reaches a dangerous call, in any project.
+# `[project] packs = ["security"]` (`seamcheck init` lists it for every repo).
+#
+# Each rule is a `path` rule with a `source`: a function that reads the request
+# is an entry point, and a sink counts only when its arguments come from that
+# value (directly, through names assigned from it, or through the parameters of
+# the functions it is passed to, `depth` exact calls deep). A value passed
+# through a call named like an `unless` entry is clean. This is reachability
+# plus a local taint, not full data flow: a value kept in a container or an
+# object's field is not followed. Narrow `from` or add sinks by overriding a
+# rule by its id (`security/python-injection`).
+
+[[rule]]
+id = "python-injection"
+kind = "path"
+why = "request data reaching a shell, eval, SQL, deserializer, template or file path is injection"
+fix = "validate or escape the value, use parameters (SQL) and safe loaders (yaml.safe_load), or allow-list it"
+from = ["**/*.py:*"]
+source = 'request\.(args|form|values|json|data|files|cookies|headers|url|path|full_path|referrer|get_json|stream|GET|POST|FILES|COOKIES|META|body|query_params|query|path_params)'
+to = ['^subprocess\.(Popen|run|call|check_call|check_output|getoutput|getstatusoutput)$', '^os\.(system|popen|exec\w*|spawn\w*)$',
+      '^(eval|exec)$', '\.(execute|executemany|executescript|raw|extra)$', '^(pickle|cPickle|marshal|dill|jsonpickle)\.(loads?|decode)$',
+      '^yaml\.(load|unsafe_load|full_load)$', '^(render_template_string|Template|mark_safe)$', '^jinja2\.Template$',
+      '^ImageMath\.eval$', '^open$', '^send_file$', '^(redirect|HttpResponseRedirect)$',
+      '^(requests|httpx|urllib\.request|urllib2|session)\.(get|post|put|request|urlopen)$', '^urlopen$']
+unless = ["escape", "sanitize", "quote", "safe_load", "secure_filename", "safe_join", "validate", "clean", "url_for", "reverse", "int", "float", "uuid"]
+depth = 6
+
+[[rule]]
+id = "js-injection"
+kind = "path"
+why = "request data reaching a shell, eval, SQL, or the file system is injection"
+fix = "validate or escape the value, use parameterized queries and execFile with an argument list, or allow-list it"
+from = ["**/*.js:*", "**/*.mjs:*", "**/*.cjs:*", "**/*.jsx:*", "**/*.ts:*", "**/*.mts:*", "**/*.tsx:*"]
+source = '\b(req|request)\.(query|body|params|cookies|headers|url|originalUrl|path|files)\b|\bctx\.(query|params|request\.body)\b|\bc\.req\.(query|param|json|parseBody)\b'
+to = ['^(child_process|cp)\.(exec|execSync|spawn|spawnSync|execFile|execFileSync)$', '^(exec|execSync|spawn|spawnSync)$',
+      '^eval$', '^(new )?Function$', '^vm\.(runInContext|runInNewContext|runInThisContext)$',
+      '^(?!.*\b(req|request|ctx|express)\.).*\.(query|raw|\$queryRawUnsafe|\$executeRawUnsafe)$', '^(fs\.)?(readFile|readFileSync|createReadStream|writeFile|writeFileSync|unlink|unlinkSync)$',
+      '^(res|reply)\.(sendFile|download)$', '^(res|reply)\.redirect$',
+      '^(serialize|nodeSerialize)\.unserialize$', '^unserialize$',
+      '^(needle|axios|got|superagent|request|http|https)\.(get|post|put|request)$', '^fetch$']
+unless = ["escape", "sanitize", "validate", "normalize", "basename", "url_for", "parseInt", "parseFloat", "Number"]
+depth = 6
+
+[[rule]]
+id = "php-injection"
+kind = "path"
+why = "request data reaching a shell, eval, SQL, unserialize or the file system is injection"
+fix = "validate or escape the value, use prepared statements, json_decode instead of unserialize, or allow-list it"
+from = ["**/*.php:*"]
+source = '\$_(GET|POST|REQUEST|COOKIE|FILES)\b|\$request->(input|get|query|post|all|getQueryParams|getParsedBody)\b'
+to = ['^(system|exec|shell_exec|passthru|popen|proc_open|pcntl_exec)$', '^(eval|assert|create_function)$', '^unserialize$',
+      '(->|::)(query|exec|raw|statement|unprepared)$', '^(mysqli_query|mysql_query|pg_query)$',
+      '^(file_get_contents|fopen|readfile|file|unlink|include|require)$', '^header$']
+unless = ["escape", "sanitize", "quote", "intval", "basename", "htmlspecialchars", "validate", "prepare"]
+depth = 6
+
+[[rule]]
+id = "ruby-injection"
+kind = "path"
+why = "request params reaching a shell, eval, SQL, a deserializer or send is injection"
+fix = "validate the value, use bound parameters and safe loaders (YAML.safe_load), or allow-list it"
+from = ["**/*.rb:*"]
+source = '\bparams\[|\bparams\.(fetch|require|permit)|\brequest\.(params|body|query_string|path_info)\b'
+to = ['^(system|exec|spawn|eval|instance_eval|class_eval|send|public_send|try)$', '\.(send|public_send|try)$', '^(Kernel|IO|Open3)\.(system|exec|spawn|popen|popen3|capture2|capture3)$',
+      '\.(find_by_sql|execute|exec_query|where|order|pluck)$', '^(YAML|Psych)\.(load|unsafe_load)$', '^Marshal\.load$',
+      '\.constantize$', '^(File|IO)\.(read|open|write)$', '^(open|send_file|redirect_to)$']
+unless = ["sanitize", "escape", "quote", "safe_load", "permit", "validate", "to_i", "to_f", "Integer"]
+depth = 6
+
+[[rule]]
+id = "go-injection"
+kind = "path"
+why = "request data reaching a command, SQL, a template or the file system is injection"
+fix = "validate the value, use query parameters and exec.Command with fixed arguments, or allow-list it"
+from = ["**/*.go:*"]
+source = '\br\.(URL\.Query|FormValue|PostFormValue|Form|PostForm|Body|URL\.Path|URL\.RawQuery|Header\.Get)\b|\bc\.(Query|Param|PostForm|DefaultQuery|BindJSON|FormValue)\b'
+# (a prepared statement's Query / Exec take bind values, not SQL: `stmt.QueryRow(id)`)
+to = ['^exec\.Command(Context)?$', '^(?![sS]tmt\w*\.|\w*[pP]repared\w*\.).*\.(Query|QueryRow|QueryContext|QueryRowContext|Exec|ExecContext|Raw)$',
+      '^os\.(Open|OpenFile|ReadFile|WriteFile|Remove|RemoveAll)$', '^template\.(HTML|JS|URL)$', '^http\.Redirect$']
+unless = ["Clean", "sanitize", "Sanitize", "escape", "Escape", "validate", "Validate", "Base", "Atoi", "ParseInt", "ParseFloat"]
+depth = 6
+
+[[rule]]
+id = "java-injection"
+kind = "path"
+why = "request data reaching a command, SQL, a deserializer or the file system is injection"
+fix = "validate the value, use PreparedStatement parameters, or allow-list it"
+from = ["**/*.java:*", "**/*.kt:*"]
+source = '\.(getParameter|getParameterValues|getHeader|getQueryString|getInputStream|getReader|getCookies|getPathInfo)\('
+to = ['(^|\.)exec$', '^(new )?ProcessBuilder$', '\.(executeQuery|executeUpdate|execute|addBatch|createQuery|createNativeQuery)$',
+      '\.readObject$', '^(new )?(File|FileInputStream|FileOutputStream|FileReader)$', '^(Paths|Path)\.(get|of)$', '\.sendRedirect$']
+unless = ["escape", "sanitize", "validate", "normalize", "encode", "parseInt", "parseLong", "valueOf"]
+depth = 6
+
+[[rule]]
+id = "csharp-injection"
+kind = "path"
+why = "request data reaching a process, SQL or the file system is injection"
+fix = "validate the value, use SqlParameter, or allow-list it"
+from = ["**/*.cs:*"]
+source = '\bRequest\.(Query|Form|QueryString|Headers|Cookies|Body|RouteValues)\b'
+to = ['^Process\.Start$', '^(new )?(SqlCommand|NpgsqlCommand|MySqlCommand|ProcessStartInfo)$', '\.(FromSqlRaw|ExecuteSqlRaw|ExecuteSqlRawAsync)$',
+      '^File\.(ReadAllText|ReadAllBytes|WriteAllText|Open|Delete)$', '^Redirect$']
+unless = ["Escape", "Sanitize", "Validate", "GetFileName", "Encode", "Parse", "TryParse"]
+depth = 6
