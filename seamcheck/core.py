@@ -1915,6 +1915,9 @@ def _build_edges(project: Project) -> None:
                             hits, on_type = types.method(list(mods_), c.name, _argc(mod, c))
                     else:
                         hits, on_type = types.method(list(mods_), c.name, _argc(mod, c))
+                        if not hits and kind == "inst" and f.file.endswith(infer._JS_EXTS) and \
+                                (g_ := types.expando_fn(mods_, c.name)) is not None:
+                            hits, on_type = [g_], True  # `axios.create()`: `instance.create = function create(...)`
                         if kind == "inst":  # (`super.x()` runs the parent's x itself: no subtype's)
                             recv = ("\0super",) if c.chain[-1] in ("super", "base", "parent") else tuple(mods_)
                     if len(hits) > 1 and c.targs >= 0:  # C#: `NoOp()` is not `NoOp<T>()`
