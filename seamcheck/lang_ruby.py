@@ -866,8 +866,8 @@ def _collect(f: Func, b, code: str, starts: list[int], idx: list[int], lines: li
                 continue
             if name in _DECLARE:
                 continue
-            if name in _DSL_BLOCKS and lead.startswith(name) and _DO_END.search(ln):
-                continue  # `context "x" do`, `setup do`: the test framework's
+            # (`context "x" do`, `setup do`: the test framework's, or the project's own DSL
+            # (sinatra's test/contest.rb): recorded, and resolved like any bare call)
             if code[e:e + 1] != "(" and is_local(name, p):
                 continue
             f.calls.append(Call(name, "", i + 1, (), col))
@@ -1137,6 +1137,35 @@ def link(project) -> None:
     _infer_types(project, rb, r)
 
 
+_CONST_ALIAS = re.compile(r"^([ \t]*)([A-Z]\w*)[ \t]*=[ \t]*((?:::)?[A-Z]\w*(?:::[A-Z]\w*)*)[ \t]*(?:#.*)?$")
+_SCOPE_OPEN = re.compile(r"^([ \t]*)(?:class|module)[ \t]+((?:::)?[A-Z][\w:]*)")
+
+
+def _const_aliases(rb: list, r: "_Resolver") -> None:
+    """`Stream = Sinatra::Helpers::Stream` in a class body: in that scope, Stream is that class."""
+    for m in rb:
+        if m.owner:
+            continue
+        stack: list[tuple[int, str]] = []
+        for ln in m.code if isinstance(m.code, list) else []:
+            om = _SCOPE_OPEN.match(ln)
+            if om:
+                ind = len(om.group(1).expandtabs(2))
+                while stack and stack[-1][0] >= ind:
+                    stack.pop()
+                stack.append((ind, om.group(2).lstrip(":")))
+                continue
+            am = _CONST_ALIAS.match(ln)
+            if not am or am.group(3).lstrip(":") == am.group(2):
+                continue
+            ind = len(am.group(1).expandtabs(2))
+            while stack and stack[-1][0] >= ind:
+                stack.pop()
+            path = "::".join(n for _, n in stack)
+            nest = ["::".join(path.split("::")[:k]) for k in range(len(path.split("::")), 0, -1)] if path else []
+            r.aliases[f"{path}::{am.group(2)}" if path else am.group(2)] = (nest, am.group(3))
+
+
 def _link_classes(project, rb: list) -> "_Resolver":
     """Each constant's class (one of its reopenings), its supertypes and
     mixins as modules; the reopenings linked to it both ways."""
@@ -1146,6 +1175,7 @@ def _link_classes(project, rb: list) -> "_Resolver":
             idx.setdefault(m.decls[0], []).append(m.name)
     canon = {full: _canonical(project, full, names) for full, names in idx.items()}
     r = _Resolver(project, idx, canon)
+    _const_aliases(rb, r)
     for m in rb:
         if not m.owner:
             r.globals += [w for w in (r.resolve([], b[2:]) for b in m.bases if b.startswith("G\0")) if w]
@@ -1384,6 +1414,7 @@ class _Resolver:
         self.ext_super: dict[str, str] = {}  # class -> a library superclass it names (`< Hash`)
         self.full_of: dict[str, str] = {}  # a reopening's module -> the constant it reopens
         self.full_bases: dict[str, list[str]] = {}
+        self.aliases: dict[str, tuple[list[str], str]] = {}  # `A::Stream` -> (A's nesting, "Sinatra::Helpers::Stream")
 
     def full(self, mn: str) -> str:
         """The constant a class module defines (or reopens), "" for a file."""
@@ -1407,11 +1438,14 @@ class _Resolver:
             todo += self.full_bases.get(cur, [])
         return out[1:]
 
-    def resolve(self, nest: list[str], written: str) -> str:
+    def resolve(self, nest: list[str], written: str, depth: int = 0) -> str:
         if written.startswith("::"):
             return written[2:] if written[2:] in self.idx else ""
         for pre in nest + [""]:  # `Minitest::Test`: the project reopens it without declaring Minitest
             cand = f"{pre}::{written}" if pre else written
+            if cand in self.aliases and depth < 4:  # `Stream = Sinatra::Helpers::Stream` in that scope
+                a_nest, target = self.aliases[cand]
+                return self.resolve(a_nest, target, depth + 1)
             if cand in self.idx:
                 return cand
         head, _, rest = written.partition("::")
