@@ -327,6 +327,9 @@ class Types:
                 for d in (m.decls[:1] if m.owner or m.kind == "ext" else m.decls[-1:]):
                     impls += [g for g in (self.ext_fns.get((d, name)) or (self.ext_fns.get((d.split("`")[0], name), [])
                                                                           if "`" in d else [])) if g not in impls]
+                # (a library supertype: `class Response : Closeable` and the project's `fun Closeable.closeQuietly()`)
+                for b in getattr(m, "lib_bases", ()):
+                    impls += [g for g in self.ext_fns.get((b.split("<")[0].split(".")[-1], name), []) if g not in impls]
             if impls:
                 return impls, False  # (extensions: the receiver's type is sure, each overload may be the one)
         return impls, False
@@ -1583,11 +1586,12 @@ def resolve_bases(project) -> None:
             m.unresolved = True  # GDScript `extends CharacterBody3D`: an engine class
         if not m.bases or m.file.endswith((".rb", ".rake", ".ru", ".py")):  # Ruby, Python: resolved by their adapters
             continue
-        got, missing = [], False
+        got, missing, lib = [], False, []
         fm = project.modules.get(m.owner, m) if m.owner else m
         for b in m.bases:
             if b in fm.external:  # `use std::fmt::Debug`: the library's, not a project type of that name
                 missing = True
+                lib.append(b)
                 continue
             mods, _, declared = t.type_modules(m, b)
             mods = [x for x in mods if x != m.name and project.modules[x].kind != "ext"] or [x for x in mods if x != m.name]
@@ -1595,7 +1599,9 @@ def resolve_bases(project) -> None:
                 got.append(mods[0])
             elif b in fm.external or (not declared and not _from_project(project, fm, b)):
                 missing = True  # a library supertype (imported from outside, or declared nowhere)
+                lib.append(b)
         m.bases = got
+        m.lib_bases = lib  # (by name: the project's extensions on them, `fun Closeable.closeQuietly()`)
         m.unresolved = missing
         if got and not m.parent:
             m.parent = got[0]

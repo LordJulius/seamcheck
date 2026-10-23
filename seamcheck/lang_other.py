@@ -50,7 +50,8 @@ _JS = [
                rf"(?:<[^<>]{{0,400}}?(?:<[^<>]{{0,200}}(?:<[^<>\n]*>[^<>\n]*)*>[^<>]{{0,400}}?)*>)?[ \t]*\(", re.M),
 ]
 _RUST = [re.compile(r"\bfn\s+([A-Za-z_]\w*)")]
-_KOTLIN = [re.compile(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?([A-Za-z_]\w*)\s*\(")]
+# (an extension's receiver may be generic or nullable: `fun <T> List<T>.toImmutableList()`, `Array<out T>?.x()`)
+_KOTLIN = [re.compile(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+(?:<[^<>]*(?:<[^<>]*>[^<>]*)*>)?\??\.)?([A-Za-z_]\w*)\s*\(")]
 # (one line, a bounded run of type/modifier words: an unbounded one backtracked
 # exponentially on long Java files)
 # The parameters may span lines and the body may open on the next line
@@ -1006,7 +1007,7 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
             bases = []
         # header: to the body's `{` at depth 0, or to the end of the declaration
         k, depth, body = m.end(), 0, None
-        while k < n and k - m.end() < 3000:
+        while k < n and k - m.end() < 20000:  # (a Kotlin primary constructor with its docs runs long)
             ch = code[k]
             if ch in "(<[":
                 depth += 1
@@ -1029,7 +1030,9 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
         if how == "type":
             h = re.sub(r"\bwhere\b.*", "", hdr, flags=re.S)
             h = re.sub(r"<[^<>]*(?:<[^<>]*>[^<>]*)*>", "", h)  # generic arguments
-            h2 = re.sub(r"\([^()]*(?:\([^()]*\)[^()]*)*\)", "", h)  # Kotlin primary constructors, `Bar()` calls
+            h2 = h  # Kotlin primary constructors (parentheses nested any depth: annotations, defaults), `Bar()` calls
+            while "(" in h2 and (h3 := re.sub(r"\([^()]*\)", "", h2)) != h2:
+                h2 = h3
             tail = re.split(r"\bextends\b|\bimplements\b|:", h2, maxsplit=1)
             if len(tail) == 2:
                 bases = [b.split("::")[-1].split(".")[-1].split("\\")[-1] for b in re.findall(r"[A-Za-z_$][\w$.:\\]*", tail[1])]
@@ -2296,9 +2299,15 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                             tch = receiver(body, off + tm.start(2))
                             if tch:
                                 _bind_closure(f, fam, body, off + tm.end() - 1, tm.group(2), tch, sa)
+                            if tch and tk == "kotlin":
+                                # (a call with only a trailing lambda is a call: `lock.withLock { }`; Swift's
+                                # are still only read for their closure's parameters)
+                                f.calls.append(Call(tm.group(2), tch[-1] if re.match(r"^[\w$]+$", tch[-1]) else ".", i + 1, tch, tm.start(2)))
                         elif not re.search(r"[\w)\]>?]\s*$", re.sub(r"\b(?:await|try[?!]?|return|throw)\s*$", "", ln[:tm.start(2)])):
                             # `performEvent { $0... }`, `await withCheckedContinuation { c in }`: a bare call
                             _bind_closure(f, fam, body, off + tm.end() - 1, tm.group(2), (), sa)
+                            if tk == "kotlin" and not (i == sa and tm.start(2) < name_col):
+                                f.calls.append(Call(tm.group(2), "", i + 1, (), tm.start(2)))
                 if jsx:  # `<Widget ...>` renders (calls) the component Widget
                     for m in _JSX.finditer(ln):
                         f.calls.append(Call(m.group(2), m.group(1) or "", i + 1))

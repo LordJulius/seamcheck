@@ -20,8 +20,8 @@ the project writes down about how its parts fit together.
 - **Says how sure it is.** On 37 open-source repos in 16 languages, 95% or
   more of the calls into project code are exact on every one (see "How exact
   it is"). The rest are marked as guesses, never passed off as fact.
-- **Checked against CodeQL.** On 16 repos in nine languages (C, C++ and C#
-  included), where both resolve a call seamcheck names the same callee
+- **Checked against CodeQL.** On 17 repos in ten languages (C, C++, C# and
+  Kotlin included), where both resolve a call seamcheck names the same callee
   91-100% of the time (the rest mostly CodeQL's callee plus the overrides the
   declared type allows), and a different one at 0-2.4% of sites. It needs no
   build and no database: 0.5-9 s where CodeQL takes 25 s to 5 min (see "How
@@ -148,6 +148,7 @@ ground truth that runs offline on the same code.
 | flameshot | C++ | 598 | 99.3% | 0.6% | 0.2% | 90.1% | 1,403 | 23 s + 8 s | 4.6 s |
 | Polly | C# | 14,689 | 90.7% | 8.2% | 1.1% | 83.8% | 398 | 70 s + 124 s | 3.8 s |
 | Newtonsoft.Json | C# | 20,193 | 96.0% | 1.5% | 2.4% | 79.7% | 14,829 | 102 s + 57 s | 6.2 s |
+| okhttp | Kotlin | 2,470 | 88.4% | 9.8% | 1.8% | 71.3% | 76 | 72 s + 23 s (+ the compile) | 6.5 s |
 
 - **same callee**: of the sites both resolve, seamcheck's exact targets are all
   among CodeQL's. **wider**: CodeQL's callee plus overrides the receiver's
@@ -179,9 +180,15 @@ ground truth that runs offline on the same code.
   parameter type (`WriteValue(int)` in `JsonWriter` against the override in
   `JsonTextWriter`) and a generic-receiver extension method
   (`PolicyBuilder<T>.Retry()` against `PolicyBuilder.Retry()`).
-- Not compared: Kotlin and Swift (CodeQL extracts them only from a Gradle /
-  Xcode build, which couldn't run here). seamcheck reads both as they are;
-  their exactness is in "How exact it is".
+- Kotlin: CodeQL extracts Kotlin only from a compile. okhttp's own module
+  (`commonJvmAndroid` + `jvmMain`, 160 files) was compiled with kotlinc 2.0.21
+  and its jars from Maven Central, under `codeql database create --command`.
+  CodeQL's Kotlin names are unmangled (`getSink$private`), and property
+  accessors (`getSocket` for `.socket`, `@get:JvmName` properties), `init`
+  blocks and lambda `invoke`s, which no call syntax names, are left out.
+- Not compared: Swift. This CodeQL has a Linux Swift extractor, but it needs
+  a Swift toolchain, and download.swift.org was not reachable from here.
+  seamcheck's Swift exactness is in "How exact it is".
 
 Running the comparison found seamcheck bugs, all fixed (tests in `tests/`):
 JS / TS calls outside any function were never recorded (express's
@@ -195,7 +202,13 @@ several lines, `""` for a quote) ended at the line's end, so everything after
 one in a file went unread (Newtonsoft.Json's tests: 11,000 calls; coverage
 went from 58% to 80%), and that `base.X()` in one file of a `partial class`
 named the class's own method; Go's raw strings (`` `O'Brien` ``) had the same
-problem. The C++ run added methods a macro defines
+problem. The Kotlin run found that a call with only a trailing lambda
+(`withLock { }`) was never recorded, an extension on a generic receiver
+(`fun <T> List<T>.toImmutableList()`) wasn't parsed, a class header was cut
+after 3,000 characters (okhttp's `Response` and its documented constructor,
+so it lost `: Closeable`), and an extension on a library supertype a project
+class implements (`fun Closeable.closeQuietly()`) wasn't looked up; coverage
+went from 18% to 71%. The C++ run added methods a macro defines
 (flameshot's `CONFIG_GETTER_SETTER(showHelp, setShowHelp, bool)` in a class
 body: 83 of the sites missed) and calls on a temporary
 (`ConfigHandler().setShowHelp(x)`); coverage went from 74% to 90%.
