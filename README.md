@@ -19,7 +19,7 @@ the project writes down about how its parts fit together.
   Rules work on any text file.
 - **Says how sure it is.** On 37 open-source repos in 16 languages, 95% or
   more of the calls into project code are exact on every one; on 28 repos held
-  out from tuning, 83-100% (16 of them 95% or more; see "How exact it is").
+  out from tuning, 89.9-100% (16 of them 95% or more; see "How exact it is").
   The rest are marked as guesses, never passed off as fact.
 - **Checked against CodeQL.** On 17 repos in ten languages (C, C++, C# and
   Kotlin included), where both resolve a call seamcheck names the same callee
@@ -594,12 +594,12 @@ the code.
 | Python | flask 96.3%, httpx 97.3%, requests 96.1% |
 | C | jq 99.9%, redis 100.0% |
 | C++ | flameshot 98.1%, kdeconnect 97.1% |
-| C# | Polly 95.3%, Newtonsoft.Json 96.5% |
-| Java | gson 97.1%, jsoup 97.0% |
+| C# | Polly 96.3%, Newtonsoft.Json 97.9% |
+| Java | gson 97.2%, jsoup 97.0% |
 | Kotlin | nowinandroid 96.3%, okhttp 95.0% |
 | Rust | ripgrep 96.1%, bat 95.3% |
 | Go | cobra 95.6%, fzf 95.0% |
-| TypeScript | excalidraw 96.0%, hono 96.1%, plausible 98.1% |
+| TypeScript | excalidraw 96.3%, hono 96.1%, plausible 98.1% |
 | JavaScript | express 95.6%, hexpm 97.9%, plausible 96.7% |
 | Elixir | plausible 99.9%, hexpm 99.4%, phoenix 99.9% |
 | PHP | Slim 98.1%, guzzle 96.1% |
@@ -625,23 +625,23 @@ guesses and now reach nothing (named-nothing rises with them: zod's went from
 | Python | click 95.6%, rich 95.4% |
 | Go | gin 96.3%, urfave/cli 94.5% |
 | Rust | clap 95.1%, fd 95.2% |
-| TypeScript | zod 91.1%, ky 95.5% |
-| JavaScript | axios 87.7%, koa 95.9% |
-| Java | commons-lang 95.2%, javapoet 97.3% |
+| TypeScript | zod 91.1%, ky 95.6% |
+| JavaScript | axios 89.9%, koa 95.9% |
+| Java | commons-lang 96.2%, javapoet 97.3% |
 | Kotlin | moshi 94.4% |
-| C# | Dapper 83.1%, AutoMapper 90.6% |
+| C# | Dapper 94.1%, AutoMapper 93.6% |
 | Elixir | ecto 99.9%, oban 100.0% |
 | GDScript | Pixelorama 92.7% |
 | C | lua 99.9%, cJSON 97.1% |
-| C++ | fmt 90.3%, spdlog 87.0% |
+| C++ | fmt 91.4%, spdlog 92.1% |
 | Swift | Kingfisher 94.1%, SwiftyJSON 97.8% |
 | Ruby | rack 94.3%, sidekiq 91.6% |
 | PHP | monolog 98.0%, flysystem 95.6% |
 
-16 of the 28 are at 95% or more. Below it: C++ templates (fmt, spdlog), C#
-calls on `object` / `IDataReader` values Dapper passes around, axios's
-instance built by copying `Axios.prototype` onto a bound function, sidekiq's
-duck-typed Ruby, and GDScript's untyped receivers.
+16 of the 28 are at 95% or more, all at 89.9% or more. Below 95%: C++
+templates (fmt, spdlog), C# calls on parenthesized or `object` values, zod's
+schema methods built at runtime, axios test servers' callbacks handed through
+helpers, sidekiq's duck-typed Ruby, and GDScript's untyped receivers.
 
 What gets a call there, beyond imports and declared types: return types
 through chains (`a.b().c()`), generic arity (C#'s `Policy` vs `Policy<T>`),
