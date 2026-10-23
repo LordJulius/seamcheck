@@ -29,3 +29,14 @@ jobs:
         with:
           name: seamcheck.pyz
           path: dist/seamcheck.pyz
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      # the repo's own action, as a user's workflow would run it
+      - uses: ./
+      - id: sarif
+        uses: ./
+        with: { mode: check, format: sarif }
+      - run: python3 -c "import json,sys; json.load(open(sys.argv[1]))['runs']" "${{ steps.sarif.outputs.sarif-file }}"
