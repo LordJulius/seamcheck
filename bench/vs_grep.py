@@ -273,6 +273,10 @@ def main() -> None:
                        for d, ln, ex in es if not ex and d == g.id}
         wide |= {(p.funcs[fid].file, ln) for fid, ln in queries.possible_callers(p, g)}
         row["seamcheck --wide"] = _score(_align_lines({x for x in wide if x[0] in seen}, truth, p, name=g.name), truth)
+        if opt("--exact-misses"):  # (CodeQL's callers the exact answer leaves out)
+            for f_, l_ in sorted(truth - {x for x in mine if x[0] in seen})[:int(opt("--exact-misses"))]:
+                src_ = (p.by_file.get(f_) or [None])[0]
+                print(f"    XMISS {f_}:{l_}: {src_.raw[l_ - 1].strip()[:90] if src_ else ''}")
         if opt("--extras"):  # (seamcheck's exact sites CodeQL lacks: for a hand check)
             for f_, l_ in sorted({x for x in mine if x[0] in seen} - truth)[:int(opt("--extras"))]:
                 src_ = (p.by_file.get(f_) or [None])[0]

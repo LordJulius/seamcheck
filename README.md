@@ -136,7 +136,7 @@ ground truth that runs offline on the same code.
 |---|---|---|---|---|---|---|---|---|---|
 | requests | Python | 1,062 | 100.0% | 0.0% | 0.0% | 95.9% | 10 | 10 s + 15 s | 0.5 s |
 | flask | Python | 1,289 | 99.7% | 0.3% | 0.0% | 94.5% | 806 | 11 s + 16 s | 0.5 s |
-| httpx | Python | 1,867 | 99.4% | 0.6% | 0.0% | 99.3% | 96 | 12 s + 15 s | 0.8 s |
+| httpx | Python | 96.1% / 100% | 66.2% / 100% | 96.1% / 98.8% | 40.0% / 100% | 33.7% / 100% |
 | express | JavaScript | 1,069 | 99.9% | 0.0% | 0.1% | 98.5% | 1,813 | 17 s + 21 s | 1.7 s |
 | hono | TypeScript | 9,323 | 98.7% | 1.0% | 0.3% | 86.9% | 2,459 | 46 s + 35 s | 4.6 s |
 | excalidraw | TypeScript | 25,644 | 99.8% | 0.0% | 0.2% | 95.2% | 1,121 | 71 s + 61 s | 9.3 s |
@@ -232,7 +232,7 @@ that name on library-typed values):
 | repo | lang | seamcheck exact | seamcheck `--wide` | SCIP (Sourcegraph) | ast-grep | Semgrep† |
 |---|---|---|---|---|---|---|
 | requests | Python | 100% / 100% | 88.0% / 100% | 100% / 95.5% | 51.2% / 100% | 52.6% / 100% |
-| httpx | Python | 96.4% / 96.8% | 64.7% / 100% | 96.1% / 98.8% | 40.0% / 100% | 33.7% / 100% |
+| httpx | Python | 96.1% / 100% | 66.2% / 100% | 96.1% / 98.8% | 40.0% / 100% | 33.7% / 100% |
 | flask | Python | 46.5%* / 86.4% | 27.2% / 86.4% | 66.7% / 0.7% | 18.3% / 44.1% | 96.2% / 28.9% |
 | click (held out) | Python | 100% / 100% | 84.4% / 100% | 100% / 71.1% | 76.0% / 100% | 75.9% / 100% |
 | koa (held out) | JavaScript | 22.1%* / 94.4% | 6.5% / 100% | 47.1% / 44.4% | 5.0% / 100% | 9.9% / 100% |
@@ -254,7 +254,7 @@ sites only seamcheck has, sampled across three targets, were right.
 On axios the rest are `axios.create(...)` in the CommonJS smoke tests and the
 typing tests, which load the package by its name (`require('axios')`): CodeQL
 leaves them unlinked, and all 25 call `lib/axios.create`. Against SCIP, then,
-seamcheck finds more callers on every repo but httpx (96.8% against 98.8%), and
+seamcheck finds at least as many callers on every one of the eight, and
 every caller it names was right in each repo checked by hand (koa, flask,
 axios, click).
 † Semgrep took about five minutes a question, so it answered only the first one
@@ -652,7 +652,7 @@ the code.
 
 | language | repo: project calls exact (static, October 2026) |
 |---|---|
-| Python | flask 96.3%, httpx 97.3%, requests 96.1% |
+| Python | flask 96.3%, httpx 97.9%, requests 96.1% |
 | C | jq 99.9%, redis 100.0% |
 | C++ | flameshot 98.1%, kdeconnect 97.4% |
 | C# | Polly 96.6%, Newtonsoft.Json 98.5% |
