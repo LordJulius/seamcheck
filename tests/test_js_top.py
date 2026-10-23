@@ -13,6 +13,8 @@ from seamcheck import core  # noqa: E402
 FILES = {
     "lib/express.js": "exports = module.exports = createApplication;\nfunction createApplication() {\n  return {};\n}\n",
     "examples/mvc/index.js": "exports.before = function (req, res, next) {\n  next();\n};\n",
+    "examples/api.js": "/**\n * var express = require('../lib/express')\n */\nmodule.exports = function () {};\n",
+    "examples/app.js": "var app = {};\napp.use('/api', require('./api'));\n",
     "test/app.js": """var express = require('../lib/express');
 
 describe('app', function () {
@@ -58,6 +60,11 @@ class JsTop(unittest.TestCase):
 
     def test_chained_assignment(self):
         self.assertIn(("lib/express.createApplication", True), self._edges("test/app.createApp"))
+
+    def test_an_inline_require_is_a_dependency_and_a_commented_one_is_not(self):
+        deps = {w for w, _n in self.p.modules["examples/app"].imported.values()}
+        self.assertIn("examples/api", deps)
+        self.assertNotIn("lib/express", {w for w, _n in self.p.modules["examples/api"].imported.values()})
 
     def test_python_constructor_through_its_module(self):
         self.assertIn(("pkg/sessions.Session.__init__", True), self._edges("pkg/api.request"))
