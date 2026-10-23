@@ -949,6 +949,13 @@ def _resolve_imports(project: Project) -> None:
         m.reexports = [r for r in rx if r and r != EXTERNAL]
         m.external = ext - set(aliases) - set(imported)
     for m in project.modules.values():
+        for k, (w, n) in list(m.imported.items()):  # `export { renderApp as render }` in the module imported from
+            src = project.modules.get(w)
+            alias = src.bound.get("\0export:" + n, "") if src is not None else ""
+            if alias.startswith("export:") and alias[7:] != n:
+                m.imported[k] = (w, alias[7:])
+                m.external.discard(k)
+    for m in project.modules.values():
         # a name imported from a module that re-exports a library wholesale, and that no
         # project module defines (`fireEvent` through test-utils): the library's
         for k, (w, n) in list(m.imported.items()):
