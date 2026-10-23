@@ -1112,6 +1112,9 @@ def _in_scope(project: Project, where: str, name: str, depth: int = 0) -> list[F
     return []
 
 
+_JS_FILE_EXTS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts")
+
+
 def _defining_module(project: Project, where: str, name: str, depth: int = 0) -> str:
     """The module that defines the object a named import refers to
     (`import { API } from "./helpers"`, through re-exports): `API.create()`
@@ -1126,6 +1129,8 @@ def _defining_module(project: Project, where: str, name: str, depth: int = 0) ->
     if name in m.imported:
         w, n = m.imported[name]
         return _defining_module(project, w, n, depth + 1)
+    if name in m.aliases and m.file.endswith(_JS_FILE_EXTS) and m.aliases[name] in project.modules:
+        return m.aliases[name]  # `import * as z from "./external.js"; export { z }`: that module's namespace
     for w in m.reexports:
         hit = _defining_module(project, w, name, depth + 1)
         if hit:
@@ -1901,6 +1906,8 @@ def _build_edges(project: Project) -> None:
                     elif kind == "static":
                         hits = [h for mn in mods_ for h in _in_scope(project, mn, c.name)]
                         on_type = True
+                        if not hits and f.file.endswith(infer._JS_EXTS) and (g_ := types.func_ref(mods_, c.name)) is not None:
+                            hits = [g_]  # `z.string()` with `export { stringType as string }`, `stringType = ZodString.create`
                         if not hits:
                             hits, on_type = types.method(list(mods_), c.name, _argc(mod, c))
                     else:
@@ -1920,7 +1927,8 @@ def _build_edges(project: Project) -> None:
                         _nothing(project, f, c)  # inherited from a library supertype
                         continue
                     elif kind == "inst" and mods_ and f.file.endswith(infer._JS_EXTS) and any(
-                            project.modules[mn].kind == "interface" and c.name in project.modules[mn].methods for mn in mods_):
+                            project.modules[a].kind == "interface" and c.name in project.modules[a].methods
+                            for mn in mods_ for a in types.ancestors(mn)):
                         _nothing(project, f, c)  # a TS type's member no project class implements: an object's, unknown
                         continue
                     elif kind == "inst" and mods_ and all(project.modules[mn].kind == "interface" and (

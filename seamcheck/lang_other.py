@@ -804,6 +804,9 @@ def _js_reexports(mod: Module, rel: str, text: str, lines: list[str]) -> None:
                     # (what an importer of `local` gets, even when this file imports a `local` of its
                     # own: test-utils' `import { render }` and `export { renderApp as render }`)
                     mod.bound["\0export:" + local.strip()] = "export:" + src.strip()
+    for m in re.finditer(r"""^[ \t]*export[ \t]+\*[ \t]+as[ \t]+([A-Za-z_$][\w$]*)[ \t]+from[ \t]*["']([^"']+)["']""", text, re.M):
+        if lines[text.count("\n", 0, m.start())].strip().startswith("export"):  # `export * as coerce from "./coerce.js"`
+            mod.aliases.setdefault(m.group(1), f"js:{d}\0{m.group(2)}")
     for m in _JS_REEXPORT.finditer(text):
         ln = text.count("\n", 0, m.start())
         if ln >= len(lines) or not lines[ln].strip().startswith("export"):
@@ -1093,7 +1096,7 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
                 break
             elif depth <= 0 and ch == "\n" and fam in ("kotlin", "js") and code[k + 1:k + 200].lstrip()[:1] not in ("{", ":", ",", ""):
                 nxt = code[k + 1:k + 200].lstrip()
-                if not code[:k].rstrip().endswith((",", ":", "(")) and not (
+                if not code[:k].rstrip().endswith((",", ":", "(")) and not re.match(r"(?:extends|implements)\b", nxt) and not (
                         fam == "kotlin" and re.match(r"(?:@\w+\s*|(?:private|internal|public|protected)\s+)*constructor\b|@\w+\s*$|@\w+\s*\n", nxt)):
                     break  # (Kotlin: `class Builder\n  @JvmOverloads\n  constructor(...) {` goes on)
             elif ch == "=" and depth <= 0 and fam in ("js", "c") and how == "type" and not (
@@ -2125,10 +2128,15 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     fields.setdefault(home.name, {}).setdefault(m.group(1), set()).add(m.group(2))
         expr_fields: dict[str, dict[str, tuple]] = {}
         fpat = _FIELD_ASSIGN.get(tk)
+        ts_enum_lines = set()  # TS `enum Kind { ZodString = "ZodString" }`: members, not fields of the file
+        for em_ in re.finditer(r"\benum\s+[A-Za-z_$][\w$]*\s*\{", code) if fam == "js" else ():
+            e_ = lambdas.matching(code, em_.end() - 1)
+            if e_ > 0:
+                ts_enum_lines.update(range(line_of(em_.end()), line_of(e_) + 1))
         for i, ln in enumerate(lines):
             home = line_class.get(i, mod)
             got_fields = fields.setdefault(home.name, {})
-            if fpat and not inside[i]:  # `private val client = rule.newClient()`: a property's value says its type
+            if fpat and not inside[i] and i not in ts_enum_lines:  # `private val client = rule.newClient()`: a property's value says its type
                 for m in fpat.finditer(ln):
                     ch = expression(code, line_start[i] + m.end())
                     if ch and fam == "js" and ch[0] in ("require()", "import()"):
