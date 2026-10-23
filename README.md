@@ -19,7 +19,7 @@ the project writes down about how its parts fit together.
   Rules work on any text file.
 - **Says how sure it is.** On 37 open-source repos in 16 languages, 95% or
   more of the calls into project code are exact on every one; on 28 repos held
-  out from tuning, 91.5-100% (22 of them 95% or more; see "How exact it is").
+  out from tuning, 91.5-100% (25 of them 95% or more; see "How exact it is").
   The rest are marked as guesses, never passed off as fact.
 - **Checked against CodeQL.** On 17 repos in ten languages (C, C++, C# and
   Kotlin included), where both resolve a call seamcheck names the same callee
@@ -599,13 +599,13 @@ the code.
 | Kotlin | nowinandroid 96.8%, okhttp 95.0% |
 | Rust | ripgrep 96.1%, bat 95.3% |
 | Go | cobra 97.3%, fzf 95.7% |
-| TypeScript | excalidraw 96.6%, hono 96.3%, plausible 98.2% |
+| TypeScript | excalidraw 96.7%, hono 96.3%, plausible 98.2% |
 | JavaScript | express 95.6%, hexpm 97.9%, plausible 96.7% |
 | Elixir | plausible 99.9%, hexpm 99.4%, phoenix 99.9% |
 | PHP | Slim 98.1%, guzzle 96.1% |
 | Swift | Alamofire 95.8%, swift-argument-parser 95.5% |
 | Ruby | sinatra 95.2%, jekyll 95.1% |
-| GDScript | godot-demo-projects 97.2%, tps-demo 100.0% |
+| GDScript | godot-demo-projects 97.9%, tps-demo 100.0% |
 | QML | neochat 96.7%, cool-retro-term 96.9%, kdeconnect 99.1% |
 
 **Held out.** Those repos are the ones the resolvers were tuned on, so they
@@ -625,24 +625,24 @@ guesses and now reach nothing (named-nothing rises with them: zod's went from
 | Python | click 95.6%, rich 95.4% |
 | Go | gin 96.5%, urfave/cli 96.7% |
 | Rust | clap 95.1%, fd 95.2% |
-| TypeScript | zod 93.2%, ky 96.0% |
+| TypeScript | zod 93.5%, ky 96.0% |
 | JavaScript | axios 91.5%, koa 95.9% |
 | Java | commons-lang 96.4%, javapoet 97.3% |
 | Kotlin | moshi 95.5% |
 | C# | Dapper 95.1%, AutoMapper 95.2% |
 | Elixir | ecto 99.9%, oban 100.0% |
-| GDScript | Pixelorama 92.7% |
+| GDScript | Pixelorama 96.2% |
 | C | lua 99.9%, cJSON 97.1% |
 | C++ | fmt 95.8%, spdlog 96.8% |
-| Swift | Kingfisher 94.1%, SwiftyJSON 97.8% |
-| Ruby | rack 94.3%, sidekiq 91.6% |
+| Swift | Kingfisher 95.2%, SwiftyJSON 97.8% |
+| Ruby | rack 95.3%, sidekiq 91.6% |
 | PHP | monolog 98.0%, flysystem 95.6% |
 
-22 of the 28 are at 95% or more, all at 91.5% or more. Below 95%: zod's schema
+25 of the 28 are at 95% or more, all at 91.5% or more. Below 95%: zod's schema
 methods built at runtime (`$constructor` / `defineProperty`), axios's request
-config handed to adapters and test servers through helpers, Kingfisher's Swift
-generics, rack's and sidekiq's duck-typed Ruby, and Pixelorama's untyped
-GDScript receivers.
+config handed to adapters and test servers through helpers, and sidekiq's
+duck-typed Ruby (instance variables set in `before` blocks, values yielded
+through connection pools).
 
 What gets a call there, beyond imports and declared types: return types
 through chains (`a.b().c()`), generic arity (C#'s `Policy` vs `Policy<T>`),
