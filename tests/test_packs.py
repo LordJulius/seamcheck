@@ -246,3 +246,39 @@ class HonoParams(ExpressParams):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SecurityFlowCases(unittest.TestCase):
+    """Injections CodeQL found on railsgoat / NodeGoat that the pack missed, and the
+    sinatra code its first fix flagged by mistake."""
+
+    def found(self, files):
+        got = with_packs('["security"]', files)
+        return [m for ms in got.values() for _f, _l, m in ms if "reaches" in m]
+
+    def test_a_sanitizer_inside_a_string_cleans_only_its_part(self):
+        ctrl = "class FormsController\n  def upload\n    file = params[:upload]\n    Benefits.save(file)\n  end\nend\n"
+        model = ("class Benefits\n  def self.save(file)\n    name = \"/data/#{file.original_filename}\"\n"
+                 "    system(\"cp #{name} /bak/#{Time.now.to_i}\")\n  end\nend\n")
+        self.assertTrue(any("system()" in m for m in self.found({"app/controllers/forms_controller.rb": ctrl,
+                                                                 "app/models/benefits.rb": model})))
+        safe = ("class App\n  def image\n    filename = \"/images/#{params[:image].to_i}.png\"\n"
+                "    send_file filename\n  end\nend\n")
+        self.assertEqual([], self.found({"app/controllers/app_controller.rb": safe}))
+
+    def test_a_rails_scope_lambda_is_a_method(self):
+        model = "class Analytics\n  scope :hits_by_ip, ->(ip, col = \"*\") { select(\"#{col}\").where(ip_address: ip) }\nend\n"
+        ctrl = "class AdminController\n  def analytics\n    Analytics.hits_by_ip(params[:ip], params[:field])\n  end\nend\n"
+        self.assertTrue(any("hits_by_ip" in m for m in self.found({"app/models/analytics.rb": model,
+                                                                   "app/controllers/admin_controller.rb": ctrl})))
+
+    def test_a_query_a_closure_builds_from_a_tainted_name(self):
+        dao = ("function AllocationsDAO(db) {\n  const col = db.collection('allocations');\n"
+               "  this.byThreshold = (userId, threshold, callback) => {\n    const criteria = () => {\n"
+               "      return {\n        $where: `this.stocks > '${threshold}'`\n      };\n    };\n"
+               "    col.find(criteria()).toArray(callback);\n  };\n}\nmodule.exports = { AllocationsDAO };\n")
+        route = ("const { AllocationsDAO } = require('../data/allocations-dao');\nfunction Handler(db) {\n"
+                 "  const dao = new AllocationsDAO(db);\n  this.show = (req, res) => {\n"
+                 "    dao.byThreshold(req.params.userId, req.query.threshold, (e, r) => res.send(r));\n  };\n}\n"
+                 "module.exports = Handler;\n")
+        self.assertTrue(any("find()" in m for m in self.found({"app/data/allocations-dao.js": dao, "app/routes/a.js": route})))
