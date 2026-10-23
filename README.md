@@ -18,13 +18,14 @@ the project writes down about how its parts fit together.
   (JSX), C, C++, QML, Python, GDScript, Rust, Go, C#, Swift, Ruby and PHP.
   Rules work on any text file.
 - **Says how sure it is.** On 37 open-source repos in 16 languages, 95% or
-  more of the calls into project code are exact on every one; on 28 repos held
-  out from tuning, 91.5-100% (25 of them 95% or more; see "How exact it is").
+  more of the calls into project code are exact on every one, and on all 28
+  repos held out from tuning too (95.1-100%; see "How exact it is").
   The rest are marked as guesses, never passed off as fact.
-- **Checked against CodeQL.** On 17 repos in ten languages (C, C++, C# and
-  Kotlin included), where both resolve a call seamcheck names the same callee
-  91-100% of the time (the rest mostly CodeQL's callee plus the overrides the
-  declared type allows), and a different one at 0-2.4% of sites. It needs no
+- **Checked against CodeQL.** On 17 tuning repos in ten languages (C, C++, C#
+  and Kotlin included), where both resolve a call seamcheck names the same callee
+  91-100% of the time, and on 11 held-out repos 93.5-100% (zod: 99.9% of
+  17,194 sites). The rest is mostly CodeQL's callee plus the overrides the
+  declared type allows; a different callee is 0-2.4% of sites. It needs no
   build and no database: 0.5-9 s where CodeQL takes 25 s to 5 min (see "How
   it compares"). Against ArchUnit, all 54 package dependency rules on jsoup
   and gson come out the same, read from source with no build.
@@ -594,17 +595,17 @@ the code.
 | Python | flask 96.3%, httpx 97.3%, requests 96.1% |
 | C | jq 99.9%, redis 100.0% |
 | C++ | flameshot 98.1%, kdeconnect 97.4% |
-| C# | Polly 96.6%, Newtonsoft.Json 98.5% |
+| C# | Polly 96.7%, Newtonsoft.Json 98.5% |
 | Java | gson 97.3%, jsoup 97.1% |
 | Kotlin | nowinandroid 96.8%, okhttp 95.0% |
 | Rust | ripgrep 96.1%, bat 95.3% |
 | Go | cobra 97.3%, fzf 95.7% |
-| TypeScript | excalidraw 96.7%, hono 96.3%, plausible 98.2% |
-| JavaScript | express 95.6%, hexpm 97.9%, plausible 96.7% |
+| TypeScript | excalidraw 96.8%, hono 96.5%, plausible 98.2% |
+| JavaScript | express 95.8%, hexpm 97.9%, plausible 96.7% |
 | Elixir | plausible 99.9%, hexpm 99.4%, phoenix 99.9% |
 | PHP | Slim 98.1%, guzzle 96.1% |
-| Swift | Alamofire 95.8%, swift-argument-parser 95.5% |
-| Ruby | sinatra 95.2%, jekyll 95.1% |
+| Swift | Alamofire 95.9%, swift-argument-parser 95.5% |
+| Ruby | sinatra 95.6%, jekyll 96.6% |
 | GDScript | godot-demo-projects 97.9%, tps-demo 100.0% |
 | QML | neochat 96.7%, cool-retro-term 96.9%, kdeconnect 99.1% |
 
@@ -617,32 +618,66 @@ rule (CommonJS prototypes and `delegates`, TS object types and `import type`,
 namespace re-exports, C++ namespaces and aliases, Go embedding, GDScript
 multi-line signatures...) with a fixture test, and it is kept only if the
 tuning corpus doesn't drop. Some of the gain is calls that used to be wrong
-guesses and now reach nothing (named-nothing rises with them: zod's went from
-7.5% to 16.0%), because the method is built at runtime and no file defines it.
+guesses and now reach nothing (named-nothing rises with them), because the
+method is built at runtime and no file defines it; zod's named-nothing went
+from 7.5% to 16.6% and back down to 11.7% once its runtime-built methods
+(`$constructor` factories, members attached with `defineProperty`, functions a
+factory returns) were followed to the code that runs.
 
 | language | held-out repo: project calls exact (October 2026) |
 |---|---|
 | Python | click 95.6%, rich 95.4% |
 | Go | gin 96.5%, urfave/cli 96.7% |
 | Rust | clap 95.1%, fd 95.2% |
-| TypeScript | zod 93.5%, ky 96.0% |
-| JavaScript | axios 91.5%, koa 95.9% |
+| TypeScript | zod 95.5%, ky 97.5% |
+| JavaScript | axios 95.2%, koa 96.7% |
 | Java | commons-lang 96.4%, javapoet 97.3% |
 | Kotlin | moshi 95.5% |
-| C# | Dapper 95.1%, AutoMapper 95.2% |
+| C# | Dapper 96.5%, AutoMapper 95.2% |
 | Elixir | ecto 99.9%, oban 100.0% |
 | GDScript | Pixelorama 96.2% |
 | C | lua 99.9%, cJSON 97.1% |
-| C++ | fmt 95.8%, spdlog 96.8% |
+| C++ | fmt 95.8%, spdlog 96.9% |
 | Swift | Kingfisher 95.2%, SwiftyJSON 97.8% |
-| Ruby | rack 95.3%, sidekiq 91.6% |
+| Ruby | rack 95.8%, sidekiq 95.3% |
 | PHP | monolog 98.0%, flysystem 95.6% |
 
-25 of the 28 are at 95% or more, all at 91.5% or more. Below 95%: zod's schema
-methods built at runtime (`$constructor` / `defineProperty`), axios's request
-config handed to adapters and test servers through helpers, and sidekiq's
-duck-typed Ruby (instance variables set in `before` blocks, values yielded
-through connection pools).
+All 28 are at 95% or more. The last three to get there were zod (93.5%: schema
+methods built at runtime by `$constructor` and attached with `defineProperty`),
+axios (91.5%: values handed through helpers and callbacks, mock objects shared
+between tests) and sidekiq (91.6%: values yielded to blocks through connection
+pools, instance variables set in `before` blocks). What got them there is
+general: a parameter typed by what every caller passes, a block parameter typed
+by what the method yields, Ruby's lexical constant lookup, a TS `const` read as
+a value rather than the interface of the same name. Checking zod against CodeQL
+also found wrong exact edges that the exact share had counted as wins: `z.parse`
+and `z.compile` had reached a same-named method of an object literal, or of a
+class, through `export *`. Fixing those lowered zod's share before the factory
+rules raised it again.
+
+Against CodeQL, on the held-out repos it has a database for (same columns as
+above):
+
+| repo | lang | CodeQL sites | same callee | wider | wrong | CodeQL's sites seamcheck has | sites only seamcheck resolves |
+|---|---|---|---|---|---|---|---|
+| click | Python | 163 | 98.7% | 1.3% | 0.0% | 93.3% | 27 |
+| koa | JavaScript | 771 | 100.0% | 0.0% | 0.0% | 99.0% | 464 |
+| axios | JavaScript | 3,990 | 98.3% | 0.0% | 1.7%‡ | 85.8% | 387 |
+| ky | TypeScript | 2,055 | 100.0% | 0.0% | 0.0% | 83.9% | 929 |
+| zod | TypeScript | 19,262 | 99.9% | 0.1% | 0.1% | 89.2% | 4,266 |
+| javapoet | Java | 3,631 | 93.5% | 5.8% | 0.7% | 89.3% | 129 |
+| gin | Go | 666 | 96.8% | 3.0% | 0.2% | 80.8% | 1 |
+| rack | Ruby | 2,534 | 97.1% | 2.8% | 0.0% | 86.5% | 2,203 |
+| sidekiq | Ruby | 2,714 | 99.5% | 0.4% | 0.1% | 94.4% | 1,244 |
+| Dapper | C# | 3,448 | 99.6% | 0.2% | 0.2% | 61.0% | 116 |
+| spdlog | C++ | 3,088 | 93.8% | 5.2% | 1.0% | 52.0% | 1,091 |
+
+‡ 41 of axios's 60 are CodeQL resolving a call to its `index.d.ts`
+declaration where seamcheck names the implementation (`lib/axios.create`);
+15 are a destructured callback parameter seamcheck matched to the wrong one of
+a test file's same-named closures. Dapper's and spdlog's coverage is low for
+the reasons in the C# and C++ notes above (property getters, operators and
+implicit constructors, which aren't written as calls).
 
 What gets a call there, beyond imports and declared types: return types
 through chains (`a.b().c()`), generic arity (C#'s `Policy` vs `Policy<T>`),
