@@ -804,7 +804,7 @@ def expression(code: str, pos: int, is_local) -> tuple[str, ...]:
             break
         if segs[-1].endswith("()") or segs[-1][:1].islower():
             # `Foo.new a, b` / `render x`: arguments without parentheses
-            if j > i and re.match(r"[\w@:\"'\[{(*&$-]", rest) and not re.match(r"(?:and|or|\?)\b", rest) \
+            if j > i and re.match(r"[\w@:\"'\[{(*&$-]|\\$", rest) and not re.match(r"(?:and|or|\?)\b", rest) \
                     and not rest.startswith(("-=", "--", "- ")):
                 break
         return ()
@@ -976,8 +976,20 @@ def _declared(f: Func, b, code: str, raw: list[str], is_local, ends: dict) -> No
         return
     if b.get("endless"):
         ch = expression(code, b["endless"], is_local)
+    elif b.get("end_pos", 0) and b["end_pos"] < (code.find("\n", b["pos"]) if code.find("\n", b["pos"]) >= 0 else len(code)):
+        # `def get(uri, opts = {})     request(GET, uri, opts)     end`: one line
+        om = re.match(r"def\s+(?:self\.)?[\w?!=]+\s*(?:\((?:[^()]|\([^()]*\))*\))?[ \t;]*", code[b["pos"]:b["end_pos"]])
+        body = code[b["pos"] + om.end():b["end_pos"]] if om else ""
+        ch = expression(code, b["pos"] + om.end(), is_local) if om and body.strip() and ";" not in body else ()
     else:
         end_pos = b.get("end_pos", 0)
+        # `def request ... MockResponse.new(...)\n ensure\n body.close ... end`: the value is the
+        # last statement before the def's own `ensure` / `rescue` (at the def's indentation)
+        def_ind = b["pos"] - (code.rfind("\n", 0, b["pos"]) + 1)
+        cl = re.compile(rf"^[ \t]{{{def_ind}}}(?:ensure|rescue)\b", re.M).search(code, code.find("\n", b["pos"]), end_pos) \
+            if end_pos else None
+        if cl:
+            end_pos = cl.start()
         k = code.rfind("\n", 0, end_pos)
         s = code.rfind("\n", 0, k) + 1 if k > 0 else 0
         # the last statement before `end`: a line of its own, not a nested block's end
