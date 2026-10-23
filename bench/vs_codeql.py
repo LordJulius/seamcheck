@@ -226,6 +226,16 @@ def main() -> None:
     print(f"  wider      {wider}/{both} = {100 * wider / max(both, 1):.1f}%: CodeQL's callee plus overrides the declared type allows")
     print(f"  wrong      {disagree}/{both} = {100 * disagree / max(both, 1):.1f}%: no callee in common")
     print(f"  covered    {covered}/{len(cq)} = {100 * covered / max(len(cq), 1):.1f}% of CodeQL's sites")
+    # the sites written as a call (`name(` / `name<T>(` on that line): not an operator, an implicit
+    # constructor / destructor / conversion or a property accessor, which no call syntax names
+    def written(site):
+        rw = raw_of(site[0])
+        nm = site[2].split("<")[0]
+        return bool(rw and 0 < site[1] <= len(rw) and re.match(r"[A-Za-z_$][\w$]*$", nm)
+                    and re.search(rf"\b{re.escape(nm)}\s*(?:<[^()]*>)?\s*\(", rw[site[1] - 1]))
+    wsites = [site for site in cq if written(site)]
+    wcov = sum(1 for site in wsites if any(same(p.funcs[i], t) for i in exact.get(site, ()) for t in cq[site]))
+    print(f"  written    {wcov}/{len(wsites)} = {100 * wcov / max(len(wsites), 1):.1f}% of CodeQL's sites written as a call")
     print(f"  sc-only    {len(only)} exact sites CodeQL left unresolved")
     print(f"  by-name    {ambiguous}/{len(cq)} = {100 * ambiguous / max(len(cq), 1):.1f}% of CodeQL's sites name a function "
           f"defined more than once (mean {mean:.1f} definitions per name)")
