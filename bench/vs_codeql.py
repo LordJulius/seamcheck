@@ -36,7 +36,7 @@ from seamcheck import core  # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 # CodeQL's own scopes for a comprehension or a lambda: no call in the source
 _SYNTHETIC = {"genexpr", "listcomp", "dictcomp", "setcomp", "lambda", "<lambda>"}
-_BUILD_NONE = {"java", "csharp"}  # (no build needed: Python, JS/TS, Ruby; Go builds itself)
+_BUILD_NONE = {"java", "csharp", "cpp"}  # (no build needed: Python, JS/TS, Ruby; Go builds itself)
 
 
 def _codeql(path: str) -> dict:
