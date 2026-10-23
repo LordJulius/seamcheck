@@ -814,6 +814,8 @@ def _js_reexports(mod: Module, rel: str, text: str, lines: list[str]) -> None:
         if ln < len(lines) and lines[ln].strip().startswith("export"):
             for part in m.group(1).split(","):
                 src, _, local = _JS_REEXPORT_SKIP.sub("", part.strip()).partition(" as ")
+                if local.strip() == "default" and src.strip():  # `export { axios as default }`: what a default import gets
+                    mod.imported.setdefault("default", (f"js:{d}\0./{os.path.basename(rel)}", src.strip()))
                 if local.strip() and src.strip() and local.strip() != "default":
                     mod.imported.setdefault(local.strip(), (f"js:{d}\0./{os.path.basename(rel)}", src.strip()))
                     # (what an importer of `local` gets, even when this file imports a `local` of its
