@@ -2131,6 +2131,10 @@ def _build_edges(project: Project) -> None:
                         and (g.file[:-3].endswith("/" + path_) or g.file.endswith("/" + path_ + "/mod.rs"))]
                 if len({g.file for g in mine}) == 1:
                     targets = [(mine[0], True)]
+            if not targets and q and (c.name == "GetType" and f.file.endswith(".cs") or
+                                      c.name == "getClass" and f.file.endswith((".java", ".kt", ".kts"))):
+                _nothing(project, f, c)  # `o.GetType()`: System.Object's, non-virtual (no project override exists)
+                continue
             if not targets and q and c.name in _RS_STD_METHODS and f.file.endswith(".rs"):
                 # `.unwrap()`, `.len()`, `.push()` on a receiver of unknown type:
                 # Option / Result / Vec / String, not a project function of that name
