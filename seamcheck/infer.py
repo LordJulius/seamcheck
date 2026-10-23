@@ -1241,6 +1241,9 @@ class Types:
             mods, exact, declared = self.type_modules(mod, seg)
             if declared:
                 return ("static", tuple(mods), exact)
+        if seg in fm.aliases and seg in fm.imported and fm.file.endswith(_JS_EXTS) and \
+                (vm := self._var_module(*fm.imported[seg])) is not None:
+            return self.held(vm[0], None, vm[0].bound[vm[1]], depth + 1)  # `import axios from './index'`: its `const axios = ...`
         if seg in fm.aliases:
             target = fm.aliases[seg]
             if target.startswith("pkg:"):
