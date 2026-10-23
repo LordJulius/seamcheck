@@ -18,8 +18,13 @@ the project writes down about how its parts fit together.
   (JSX), C, C++, QML, Python, GDScript, Rust, Go, C#, Swift, Ruby and PHP.
   Rules work on any text file.
 - **Says how sure it is.** On 37 open-source repos in 16 languages, 95% or
-  more of the calls into project code are exact on 29, and 90% on 36 (see
-  "How exact it is"). The rest are marked as guesses, never passed off as fact.
+  more of the calls into project code are exact on every one (see "How exact
+  it is"). The rest are marked as guesses, never passed off as fact.
+- **Checked against CodeQL.** On 12 repos in six languages, where both
+  resolve a call seamcheck names the same callee 98-100% of the time (Java
+  and Go: 84%, plus the overrides the declared type allows), and wrong at
+  0-0.3% of sites (Ruby's sinatra: 2.4%). It needs no build and no database:
+  0.5-9 s where CodeQL takes 25 s to 5 min (see "How it compares").
 - **Every check came from a real bug.** Each rule and lint was written after a
   bug it would have caught, and its test reproduces that bug (cut down) and
   its fix.
@@ -90,6 +95,112 @@ seamcheck stats                 # what the graph sees, per language
 seamcheck callers take_hit      # who calls it
 seamcheck gate --staged         # in a pre-commit hook: may this change land?
 ```
+
+## How it compares (measured)
+
+Every number here comes from `bench/` on the same checkouts, one machine,
+October 2026 (CodeQL 2.23.3, ast-grep, Semgrep 1.182, dependency-cruiser 16).
+
+### The call graph, against CodeQL
+
+`bench/vs_codeql.py REPO --lang L --codeql PATH` builds a CodeQL database,
+runs `bench/codeql/<lang>/calls.ql` (every call CodeQL resolves to a function
+the project defines) and compares it with seamcheck's exact edges, call site
+by call site. CodeQL's points-to and type tracking is the closest thing to
+ground truth that runs offline on the same code.
+
+| repo | lang | CodeQL sites | same callee | wider | wrong | CodeQL's sites seamcheck has | sites only seamcheck resolves | CodeQL: database + query | seamcheck, cold |
+|---|---|---|---|---|---|---|---|---|---|
+| requests | Python | 1,062 | 100.0% | 0.0% | 0.0% | 95.9% | 10 | 10 s + 15 s | 0.5 s |
+| flask | Python | 1,289 | 99.7% | 0.3% | 0.0% | 94.5% | 806 | 11 s + 16 s | 0.5 s |
+| httpx | Python | 1,867 | 99.4% | 0.6% | 0.0% | 99.3% | 96 | 12 s + 15 s | 0.8 s |
+| express | JavaScript | 1,069 | 99.9% | 0.0% | 0.1% | 98.5% | 1,813 | 17 s + 21 s | 1.7 s |
+| hono | TypeScript | 9,323 | 98.7% | 1.0% | 0.3% | 86.9% | 2,459 | 46 s + 35 s | 4.6 s |
+| excalidraw | TypeScript | 25,644 | 99.8% | 0.0% | 0.2% | 95.2% | 1,121 | 71 s + 61 s | 9.3 s |
+| gson | Java | 9,088 | 84.5% | 15.4% | 0.1% | 84.9% | 1,967 | 110 s + 136 s | 3.3 s |
+| jsoup | Java | 21,592 | 98.4% | 1.3% | 0.3% | 93.1% | 947 | 59 s + 39 s | 4.2 s |
+| cobra | Go | 723 | 100.0% | 0.0% | 0.0% | 90.7% | 0 | 28 s + 56 s | 0.9 s |
+| fzf | Go | 2,429 | 84.4% | 15.6% | 0.0% | 92.3% | 4 | 19 s + 19 s | 1.7 s |
+| sinatra | Ruby | 1,306 | 96.6% | 1.0% | 2.4% | 84.5% | 1,461 | 7 s + 308 s | 2.1 s |
+| jekyll | Ruby | 1,933 | 99.6% | 0.3% | 0.1% | 95.4% | 2,559 | 7 s + 23 s | 2.4 s |
+
+- **same callee**: of the sites both resolve, seamcheck's exact targets are all
+  among CodeQL's. **wider**: CodeQL's callee plus overrides the receiver's
+  declared type allows (`reader.peek()` on a `JsonReader` is also
+  `JsonTreeReader.peek` to seamcheck; CodeQL's data flow saw only `new
+  JsonReader(...)` reach it). **wrong**: no callee in common. A method's
+  overloads are one function to seamcheck (Java's three `toJson`), so CodeQL's
+  overload counts as that function.
+- **only seamcheck**: calls CodeQL leaves unresolved. A hand-check of 24 of them
+  (flask, express, jekyll) found every one right: a pytest fixture's `app`,
+  the Express app a framework pack types, `Jekyll.logger` (a `LogAdapter`).
+  CodeQL's Go database comes from `go build`, so it has no `_test.go` files.
+- **What it doesn't have**: most of the rest are calls through a value
+  seamcheck can't type statically (a Java `Map` that a project class
+  implements, a JS value returned from an untyped callback), which stay
+  guesses or name nothing.
+- Not compared: C# (CodeQL's extractor wants a .NET SDK even with
+  `--build-mode=none`, and none could be installed here), and C/C++, Kotlin
+  and Swift, which weren't run (CodeQL builds Kotlin and Swift to extract
+  them). seamcheck reads every one as it is.
+
+Running the comparison found seamcheck bugs, all fixed (tests in `tests/`):
+JS / TS calls outside any function were never recorded (express's
+`app.use(...)`, a test file's `before(...)`), generic TS functions
+(`function pointFrom<P>(`) and Java methods with a type-use annotation
+(`public @Nullable Document ownerDocument()`) weren't parsed, Python
+decorators weren't calls, a Go method's bare call to the package function of
+the same name was taken for the method itself, and Java overloads ignored the
+argument count.
+
+### "Who calls X?", against grep-style tools
+
+`bench/vs_grep.py` takes the ten project functions CodeQL sees called most
+whose name more than one function has (`get`, `send`, `prepare`), and scores
+each tool's answer against CodeQL's callers (only files CodeQL analysed count):
+
+| repo | seamcheck precision / recall | ast-grep precision / recall |
+|---|---|---|
+| requests | 98.8% / 100% | 28.4% / 100% |
+| httpx | 96.4% / 96.8% | 40.0% / 100% |
+| jsoup | 95.5% / 99.1% | 86.0% / 100% |
+| gson | 92.2% / 81.0% | 78.1% / 99.3% |
+| cobra | 100% / 100% | 77.8% / 77.8% |
+| express | 65.7%* / 100% | 9.1% / 100% |
+| flask | 46.5%* / 93.8% | 18.3% / 47.9% |
+| jekyll | 74.7%* / 98.3% | 87.2% / 39.5% |
+
+\* below the true figure: the sites CodeQL misses count against seamcheck
+(the hand-check above found them right). A name match finds every call by
+that name, of any object, and nothing called another way (a decorator, a
+call through a variable); Semgrep's OSS matching gave ast-grep's answers on
+the targets it was run on (requests: 59.4% / 100% on two), at about three
+minutes a question here against seamcheck's one loaded graph.
+
+### Module dependencies, against dependency-cruiser
+
+On express, seamcheck's file-to-file import edges and dependency-cruiser's
+are the same 153 (comparing them found two seamcheck bugs: a `require()`
+inside an expression, and one in a doc comment).
+
+### What each tool is for
+
+| | seamcheck | CodeQL | Semgrep (OSS) | ast-grep | Sourcegraph / SCIP | ArchUnit | dependency-cruiser |
+|---|---|---|---|---|---|---|---|
+| answers | callers, callees, impact, contracts | any query over code + data flow | pattern findings | pattern matches / rewrites | navigation, search | Java architecture tests | JS/TS module rules |
+| needs | Python 3.11 | a database per language; C#/C++/Java/Kotlin/Swift builds | itself | itself | a server and an indexer per language | a JVM test build | Node |
+| languages in one graph | 16, across language and process seams (HTTP, D-Bus, QML↔C++) | one per database | n/a | n/a | per indexer | Java | JS/TS |
+| call graph | yes, exact or marked guess | yes, most precise | no (Pro: some) | no | via indexers | classes, not calls | modules only |
+| for an agent | MCP server, `context`, JSON | CLI, SARIF | CLI, SARIF | CLI | API | tests | CLI |
+
+Where the others are the better tool: CodeQL for security (taint tracking
+through data flow) and for the precise runtime callee of a virtual call;
+Semgrep for its large registry of security rules; Sourcegraph for search
+across many repositories in a browser; ArchUnit when the architecture rules
+should be Java tests over real types; dependency-cruiser for rich JS
+dependency reports. seamcheck is for the question an agent or a reviewer
+asks before every change, in any repo with nothing set up: what calls this,
+what does it reach, which tests run it, and does the change break a rule.
 
 ## Commands
 
@@ -302,22 +413,22 @@ the code.
 
 | language | repo: project calls exact (static, October 2026) |
 |---|---|
-| Python | flask 95.7%, httpx 95.6%, requests 95.5% |
+| Python | flask 96.3%, httpx 97.3%, requests 96.1% |
 | C | jq 99.9%, redis 100.0% |
-| C++ | flameshot 96.5%, kdeconnect 95.8% |
+| C++ | flameshot 96.5%, kdeconnect 96.0% |
 | C# | Polly 95.2%, Newtonsoft.Json 95.5% |
-| Java | gson 97.1%, jsoup 96.8% |
-| Kotlin | nowinandroid 95.8%, okhttp 95.6% |
+| Java | gson 97.1%, jsoup 97.0% |
+| Kotlin | nowinandroid 96.9%, okhttp 96.1% |
 | Rust | ripgrep 95.5%, bat 95.3% |
 | Go | cobra 95.9%, fzf 96.0% |
-| TypeScript | excalidraw 95.2%, hono 95.5%, plausible 97.8% |
-| JavaScript | express 95.3%, hexpm 97.8%, plausible 95.3% |
+| TypeScript | excalidraw 96.0%, hono 95.7%, plausible 97.8% |
+| JavaScript | express 95.4%, hexpm 97.9%, plausible 96.5% |
 | Elixir | plausible 99.9%, hexpm 99.4%, phoenix 99.9% |
 | PHP | Slim 98.1%, guzzle 95.6% |
-| Swift | Alamofire 94.2%, swift-argument-parser 93.7% |
-| Ruby | sinatra 94.0%, jekyll 92.9% |
-| GDScript | godot-demo-projects 93.3%, tps-demo 93.3% |
-| QML | neochat 93.7%, cool-retro-term 96.9%, kdeconnect **79.4%** |
+| Swift | Alamofire 95.8%, swift-argument-parser 95.5% |
+| Ruby | sinatra 95.2%, jekyll 95.1% |
+| GDScript | godot-demo-projects 95.1%, tps-demo 100.0% |
+| QML | neochat 96.7%, cool-retro-term 96.9%, kdeconnect 99.1% |
 
 What gets a call there, beyond imports and declared types: return types
 through chains (`a.b().c()`), generic arity (C#'s `Policy` vs `Policy<T>`),
@@ -332,11 +443,19 @@ duck-typed Ruby value that may be a `Document` or a `Page`, a Swift implicit
 member whose context type isn't written down, a callback the callers don't
 name.
 
-kdeconnect's QML pages take their plugin interface as a `property QtObject`
-that a factory fills in when the page is pushed, a different type per page:
-no static reading can type it, and seamcheck leaves those calls as guesses
-rather than pick one. Precise mode (below) asks a language server about the
-remaining guesses.
+kdeconnect's QML pages get their plugin interface pushed in
+(`pageStack.push(page, {pluginInterface: obj})`, `obj` from the pushing
+item's own factory), a delegate's `device` is a C++ model role, and the
+objects are D-Bus proxies generated at build time. seamcheck follows each:
+a page's untyped property holds what every push hands it (read per instance
+when the page is a property of the pusher), a role is what the model's
+`roleNames()` / `data()` return, and a proxy generated from an interface
+(`OrgKdeKdeconnectDeviceInterface`) calls the class whose `Q_CLASSINFO`
+declares it, so a QML button's `sendCommand()` reaches the daemon's
+`RemoteControlPlugin::sendCommand`. Ruby values typed only by a variable's
+name (`site`, `@document` holding a `Site` / `Document` when the project has
+one class of that name) follow Ruby's convention and count as exact. Precise
+mode (below) asks a language server about the remaining guesses.
 
 ### The Ruby adapter
 
