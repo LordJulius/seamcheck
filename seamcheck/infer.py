@@ -112,6 +112,8 @@ class Types:
                     t = type_name(re.sub(r"\b(?:const|typename|volatile)\b", "", target).strip())
                     if t and t != al:
                         seen.setdefault(al, set()).add(t.split("::")[-1].split(".")[-1])
+                        if re.match(r"\s*(?:typename\s+)?(?:::)?(?:std|boost|absl)::", target):
+                            self.cache.setdefault("\0cppstd", set()).add(al)  # `using log_levels = std::unordered_map<...>`
             got = self.cache["\0cppal"] = {k: next(iter(v)) for k, v in seen.items() if len(v) == 1}
         return got
 
@@ -975,6 +977,10 @@ class Types:
             return ("inst", tuple(mods), True) if mods else None
         if ty in _CS_KEYWORD_TYPES and mod.file.endswith((".cs", ".java")):
             return EXT  # `int n`, `string s`: the language's own
+        if mod.file.endswith(_C_EXTS) and ty not in self.by_type:
+            self._cpp_aliases()  # (fills the set of aliases naming std / boost types)
+            if ty in self.cache.get("\0cppstd", ()):
+                return EXT  # a project alias of a standard-library type
         mods, exact, declared = self.type_modules(mod, ty)
         if not declared and mod.file.endswith(_JS_EXTS) and ty in self._file_mod(mod).imported:
             from .core import _defining_module  # `const Koa = require('../lib/application')`; `new Koa()`

@@ -1825,6 +1825,9 @@ def _build_edges(project: Project) -> None:
     # use them (`m_board->indexOf()`): the header's fields count for the .cpp.
     for rel, mods in project.by_file.items():
         stem, ext = os.path.splitext(rel)
+        im_ = re.match(r"(.+?)[-_](?:inl|impl)$", stem) if ext in (".h", ".hpp", ".hh") else None
+        if im_ or ext in (".inl", ".ipp", ".tpp"):  # `logger-inl.h`, `format.inl`: a header's out-of-line definitions
+            stem, ext = (im_.group(1) if im_ else stem), ".cpp"
         if ext in (".cpp", ".cc", ".cxx", ".c") and mods:
             for hext in (".h", ".hpp", ".hh"):
                 for hm in project.by_file.get(stem + hext, []):
