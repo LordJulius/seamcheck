@@ -62,10 +62,11 @@ why = "request params reaching a shell, eval, SQL, a deserializer or send is inj
 fix = "validate the value, use bound parameters and safe loaders (YAML.safe_load), or allow-list it"
 from = ["**/*.rb:*"]
 source = '\bparams\[|\bparams\.(fetch|require|permit)|\brequest\.(params|body|query_string|path_info)\b'
+source_not_param = true  # (Rails' `params` is a method: a function's own `params` argument is something else)
 to = ['^(system|exec|spawn|eval|instance_eval|class_eval|send|public_send|try)$', '\.(send|public_send|try)$', '^(Kernel|IO|Open3)\.(system|exec|spawn|popen|popen3|capture2|capture3)$',
       '\.(find_by_sql|execute|exec_query|where|order|pluck|select|group|having|joins)$', '^(select|where|order|group|having|joins|find_by_sql)$', '^(YAML|Psych)\.(load|unsafe_load)$', '^Marshal\.load$',
       '\.constantize$', '^(File|IO)\.(read|open|write)$', '^(open|send_file|redirect_to)$']
-unless = ["sanitize", "escape", "quote", "safe_load", "permit", "validate", "to_i", "to_f", "Integer"]
+unless = ["sanitize", "escape", "quote", "safe_load", "permit", "validate", "clean", "basename", "to_i", "to_f", "Integer"]
 depth = 6
 
 [[rule]]

@@ -35,7 +35,7 @@ the project writes down about how its parts fit together.
   request, in Python, JS/TS, PHP, Ruby, Go, Java and C#. On eight deliberately
   vulnerable apps it found 78 of the 84 injections CodeQL's security-extended
   suites report there, plus 6 real ones CodeQL doesn't, in under 4 s per app;
-  on the 37 ordinary benchmark repos it reports nothing.
+  on the 61 ordinary benchmark checkouts (tuning and held-out) it reports nothing.
 - **Many repos, one graph.** Put several checkouts (or symlinks to them) in one
   folder and run seamcheck there: a service's call into a library repo is an
   exact edge, and `seamcheck search REGEX` answers with each hit's function
@@ -330,7 +330,9 @@ redirect) is clean. A framework handler's parameters are request data too
 ASP.NET: `source_entry` / `source_param` in a rule), and so is what a helper
 that reads the request returns (`WebUtils.getRequestBody(request)`). A value
 put into an object (`sb.append(id)`, `doc.Load(Request.Body)`) or a loop
-variable over a tainted collection carries it; a later call on a sink's own
+variable over a tainted collection carries it, and a containment check that
+turns the value away (`if (!p.startsWith(base)) return`, `unless
+p.start_with?(base)`) cleans it; a later call on a sink's own
 result (`st.executeQuery()` after `con.prepareStatement(sql)`) is the same
 injection and isn't reported again.
 
