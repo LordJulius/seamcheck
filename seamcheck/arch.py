@@ -327,7 +327,8 @@ def path(project, r: dict) -> list:
         readers = re.compile(rf"(?<![\w$])((?:[A-Za-z_]\w*\.)?)(?:{'|'.join(rd)})\s*\(") if rd else None
         # (raw text: `"#{params[:id]}"` reads the source inside a string)
         starts = [f for f in starts if not tidy.is_test(project, f.file)
-                  and (f.id in bound or source.search(_own_code(project, f, raw=True)) or _reads(readers, _own_code(project, f)))]
+                  and (f.id in bound or _reads_source(project, f, source, r.get("source_not_param"))
+                       or _reads(readers, _own_code(project, f)))]
     out, best = [], {}
     for s in sorted({f.id: f for f in starts}.values(), key=lambda f: f.id):
         if s.name in unless:
@@ -374,6 +375,19 @@ def path(project, r: dict) -> list:
             elif (file, line) not in best or len(chain) < best[(file, line)][0]:
                 best[(file, line)] = (len(chain), f)
     return out + [f for _, f in sorted(best.values(), key=lambda x: (x[1].file, x[1].line))]
+
+
+def _reads_source(project, f, source, not_param: bool = False) -> bool:
+    """f reads the source; with `not_param`, not when the name it starts with is one of
+    f's own parameters (a fastlane action's `def self.run(params)` is not Rails' params)."""
+    text = _own_code(project, f, raw=True)
+    if not not_param:
+        return bool(source.search(text))
+    m_ = project.modules.get(f.module)
+    head = m_.code[f.start - 1] if m_ is not None and f.start <= len(m_.code) else ""
+    sig = re.search(r"\bdef\s+[\w.]+[?!=]?\s*\(?([^)\n#]*)", head)  # (the def line's own: `def show` has none)
+    own = set(re.findall(r"[A-Za-z_]\w*", re.sub(r"=.*?(,|$)", r"\1", sig.group(1)))) if sig else set()
+    return any(re.match(r"[$@]?\w*", m.group()).group() not in own for m in source.finditer(text))
 
 
 def _close(code: str, k: int) -> int:
@@ -454,7 +468,18 @@ class _Taint:
             found.append((am.start(), am.group(1), [am.group(2)], am.start(3)))
             adds.add(am.start(3))
             conds[am.start(3)] = am.end(3)
+        # a containment check that turns the value away: `if (!p.startsWith(base)) return`,
+        # `if not p.startswith(base): raise`, `unless p.start_with?(base)`: p is clean from there on
+        guards = set()
+        for am in re.finditer(r"^([ \t]*)(?:\}?[ \t]*(?:else[ \t]+)?if[ \t]*\(?[ \t]*(?:!|not[ \t]+)[ \t]*\(?|unless[ \t]+|.*\bunless[ \t]+)"
+                              r"([A-Za-z_]\w*)\.(?:startsWith|startswith|start_with\?|StartsWith|HasPrefix)[ \t]*\(", code, re.M):
+            found.append((am.start(), am.group(1), [am.group(2)], am.end()))
+            guards.add(am.end())
         for start, indent, names, val in sorted(found):
+            if val in guards:
+                ln = f.start + code.count("\n", 0, start)
+                self.steps += [(ln, name, False, len(indent.expandtabs(4))) for name in names]
+                continue
             end = conds.get(val) or _statement_end(code, val, len(indent.expandtabs(4)))
             rhs = (code if no_interp else raw)[val:end]
             ln = f.start + code.count("\n", 0, start)

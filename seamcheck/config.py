@@ -26,7 +26,7 @@ LISTS = ("rule", "invariant", "contract", "bridge")
 KEYS = {
     "rule": {"id", "kind", "pattern", "in", "allow", "why", "severity", "if", "then", "scope", "window", "text",
              "defined", "used", "check", "from", "when", "to", "depth", "unless", "message", "mode", "report", "skip",
-             "strict", "ignore", "package", "path", "func", "ordered", "source", "source_entry", "source_param", "views", "extra_severity", "match", "fallback", "normalize", "rewrite", "run", "timeout", "sep", "wildcard",
+             "strict", "ignore", "package", "path", "func", "ordered", "source", "source_entry", "source_param", "source_not_param", "views", "extra_severity", "match", "fallback", "normalize", "rewrite", "run", "timeout", "sep", "wildcard",
              "lint", "options", "gate", "bar", "controls", "menus", "repo", "files", "prefix", "fix", "tighten", "via", "layers", "level", "allow_to", "fuzzy"},
     "invariant": {"id", "each", "where", "when", "assert", "for", "key", "why", "severity"},
     "contract": {"id", "act", "when", "assert", "why", "severity"},

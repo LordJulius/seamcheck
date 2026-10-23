@@ -341,3 +341,24 @@ class JavaAndCSharpHandlers(unittest.TestCase):
         self.assertTrue(core.picked("security/java-injection", ["security"]))
         self.assertFalse(core.picked("securityx/a", ["security"]))
         self.assertFalse(core.picked("a", None))
+
+
+class OrdinaryCodeIsQuiet(unittest.TestCase):
+    """What the held-out repos showed: a fastlane action's own `params`, rack's cleaned path,
+    axios's example server that checks the resolved path."""
+
+    def found(self, files):
+        return SecurityFlowCases.found(self, files)
+
+    def test_a_methods_own_params_argument_is_not_rails_params(self):
+        src = "class ChangeLog < Action\n  def self.run(params)\n    yaml = File.read(params[:file])\n  end\nend\n"
+        self.assertEqual([], self.found({"fastlane/actions/change_log.rb": src}))
+
+    def test_a_cleaned_path_and_a_containment_check(self):
+        rb = ("class Files\n  def get(env)\n    request = Rack::Request.new env\n    path_info = request.path_info\n"
+              "    clean = Utils.clean_path_info(path_info)\n    File.read(File.join(@root, clean))\n  end\nend\n")
+        js = ("const fs = require('fs');\nconst path = require('path');\nfunction pipe(res, file) {\n"
+              "  const p = path.resolve(path.join(__dirname, file));\n  if (!p.startsWith(__dirname)) {\n    return;\n  }\n"
+              "  fs.createReadStream(p).pipe(res);\n}\nfunction handler(req, res) {\n  pipe(res, req.url);\n}\n"
+              "module.exports = handler;\n")
+        self.assertEqual([], self.found({"lib/files.rb": rb, "server.js": js}))
