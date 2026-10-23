@@ -2074,12 +2074,10 @@ def _py_returned_closure(project: Project, g: Func):
         return None
     m = min(rets, key=lambda r: len(r.group(1).expandtabs(4)))  # (the function's own return, not its closure's)
     name = m.group(2)
-    same_file = [h for h in project.by_name.get(name, ()) if h.file == g.file]
-    for h in same_file:
-        if g.start < h.start <= g.end:
+    for h in project.by_name.get(name, ()):
+        if h.file == g.file and g.start < h.start <= g.end:
             return h
-    # (a file's closures of one name are one function: `decorator` in route, in errorhandler, ...)
-    return same_file[0] if len(same_file) == 1 and re.search(rf"^\s*def\s+{name}\s*\(", g.code, re.M) else None
+    return None  # (a file's same-named closures are one function, whose span is the first's: only that factory's)
 
 
 def _passed(project: Project, types, f: Func, k: int, depth: int):
