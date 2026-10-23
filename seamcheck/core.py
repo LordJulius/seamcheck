@@ -1824,6 +1824,25 @@ def _cs_static_usings(project: Project, mod) -> set:
     return glob | own
 
 
+def _js_plain_function(project: Project, g: Func) -> bool:
+    """A JS/TS function declared on its own (`function close(s) {`, `const close = (s) =>`),
+    not a class or object member, and never stored as a property or exported
+    under its name in an object (`{ close }`, `x.close = close`)."""
+    m = project.modules.get(g.module)
+    if m is None or m.owner or m.kind or not 0 < g.start <= len(m.raw):
+        return False
+    if not re.match(rf"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\s*\*?\s*{re.escape(g.name)}\s*[(<]|"
+                    rf"(?:const|let|var)\s+{re.escape(g.name)}\s*=)", m.raw[g.start - 1]):
+        return False
+    stored = project.__dict__.setdefault("_js_stored_names", {})
+    if m.name not in stored:  # names this file hands on as properties / object members / exports
+        text = "\n".join(m.code)
+        stored[m.name] = set(re.findall(r"[{,]\s*([A-Za-z_$][\w$]*)\s*(?=[,}])", text)) | \
+            set(re.findall(r"[.\w$\]]\s*=\s*([A-Za-z_$][\w$]*)\s*[;\n]", text)) | \
+            set(re.findall(r":\s*([A-Za-z_$][\w$]*)\s*[,}\n]", text))
+    return g.name not in stored[m.name]
+
+
 def walk_order(project: Project) -> list[Func]:
     """The order calls are resolved in (and the trace written): innermost
     function first, so a call in a callback or a nested class's method is
@@ -2218,6 +2237,11 @@ def _build_edges(project: Project) -> None:
                         (g.ns and not (f.ns == g.ns or f.ns.startswith(g.ns + "::") or g.ns.startswith(f.ns + "::") and f.ns))
                         or (project.modules[g.module].owner and g.module not in own_)) for g in cands_):
                     _nothing(project, f, c)  # `fclose(f)`: libc's; a `test::fclose` in another .cc isn't visible here
+                    continue
+            if not targets and q and c.chain and mod is not None and f.file.endswith(infer._JS_EXTS[:-1]):
+                cands_ = [g for g in project.by_name.get(c.name, ()) if g.kind != "top" and _family(g.file) & _family(f.file)]
+                if cands_ and all(_js_plain_function(project, g) for g in cands_):
+                    _nothing(project, f, c)  # `server.close()`: no `function close(server)` declaration is a method
                     continue
             if not targets and not q and not c.chain and mod is not None and f.file.endswith(infer._JS_EXTS) and not any(
                     g.kind != "top" and _family(g.file) & _family(f.file) and not project.modules[g.module].owner
