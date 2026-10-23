@@ -11,12 +11,35 @@ the project writes down about how its parts fit together.
 
 - **Deterministic and local.** No network, no model, no dependencies beyond
   Python 3.11+ (ripgrep is used when present).
-- **Built for agents.** Plain-text or JSON output, exit code 1 on errors, a
-  pre-commit gate, and queries (`callers`, `impact`, `refs`) that replace grep
-  loops and say how sure they are.
+- **Built for agents and CI.** Plain text, JSON, SARIF (code scanning) or
+  GitHub annotations; exit code 1 on errors; a pre-commit gate; queries (`callers`, `impact`, `refs`) that replace grep
+  loops and say how sure they are; and an MCP server that keeps the graph loaded.
 - **Many languages, one graph.** Elixir, Kotlin, Java, TypeScript/JavaScript
-  (JSX), C++, QML, Python, GDScript, Rust, Go and C#. Rules work on any text
-  file.
+  (JSX), C, C++, QML, Python, GDScript, Rust, Go, C#, Swift, Ruby and PHP.
+  Rules work on any text file.
+- **Says how sure it is.** On 37 open-source repos in 16 languages, 95% or
+  more of the calls into project code are exact on every one, and on all 28
+  repos held out from tuning too (95.1-100%; see "How exact it is").
+  The rest are marked as guesses, never passed off as fact.
+- **Checked against CodeQL.** On 17 tuning repos in ten languages (C, C++, C#
+  and Kotlin included), where both resolve a call seamcheck names the same callee
+  91-100% of the time, and on 11 held-out repos 93.5-100% (zod: 99.9% of
+  17,194 sites). The rest is mostly CodeQL's callee plus the overrides the
+  declared type allows; a different callee is 0-2.4% of sites. It needs no
+  build and no database: 0.5-9 s where CodeQL takes 25 s to 5 min (see "How
+  it compares"). Against ArchUnit, all 54 package dependency rules on jsoup
+  and gson come out the same, read from source with no build.
+- **Finds injections with no config.** In a repo with no `seamcheck.toml`,
+  `seamcheck check` runs the built-in security pack: request data reaching a
+  shell, `eval`, SQL, a deserializer, a file path, a redirect or an outbound
+  request, in Python, JS/TS, PHP, Ruby, Go, Java and C#. On eight deliberately
+  vulnerable apps it found 78 of the 84 injections CodeQL's security-extended
+  suites report there, plus 6 real ones CodeQL doesn't, in under 4 s per app;
+  on the 61 ordinary benchmark checkouts (tuning and held-out) it reports nothing.
+- **Many repos, one graph.** Put several checkouts (or symlinks to them) in one
+  folder and run seamcheck there: a service's call into a library repo is an
+  exact edge, and `seamcheck search REGEX` answers with each hit's function
+  and its callers, across all of them.
 - **Every check came from a real bug.** Each rule and lint was written after a
   bug it would have caught, and its test reproduces that bug (cut down) and
   its fix.
@@ -29,12 +52,38 @@ rules run in about 24 s, most of it the project's own command rules.
 
 ## Quick start
 
+Nothing to configure: in any repo, `seamcheck callers NAME`, `context NAME`,
+`impact FILE`, `search REGEX` and `stats` work on first run, and `check` runs
+the security pack until the repo has a `seamcheck.toml` of its own. Pick how
+to get it:
+
 ```sh
-pipx install git+https://github.com/LordJulius/seamcheck   # or, from a checkout: pip install --user .
+pipx install git+https://github.com/LordJulius/seamcheck      # installed: `seamcheck ...`
+uvx --from git+https://github.com/LordJulius/seamcheck seamcheck stats    # no install
+python3 seamcheck.pyz stats        # one file from a release (Python 3.11+, no dependencies)
 ```
 
-Or run it from a checkout with no install:
-`PYTHONPATH=/path/to/seamcheck python3 -m seamcheck check`.
+Measured on the 33 benchmark checkouts with no config and an empty cache:
+the release file's first answer (`find`, then `context` on a function) takes
+0.5-9.5 s cold (excalidraw, 62k calls: 9.5 s) and 0.2-1.1 s per question
+after that. Any id an answer prints, or `path/file.ext:LINE`, works as the
+next question's argument.
+
+`seamcheck.pyz` is attached to each release (`python3 tools/build_pyz.py`
+builds it from a checkout); on first run it unpacks itself into
+`~/.cache/seamcheck/` and starts as fast as an install after that. From a
+checkout with no install: `PYTHONPATH=/path/to/seamcheck python3 -m seamcheck check`.
+
+For an agent (Claude Code shown; any MCP client works the same way), one line
+gives it the graph as tools, kept loaded between questions:
+
+```sh
+claude mcp add seamcheck -- seamcheck serve -C "$PWD"
+```
+
+and before it edits a function, `context` answers what it would otherwise
+grep for: the source, every caller (exact first, then marked guesses), where
+each of its calls lands, and the tests that reach it, so it knows what to run.
 
 Add a `seamcheck.toml` at the root of your repo:
 
@@ -52,6 +101,15 @@ allow = ["game/entities/Unit.gd:take_hit"]
 why = "damage outside take_hit skips armor, shields and crits"
 ```
 
+Or let seamcheck write a first one from what the repo holds (its languages,
+the folders their code lives in, the rule packs of the frameworks it finds,
+one commented example of each common rule kind), and install the pre-commit
+gate:
+
+```sh
+seamcheck init --hook
+```
+
 Then:
 
 ```sh
@@ -61,13 +119,350 @@ seamcheck callers take_hit      # who calls it
 seamcheck gate --staged         # in a pre-commit hook: may this change land?
 ```
 
+## How it compares (measured)
+
+Every number here comes from `bench/` on the same checkouts, one machine,
+October 2026 (CodeQL 2.23.3, ast-grep, Semgrep 1.182, dependency-cruiser 16).
+
+### The call graph, against CodeQL
+
+`bench/vs_codeql.py REPO --lang L --codeql PATH` builds a CodeQL database,
+runs `bench/codeql/<lang>/calls.ql` (every call CodeQL resolves to a function
+the project defines) and compares it with seamcheck's exact edges, call site
+by call site. CodeQL's points-to and type tracking is the closest thing to
+ground truth that runs offline on the same code.
+
+| repo | lang | CodeQL sites | same callee | wider | wrong | CodeQL's sites seamcheck has | sites only seamcheck resolves | CodeQL: database + query | seamcheck, cold |
+|---|---|---|---|---|---|---|---|---|---|
+| requests | Python | 1,062 | 100.0% | 0.0% | 0.0% | 95.9% | 10 | 10 s + 15 s | 0.5 s |
+| flask | Python | 1,289 | 99.7% | 0.3% | 0.0% | 94.5% | 806 | 11 s + 16 s | 0.5 s |
+| httpx | Python | 1,867 | 99.4% | 0.6% | 0.0% | 99.3% | 96 | 12 s + 15 s | 0.8 s |
+| express | JavaScript | 1,069 | 99.9% | 0.0% | 0.1% | 98.5% | 1,813 | 17 s + 21 s | 1.7 s |
+| hono | TypeScript | 9,323 | 98.7% | 1.0% | 0.3% | 86.9% | 2,459 | 46 s + 35 s | 4.6 s |
+| excalidraw | TypeScript | 25,644 | 99.8% | 0.0% | 0.2% | 95.2% | 1,121 | 71 s + 61 s | 9.3 s |
+| gson | Java | 9,088 | 84.5% | 15.4% | 0.1% | 84.9% | 1,967 | 110 s + 136 s | 3.3 s |
+| jsoup | Java | 21,592 | 98.4% | 1.3% | 0.3% | 93.1% | 947 | 59 s + 39 s | 4.2 s |
+| cobra | Go | 723 | 100.0% | 0.0% | 0.0% | 90.7% | 0 | 28 s + 56 s | 0.9 s |
+| fzf | Go | 2,429 | 84.4% | 15.6% | 0.0% | 92.3% | 4 | 19 s + 19 s | 1.7 s |
+| sinatra | Ruby | 1,306 | 96.6% | 1.0% | 2.4% | 84.5% | 1,461 | 7 s + 308 s | 2.1 s |
+| jekyll | Ruby | 1,933 | 99.6% | 0.3% | 0.1% | 95.4% | 2,559 | 7 s + 23 s | 2.4 s |
+| jq | C | 5,861 | 100.0% | 0.0% | 0.0% | 76.0%† | 443 | 15 s + 9 s | 1.1 s |
+| flameshot | C++ | 598 | 99.3% | 0.6% | 0.2% | 90.1% | 1,403 | 23 s + 8 s | 4.6 s |
+| Polly | C# | 14,689 | 90.7% | 8.2% | 1.1% | 83.8% | 398 | 70 s + 124 s | 3.8 s |
+| Newtonsoft.Json | C# | 20,193 | 96.0% | 1.5% | 2.4% | 79.7% | 14,829 | 102 s + 57 s | 6.2 s |
+| okhttp | Kotlin | 2,470 | 88.4% | 9.8% | 1.8% | 71.3% | 76 | 72 s + 23 s (+ the compile) | 6.5 s |
+
+- **same callee**: of the sites both resolve, seamcheck's exact targets are all
+  among CodeQL's. **wider**: CodeQL's callee plus overrides the receiver's
+  declared type allows (`reader.peek()` on a `JsonReader` is also
+  `JsonTreeReader.peek` to seamcheck; CodeQL's data flow saw only `new
+  JsonReader(...)` reach it). **wrong**: no callee in common. A method's
+  overloads are one function to seamcheck (Java's three `toJson`), so CodeQL's
+  overload counts as that function.
+- **only seamcheck**: calls CodeQL leaves unresolved. A hand-check of 24 of them
+  (flask, express, jekyll) found every one right: a pytest fixture's `app`,
+  the Express app a framework pack types, `Jekyll.logger` (a `LogAdapter`).
+  CodeQL's Go database comes from `go build`, so it has no `_test.go` files.
+  C / C++ ran with `--build-mode=none`, so CodeQL saw only what its extractor
+  could read without a compile, as seamcheck does.
+- † jq: most of the rest are in its vendored decNumber library, called through
+  macros that expand to other macros; 88% outside `vendor/`. flameshot's
+  rest: C++ operators (`a & b` on a project enum) and constructors run by
+  member initializers and declarations, which seamcheck doesn't record as calls.
+- **What it doesn't have**: most of the rest are calls through a value
+  seamcheck can't type statically (a Java `Map` that a project class
+  implements, a JS value returned from an untyped callback), which stay
+  guesses or name nothing.
+- C#: CodeQL's sites leave out property and event accessors and operators
+  (`get_Count`, `op_Equality`, an explicit conversion), which no call syntax
+  names and seamcheck doesn't model as calls (with them, 30% more sites), and
+  a generic callee is named without its type arguments. A method's overloads
+  split over a `partial class`'s files count as one function, as overloads
+  in one file do. Most of the 1-2% "different callee" are overloads by
+  parameter type (`WriteValue(int)` in `JsonWriter` against the override in
+  `JsonTextWriter`) and a generic-receiver extension method
+  (`PolicyBuilder<T>.Retry()` against `PolicyBuilder.Retry()`).
+- Kotlin: CodeQL extracts Kotlin only from a compile. okhttp's own module
+  (`commonJvmAndroid` + `jvmMain`, 160 files) was compiled with kotlinc 2.0.21
+  and its jars from Maven Central, under `codeql database create --command`.
+  CodeQL's Kotlin names are unmangled (`getSink$private`), and property
+  accessors (`getSocket` for `.socket`, `@get:JvmName` properties), `init`
+  blocks and lambda `invoke`s, which no call syntax names, are left out.
+- Not compared: Swift. This CodeQL has a Linux Swift extractor, but it needs
+  a Swift toolchain, and download.swift.org was not reachable from here.
+  seamcheck's Swift exactness is in "How exact it is".
+
+Running the comparison found seamcheck bugs, all fixed (tests in `tests/`):
+JS / TS calls outside any function were never recorded (express's
+`app.use(...)`, a test file's `before(...)`), generic TS functions
+(`function pointFrom<P>(`) and Java methods with a type-use annotation
+(`public @Nullable Document ownerDocument()`) weren't parsed, Python
+decorators weren't calls, a Go method's bare call to the package function of
+the same name was taken for the method itself, and Java overloads ignored the
+argument count. The C# run found that a verbatim string (`@"..."` over
+several lines, `""` for a quote) ended at the line's end, so everything after
+one in a file went unread (Newtonsoft.Json's tests: 11,000 calls; coverage
+went from 58% to 80%), and that `base.X()` in one file of a `partial class`
+named the class's own method; Go's raw strings (`` `O'Brien` ``) had the same
+problem. The Kotlin run found that a call with only a trailing lambda
+(`withLock { }`) was never recorded, an extension on a generic receiver
+(`fun <T> List<T>.toImmutableList()`) wasn't parsed, a class header was cut
+after 3,000 characters (okhttp's `Response` and its documented constructor,
+so it lost `: Closeable`), and an extension on a library supertype a project
+class implements (`fun Closeable.closeQuietly()`) wasn't looked up; coverage
+went from 18% to 71%. The C++ run added methods a macro defines
+(flameshot's `CONFIG_GETTER_SETTER(showHelp, setShowHelp, bool)` in a class
+body: 83 of the sites missed) and calls on a temporary
+(`ConfigHandler().setShowHelp(x)`); coverage went from 74% to 90%.
+
+### "Who calls X?", against grep-style tools and Sourcegraph's precise references
+
+`bench/vs_grep.py` takes the ten project functions CodeQL sees called most
+whose name more than one function has (`get`, `send`, `set`), and scores each
+tool's answer against CodeQL's callers of that one function (only files CodeQL
+analysed count; a function's overloads count as one). `--scip INDEX` adds
+Sourcegraph's precise "find references", read from the SCIP index
+`scip-python` / `scip-typescript` write (a reference written as a call counts;
+every tool is then scored on the files both CodeQL and the indexer read).
+
+Precision / recall, October 2026. seamcheck's exact answer (`callers`) and its
+ranked full answer (`callers --wide`: exact, then name guesses, then calls by
+that name on library-typed values):
+
+| repo | lang | seamcheck exact | seamcheck `--wide` | SCIP (Sourcegraph) | ast-grep | Semgrep |
+|---|---|---|---|---|---|---|
+| requests | Python | 100% / 100% | 88.0% / 100% | 100% / 95.5% | 51.2% / 100% | 51.2% / 100% |
+| httpx | Python | 96.1% / 100% | 66.2% / 100% | 96.1% / 98.8% | 40.0% / 100% | 40.0% / 100% |
+| flask | Python | 100%§ / 93.2% | 58.5% / 93.2% | 100% / 0.5% | 31.6% / 38.3% | 33.6% / 42.1% |
+| click (held out) | Python | 100% / 100% | 84.4% / 100% | 100% / 71.1% | 76.0% / 100% | 76.0% / 100% |
+| koa (held out) | JavaScript | 100%§ / 98.7% | 28.1% / 100% | 100% / 21.8% | 21.5% / 100% | 21.5% / 100% |
+| axios (held out) | JavaScript | 100%§ / 95.3% | 37.2% / 100% | 100% / 66.6% | 35.9% / 93.8% | 35.1% / 100% |
+| ky (held out) | TypeScript | 100% / 100% | 71.4% / 100% | 100% / 80.0% | 57.1% / 80.0% | 62.5% / 100% |
+| zod (held out) | TypeScript | 100% / 99.2% | 78.8% / 99.9% | 99.2% / 83.1% | 46.2% / 89.3% | 46.2% / 89.3% |
+| javapoet (held out) | Java | 90.7% / 98.4% | 76.1% / 100% | – | 27.5% / 100% | 27.5% / 100% |
+| gin (held out) | Go | 100% / 65.4% | 78.6% / 100% | – | 100% / 13.6% | 73.0% / 100% |
+| rack (held out) | Ruby | 92.4% / 90.8% | 74.3% / 93.8% | – | 56.4% / 41.9% | 56.8% / 46.7% |
+| sidekiq (held out) | Ruby | 99.0% / 98.5% | 57.3% / 98.7% | – | 0.0% / 0.0% | 40.1% / 11.6% |
+| Dapper (held out) | C# | 89.9% / 51.3% | 62.9% / 100% | – | 54.8% / 99.2% | 45.1% / 100% |
+
+§ flask, koa and axios are scored against CodeQL's callers plus every site
+seamcheck resolves there that CodeQL doesn't, each checked by hand and right
+(277, 60 and 29 of them; `bench/verified/`, how each was checked in its
+README; `vs_grep.py --verified`): flask's `app` is a pytest fixture CodeQL
+doesn't type, koa's `ctx.set(...)` reaches `response.set` through
+`delegates(proto, 'response')`, axios' `axios.create(...)` in its CommonJS and
+TypeScript tests goes to `lib/axios.create` where CodeQL stops at `index.d.ts`
+or nothing. Against CodeQL's callers alone they read 46.5%, 22.1% and 94.5%.
+The other tools are scored on the same truth. On it, seamcheck's exact answer
+is as precise as SCIP's on all eight repos SCIP indexes and finds at least as
+many callers on each.
+Semgrep runs once per repo with one rule per question (3-9 minutes a scan
+here).
+
+What the columns say:
+- A name search (ast-grep, Semgrep) finds every call by that name, of any
+  object: high recall, and precision as low as the name is common. It finds
+  nothing called another way (a decorator, a call through a variable).
+- SCIP is the compiler's answer where the type checker sees the type, and it
+  is as precise as seamcheck there. It needs the project's dependencies
+  installed and a working `tsconfig` (ky's extends a package; zod's monorepo
+  needed one written for it; a plain-JS repo needs `allowJs`). Recall drops
+  where types run out: koa's `module.exports = class Application` gives its
+  methods symbols local to one file, so no caller elsewhere is found; click's
+  decorators and flask's `app.route` are invisible to it.
+- seamcheck reads source as is, no install, and answers every question from
+  one loaded graph (0.5-12 s for the whole repo, against minutes per question
+  for Semgrep). Its recall falls where a call goes through a library
+  interface: Dapper's `reader.Read()` on an `IDataReader`, which CodeQL counts
+  as reaching Dapper's own wrapping readers; gin's `w.Write(...)` on an
+  `http.ResponseWriter` parameter. Linking such calls to the project classes
+  that declare the library interface was tried and dropped: a class can
+  implement it through a library base class (Dapper's `DisposedReader :
+  DbDataReader`, and `DbDataReader` implements `IDataReader`), which only the
+  library's own metadata shows, so the "exact" set came out incomplete and
+  CodeQL's disagreements on Dapper went from 5 to 12. A call on a library
+  value stays the library's.
+- sidekiq's ast-grep row is zero because the pattern `$R.name($$$A)`
+  matches a Ruby call only when it is written with parentheses, and the
+  targets' calls there aren't (`@config.redis do |conn|`).
+- Against the name searches: on every one of the 13, one of seamcheck's two
+  answers is at least as precise and finds at least as much as both ast-grep
+  and Semgrep: `--wide` where a search finds everything (javapoet 76.1% / 100%
+  against 27.5% / 100%, gin 78.6% / 100% against Semgrep's 73.0% / 100%,
+  Dapper 62.9% / 100% against 54.8% / 99.2% and 45.1% / 100%), the exact answer
+  where it doesn't (rack 92.4% / 90.8% against 56.8% / 46.7%, sidekiq 99.0% /
+  98.5% against 40.1% / 11.6%). Sites are compared at the line their whole call
+  expression starts on, as CodeQL and the searches place a call; `.d.ts`
+  declarations are no targets (no code runs there).
+- **Module edges**: on express, seamcheck's file-to-file imports and
+  dependency-cruiser's are the same 153 (comparing them found two seamcheck
+  bugs: a `require()` inside an expression, and one in a doc comment).
+- **Import cycles** (`kind = "cycles"` against dependency-cruiser's
+  `no-circular`, runtime imports, excalidraw's packages): every one of the 172
+  files dependency-cruiser puts in a cycle, plus `excalidraw-app/data/index.ts`
+  and `firebase.ts`, a real cycle through `import { x } from "."` that it
+  doesn't follow. 7 s each.
+- **Package cycles** (`level = "dir"` against ArchUnit's
+  `slices().matching("org.jsoup.(**)").should().beFreeOfCycles()` on jsoup's
+  compiled classes): the same five packages, helper, internal, nodes,
+  parser and select. ArchUnit needs the build first (Maven: 18 s, then 1.8 s);
+  seamcheck reads the source (3.6 s), and the same rule works on a Python,
+  Go, Rust or C# repo.
+- **Package dependency rules** (`kind = "depend"`, against ArchUnit's
+  `noClasses().that().resideInAPackage("org.jsoup.A..").should()
+  .dependOnClassesThat().resideInAPackage("org.jsoup.B..")` for every pair of
+  top-level packages, on the compiled classes): jsoup, 42 rules, the same 28
+  fail and the same 14 pass; gson, 12 rules, the same 5 fail. ArchUnit counts
+  any use of a type (fields, signatures, generics); seamcheck reads imports
+  and exact calls, and here that is the same graph.
+
+### Security, against CodeQL's security queries
+
+The `security` pack (`seamcheck/packs/security.toml`, on by default with no
+config, and written into every `seamcheck init`) is one `kind = "path"` rule
+per language with a `source`: a function that reads the request is an entry
+point, and a sink counts only when its arguments carry that value, through
+assignments in order (`x = escape(x)` cleans x for the rest of its block),
+into the parameters a call passes it to, and across files by exact call
+edges. A constant first argument (a parameterized query, a same-site
+redirect) is clean. A framework handler's parameters are request data too
+(`@GetMapping` + `String cmd` in Spring, `[HttpPost]` + `[FromBody] T x` in
+ASP.NET: `source_entry` / `source_param` in a rule), and so is what a helper
+that reads the request returns (`WebUtils.getRequestBody(request)`). A value
+put into an object (`sb.append(id)`, `doc.Load(Request.Body)`) or a loop
+variable over a tainted collection carries it, and a containment check that
+turns the value away (`if (!p.startsWith(base)) return`, `unless
+p.start_with?(base)`) cleans it; a later call on a sink's own
+result (`st.executeQuery()` after `con.prepareStatement(sql)`) is the same
+injection and isn't reported again.
+
+Against CodeQL 2.23's `*-security-extended` suites on eight deliberately
+vulnerable apps, counting CodeQL's findings of the kinds both look for
+(command, code, SQL / NoSQL, deserialization, path, redirect, SSRF, template
+injection):
+
+| app | language | CodeQL | seamcheck found | only seamcheck (real) | CodeQL: database + analysis | seamcheck |
+|---|---|---|---|---|---|---|
+| Vulnerable-Flask-App | Python | 2 | 2 | 0 | not timed | 0.4 s |
+| pygoat | Python | 13 | 11 | 1: `ImageMath.eval(request value)` | not timed | 0.3 s |
+| NodeGoat | JavaScript | 8 | 8 | 0 | 12 s + 50 s | 0.4 s |
+| dvna | JavaScript | 4 | 4 | 0 | 10 s + 39 s | 0.2 s |
+| railsgoat | Ruby | 9 | 9 | 2: `send_file` of a request path, an open redirect | 6 s + 28 s | 2.3 s |
+| govwa | Go | 2 | 2 | 0 | 19 s + 18 s | 3.9 s |
+| java-sec-code | Java (Spring) | 44 | 40 | 3: QLExpress `runner.execute`, Shiro `rememberMe` cookie deserialized, okhttp SSRF | 102 s + 96 s | 0.8 s |
+| dvcsharp-api | C# (ASP.NET Core) | 2 | 2 | 0 | 191 s + 56 s | 0.3 s |
+| **total** | | **84** | **78 (93%)** | **6** | | |
+
+The 2 seamcheck doesn't report are pygoat file reads behind
+`os.path.realpath` and a `startswith` check against the base directory; the
+check holds, so they read as CodeQL false positives. A sanitizer applies to
+its own part of a string: `"#{params[:id].to_i}.png"` is clean, `"cp #{file}
+#{Time.now.to_i}"` still carries `file`. govwa's template XSS is reported where `template.HTML(...)`
+is called on the value, CodeQL reports it at the wrapper.
+
+java-sec-code's 4: Jackson `readValue` (unsafe only with default typing on,
+which seamcheck doesn't read, so it isn't a sink), a `Location` header set
+with `setHeader`, `IOUtils.toByteArray(URI.create(url))`, and a second
+`FileOutputStream` on a path already reported one line up. seamcheck also
+reports 5 there that aren't injections: the app's "safe" variants (YAML with
+`SafeConstructor`, SpEL with `SimpleEvaluationContext`, a QLExpress runner
+with its security strategy on) and `new File(name).getName()` in a helper.
+
+PHP, which CodeQL doesn't read, against DVWA's own labels (each lab has low,
+medium and high levels that are vulnerable by design and an "impossible" one
+that isn't): 27 findings, about 21 real (command injection at every level,
+open redirect at every level, SQL injection in the low labs, path and code
+injection in its help and source viewers). The rest pass a guard the taint
+doesn't read: `is_numeric` on each octet, `preg_match('/^\d+$/')`, an
+`array_key_exists` allow-list. It misses SQL injection behind
+`mysqli_real_escape_string` in a numeric context and a value read back from
+the session.
+
+Beyond injection, the pack has five pattern rules for mistakes that are
+wrong wherever they appear (test code aside): certificate validation turned
+off, Flask's debugger on, an XML parser expanding external entities, a
+password through MD5 / SHA-1 / a bare SHA-2, and a JWT decoded without its
+signature. Against CodeQL's findings of those kinds on the same apps:
+
+| kind | CodeQL | seamcheck found | only seamcheck (real) |
+|---|---|---|---|
+| weak password hash | 5 (VFA 1, pygoat 3, railsgoat 1) | 5 | 1 (railsgoat's `hash_password`) |
+| Flask debug mode | 19 (pygoat) | 19 | 1 (`app.debug = True`) |
+| XML external entities | 2 (pygoat, dvna) | 2 | 0 |
+| certificate validation off | 4 (all in VFA's `tests/e2e_zap.py`) | 0: test code is left out | 0 |
+| JWT signature not verified | 0 (not in that suite) | 1 (VFA `jwt.decode(token, verify=False)`) | 1 |
+
+On the 37 benchmark repos the injection rules report nothing, and the
+pattern rules two warnings (certificate checks off is a warning, not an
+error): httpx's own implementation of its `verify=False` option and sinatra's
+test-server runner, both on purpose; running it there found and fixed its false positives (a request's
+own `query()` method, Express's `res.download(path, { root })`, Rails'
+`where(id: params[:id])`, a Go prepared statement's `QueryRow`, values
+through `int()` / `.to_i`). Test code is never an entry point.
+
+This is not CodeQL's data flow: a value inside a container or an object's
+field, or a guard that validates it, isn't followed, so CodeQL stays the tool
+for a security audit. The pack is the cheap version that needs no build and
+runs on every change; a project extends it by overriding a rule by its id
+(`security/python-injection`) with its own `from`, `to` and `unless`.
+
+### Many repositories, against Sourcegraph
+
+Sourcegraph searches many repositories from a server, with precise
+navigation where a SCIP indexer has been run per language. seamcheck has no
+server: a folder of checkouts, or of symlinks to them, is one project, and
+its call graph crosses repository lines like any other. With `requests` and
+an app that uses it side by side (`ws/app`, `ws/requests`):
+
+```
+$ seamcheck -C ws callees app/svc/client.fetch
+app/svc/client.fetch  (app/svc/client.py:5)  [1 exact, 0 name-guess callees, walking exact]
+  -> requests/src/requests/api.get  (requests/src/requests/api.py:74)
+    -> requests/src/requests/api.request  (requests/src/requests/api.py:24)
+$ seamcheck -C ws search 'timeout=' 'app/**'
+app/svc/client.py:6: return requests.get(url, timeout=3)  [app/svc/client.fetch: 0 exact, 0 name-guess callers]
+```
+
+`callers` of `Session.get` lists the app's `fetch_many` beside requests' own
+tests. What Sourcegraph has and seamcheck doesn't: a web UI, search across
+thousands of repositories it keeps cloned and indexed, and commit / diff
+search. seamcheck's `search` is a regex over the files it loaded, with the
+graph attached to each hit, for an agent or a terminal.
+
+### What each tool is for
+
+| | seamcheck | CodeQL | Semgrep (OSS) | ast-grep | Sourcegraph / SCIP | ArchUnit | dependency-cruiser |
+|---|---|---|---|---|---|---|---|
+| answers | callers, callees, impact, contracts, architecture rules | any query over code + data flow | pattern findings | pattern matches / rewrites | navigation, search | Java architecture tests | JS/TS module rules |
+| needs | Python 3.11 | a database per language; C#/C++/Java/Kotlin/Swift builds | itself | itself | a server and an indexer per language | a JVM test build | Node |
+| languages in one graph | 16, across language and process seams (HTTP, D-Bus, QML↔C++) | one per database | n/a | n/a | per indexer | Java | JS/TS |
+| call graph | yes, exact or marked guess | yes, most precise | no (Pro: some) | no | via indexers | classes, not calls | modules only |
+| security | a built-in injection pack (7 languages), on with no config; taint along calls | full data flow, large query suites | large rule registry | patterns | no | no | no |
+| many repos | a folder of checkouts is one graph; `search` | one database each | per run | per run | yes, at scale, in a browser | no | no |
+| for an agent | MCP server, `context`, JSON | CLI, SARIF | CLI, SARIF | CLI | API | tests | CLI |
+
+Where the others are the better tool: CodeQL for a security audit (data
+flow through containers, fields and guards, and hundreds of maintained
+queries beyond injection) and for the precise runtime callee of a virtual
+call; Semgrep for its large registry of rules (style, misconfiguration,
+secrets) beyond injection; Sourcegraph for search across thousands of
+repositories in a browser; ArchUnit when the architecture rules
+should be Java tests over real types; dependency-cruiser for rich JS
+dependency reports. seamcheck is for the question an agent or a reviewer
+asks before every change, in any repo with nothing set up: what calls this,
+what does it reach, which tests run it, and does the change break a rule.
+
 ## Commands
 
 ```
+Starting
+  seamcheck init [--hook] [--force] a first seamcheck.toml for this repo (+ packs, + the pre-commit gate)
+  seamcheck serve                   an MCP server (stdio): the queries below from one loaded graph
+
 Checks
-  seamcheck check [--json] [--only id,id] [--skip id,id] [--errors-only]
+  seamcheck check [--format F] [--only id,id] [--skip id,id] [--errors-only]
                                     run every rule (exit 1 on errors)
-  seamcheck gate [--since REF] [--staged]
+  seamcheck gate [--since REF] [--staged] [--format F]
                                     may this change land? (see "The land gate")
   seamcheck tighten                 run each command rule's `tighten` (an allowlist rewrite that only shrinks)
 
@@ -76,7 +471,10 @@ The call graph
   seamcheck callees SPEC [--depth N]   what it calls
   seamcheck path FROM TO               the shortest call chain between two functions
   seamcheck find NAME                  where functions are defined (+ caller counts)
+  seamcheck context NAME [--json]      before editing it: source, each caller, where its calls land, tests to run
   seamcheck refs NAME...               defined / called / mentioned anywhere (scripts and config too)
+  seamcheck search REGEX [GLOB...] [--code]
+                                       code search: each hit with its function and that function's callers
   seamcheck impact TARGET... [--depth N] [--since REF]
                                        what a change could break: callers + bridged views, by area
   seamcheck dead                       functions nothing calls or references (a hint, not proof)
@@ -102,8 +500,13 @@ Options
   -C DIR          project root (default: the nearest parent with seamcheck.toml)
   --config PATH   more config: a .toml or a folder of them (repeatable)
   --fuzzy         callers / callees / path / impact: also walk name-guess edges
+  --wide          callers: also the possible callers (calls by that name on a
+                  library-typed value), listed below exact and name guess
+  --precise       ask language servers where the guessed calls go (see "Precise mode")
   --no-cache      parse everything again
   --strict        runtime: also flag rules that had nothing to check in this run
+  --format F      check / gate: text (default), json (= --json), sarif, github
+  --version
 ```
 
 SPEC is `name` (glob ok), `Module.name`, or `path/glob:funcglob`.
@@ -120,25 +523,67 @@ An edge is **exact** when the target is certain:
 - a name imported by the file: Elixir `alias A.{B, C}`, `import A` and the
   imports an Elixir `use` injects (its `__using__` or `using do` block, or
   `def controller` for `use App, :controller`); JS/TS `import {f as g}`,
-  `* as ns`, default imports and tsconfig `paths` (`@/lib/x`); Kotlin/Java
-  same-package files, `import a.b.fn` and `import a.b.*`;
+  `* as ns`, default imports, an object imported by name (`API.create()`),
+  tsconfig `paths` (`@/lib/x`, an exact `"@app/common"`, an `extends`ed base's)
+  and workspace packages by their package.json name; Kotlin/Java
+  same-package files, `import a.b.fn` and `import a.b.*`; C# the file's
+  namespace and its `using`s; Python `import a.b as c` and `from .x import y`
+  (absolute imports find the package under its source root: `src/flask` over
+  a test fixture named `flask.py`); Go the files of the same directory and
+  package, and imports through `go.mod`; Rust `use` trees through `crate::`,
+  `self::`, `super::`, child modules and the workspace's crates (a
+  `[[bin]] path` root included);
+- a name a barrel or package re-exports: `export * from`,
+  `export { a as b } from`, an `__init__.py`'s imports and `import *`, Rust
+  `pub use`;
 - a variable whose type the code states or builds: Kotlin `val r: Repo`, TS
   `const s: Store`, parameters, class fields and constructor properties, C++
   `Type* p`, `Type& r`, `Type v(...)` and a class's header members for its
-  `.cpp`, and a constructor (`val prefs = Prefs(ctx)`, `const hub = new Hub()`);
+  `.cpp`, Java/C# `Repo repo` and fields, Python `x: Repo` and
+  `self.repo = Repo()`, Go receivers, parameters, struct fields and
+  `x := &T{}` (`w tui.Window` too), Rust `x: &mut Repo`, and a constructor
+  (`val prefs = Prefs(ctx)`, `const hub = new Hub()`, `let s = Searcher::new()`);
+- `self.x()` / `this.x()` / `Self::x()` / `super().x()`: the caller's own class
+  (a Python class is a module of its own, `file.Class`, its parent the first
+  base; a Go type's methods are the module `file.Type`), and `Foo()` in Python
+  is `Foo.__init__`;
 - an object C++ hands to QML by name (`setContextProperty("continuity",
   &continuity)`), typed by that variable's declaration;
 - a C++ namespace (`veridian::api::parseClaim()` reaches the one in `api/`);
+- in Ruby (see "The Ruby adapter" below): a constant as Ruby looks it up (the
+  lexical scopes, the class's ancestors, a top-level `include`), a class
+  reopened in several files as one class, `< Base` and `include` / `extend`
+  as supertypes (a mixin's bare call reaches the classes including it),
+  `def self.x` / `class << self` / `extend self` as `A.x`, `Foo.new` as
+  `Foo#initialize`, `require` / `require_relative` for top-level methods,
+  and the types of locals, fields and return values (below);
 - a helper the calling function defines itself (`const nudge = () => ...`
   inside a component);
 - a Kotlin extension the caller's own file declares (it shadows other files'
-  of the same name), and overloads within the one module in scope;
-- a method name that exists in exactly one module the file can see;
-- a `[project.groups]` binding (below).
+  of the same name);
+- a `[project.groups]` binding (below);
+- a receiver typed step by step (`self.store.get().save()`): a field's or
+  property's declared type, what a method returns (`-> Foo`, `: Foo`, its own
+  last `return x`, a builder step returning `this`), a getter (`get x()`,
+  `@property`), a cast (`(x as Foo).y()`), a closure's body, an overload set
+  that all returns one type; and the parameter a framework hands a function,
+  as its pack says (Express's `(req, res)`, Hono's `c`; "Framework packs");
+- Swift's implicit members (`.status(404)`, `case .value(let v)`), typed by
+  their context: the parameter they're passed to (overloads settle by which
+  parameter type has the member), a `return`, `self =`, a typed `let` or an
+  array element; a pattern calls nothing;
+- GDScript's `$Node`: the node of that name in the `.tscn` scenes whose root
+  runs the script (a scripted or instanced node is its script's class);
+- a C++ class QML knows by another name (`QML_NAMED_ELEMENT(Phone)` +
+  `QML_FOREIGN(PhoneImpl)`), and a root object's property seen from the
+  components it instantiates (QML's dynamic scope).
 
 An edge is **fuzzy** (a name guess) when the call is on a receiver of unknown
 type: every function with that name is a candidate, unless more than 8 share
-it (then it's dropped as noise). Guesses are limited to what could be true: a
+it (then it's dropped as noise). That holds even when only one module in scope
+has a function of that name: sampled across hono, gson, Polly, okhttp and
+excalidraw, those edges were often wrong (`res.json()` on a fetch Response is
+not the project's `Context.json`), so a unique name alone is never "exact". Guesses are limited to what could be true: a
 guess never crosses languages (Kotlin never calls TypeScript; QML may call its
 JS libraries and C++), and product code is never guessed into a test file.
 
@@ -146,30 +591,244 @@ Some calls resolve to **nothing**, on purpose:
 
 - a qualifier that names a module with no such function in the project
   (`Enum.reject`, `Repo.rollback`) is a library call;
-- in Elixir, Kotlin, Java and TypeScript a bare call with nothing in scope is
-  the language's own library (`Enum`, Compose's `Row`, vitest's `expect`);
+- in Elixir, Kotlin, Java, TypeScript, Python, Go, Rust and Ruby a bare call with
+  nothing in scope is the language's own library (`Enum`, Compose's `Row`,
+  vitest's `expect`, `len`, `append`, `println!`);
+- a call on a name imported from outside the project (`json.dumps()`,
+  `fmt.Println()`, `_.map()` after `import _ from "lodash"`);
 - a call on a variable typed outside the project (`s: String; s.split()`),
-  unless a project Kotlin extension is declared on that type.
+  unless a project Kotlin extension is declared on that type;
+- a value the language or runtime owns: a literal, `x: Foo[]` / `x = []`,
+  Python's builtins (`dict`, `vars(x)`, `**kwargs`) and a class whose base
+  is one, JS globals (`console`, `document`, `vi`) and DOM properties
+  (`el.classList`), Rust's primitives and the crates Cargo.toml depends on,
+  a method missing from a type the project only extends (a Swift `extension
+  Data`, a `global.d.ts` addition to `CanvasRenderingContext2D`), a TS type
+  an ES module neither declares nor imports (`Response` is the runtime's);
+- in Rust, `.unwrap()`, `.len()`, `.push()` and the other everyday
+  Option / Result / Vec / String / iterator methods on a receiver of unknown
+  type: they are the standard library's, not a project function of that name;
+- in Ruby, the same for Object / Enumerable / Hash / Array / String methods
+  (`each`, `to_s`, `key?`, `merge`...) on a receiver nothing types, and any
+  call on a library's value: a literal (`"a".split`, `%w(a b).each`), a gem's
+  constant (`Liquid::Template.parse`), what a bare call reaching no project
+  method returns (Rack::Test's `last_response.body`), what Ruby's own
+  classes yield (`File.open(p) do |f|`).
 
 `seamcheck stats` prints, per language, how many call sites are exact, guessed
 or nothing, and of the calls that reach project code, how many are exact.
-Watch that number: a drop after a change means the tool lost an import.
+Watch that number: a drop after a change means the tool lost an import. The
+gate watches it for you (below).
 
 Queries say how sure they are. `callers`, `callees`, `path` and `impact` walk
 exact edges; `--fuzzy` adds the guesses. `find` and the `callers` header print
-both counts (`callers: 12 exact, 1849 name-guess`).
+both counts (`callers: 12 exact, 1849 name-guess`). `callers --wide` answers
+"what could call this?" in three ranked tiers: the exact callers, the name
+guesses, and then (marked `??`) the calls by that name on a value the code types
+as a library's (`reader.Read()` on an `IDataReader` may still be the project's
+own reader). That third tier is never an edge, so nothing else counts it; it is
+what a name search would add, kept below what is known.
 
 Tests are functions too (kind `test`): ExUnit `test "..." do` (including a
 head that goes on to the next line, like `test "x",\n %{conn: conn} do`),
-vitest/jest `it(...)` / `test(...)`, and JUnit `@Test`. So `callees 'test *'`
-says what a test exercises. ExUnit `setup` and `describe` are fixtures and
-grouping, not tests.
+vitest/jest `it(...)` / `test(...)`, JUnit `@Test`, pytest `test_*` functions
+and `Test*` class methods in test files, Go `TestX` / `BenchmarkX` /
+`ExampleX` / `FuzzX` in `_test.go`, Rust `#[test]` (and `#[tokio::test]`),
+xUnit / NUnit / MSTest `[Fact]` / `[Test]` / `[TestMethod]`, and Ruby's RSpec
+`it "..." do` / `specify`, Minitest `def test_x` and `test "x" do`, and
+Shoulda `should "x" do` (named `test <label>`, in the class around them),
+XCTest / PHPUnit `testX` methods and swift-testing `@Test` / PHPUnit
+`#[Test]`.
+So `callees 'test *'` says what a test exercises. ExUnit `setup` and
+`describe`, and RSpec / Shoulda `describe`, `context`, `setup` and `before`,
+are fixtures and grouping, not tests. Ruby test files are `*_test.rb`,
+`*_spec.rb`, `test_*.rb` and anything under `test/` or `spec/`.
 
-Adapter details: C++ out-of-line methods, `->` calls and `25'000` digit
+Adapter details: a Java / C# method's parameters may span lines and its body
+may open on the next line (Allman braces), a C# body may be `=> expr;`; a
+TypeScript class field holding an arrow function (`private onDown = (e) =>
+{`) is a function; Python module-level code (decorators, `app = create()`,
+`if __name__ == "__main__":`) belongs to the file's `<top>`; C++ out-of-line methods, `->` calls and `25'000` digit
 separators; QML functions, `onX:` handlers and component instances (a use of
 `X.qml`); JSX `<Card />` is a call to `Card`; an Elixir sigil (`~w(a b)`) is
-not a call. A file an adapter crashes on is a `config` error finding, never a
-silently empty file.
+not a call. Swift: a SwiftPM target (`Sources/<Target>/**`) is one scope and
+`import X` brings target X in; extensions join their type (across targets),
+protocols are interfaces, `init` is what `Foo(...)` runs. PHP: a file's
+`namespace` is its package, `use A\B\C [as D]` (and `use A\{B, C}`) imports,
+typed and promoted properties and `$this->x = $param` type fields, a trait's
+methods are its users', `new Foo` runs `__construct`; `#` comments,
+heredocs and `?>` HTML are blanked. A file an adapter crashes on is a
+`config` error finding, never a silently empty file.
+
+### How exact it is
+
+`bench/bench.py REPOS_DIR` measures it on shallow clones of open-source repos:
+per language and repo, the share of calls into project code that are exact
+(`stats`' "project calls exact"), and "named-nothing", the calls that reached
+nothing though a project function has that name (a resolver that turns
+guesses into nothing raises the first number and shows in the second). Exact
+edges are also checked by hand: random samples per language, each traced to
+the code.
+
+| language | repo: project calls exact (static, October 2026) |
+|---|---|
+| Python | flask 96.3%, httpx 97.9%, requests 96.1% |
+| C | jq 99.9%, redis 100.0% |
+| C++ | flameshot 98.1%, kdeconnect 97.4% |
+| C# | Polly 96.6%, Newtonsoft.Json 98.5% |
+| Java | gson 96.9%, jsoup 97.1% |
+| Kotlin | nowinandroid 96.8%, okhttp 95.0% |
+| Rust | ripgrep 96.1%, bat 95.3% |
+| Go | cobra 97.3%, fzf 95.7% |
+| TypeScript | excalidraw 96.8%, hono 96.5%, plausible 98.2% |
+| JavaScript | express 95.8%, hexpm 97.9%, plausible 96.7% |
+| Elixir | plausible 99.9%, hexpm 99.4%, phoenix 99.9% |
+| PHP | Slim 98.1%, guzzle 96.1% |
+| Swift | Alamofire 95.9%, swift-argument-parser 95.5% |
+| Ruby | sinatra 95.6%, jekyll 96.6% |
+| GDScript | godot-demo-projects 97.9%, tps-demo 100.0% |
+| QML | neochat 96.7%, cool-retro-term 96.9%, kdeconnect 99.1% |
+
+**Held out.** Those repos are the ones the resolvers were tuned on, so they
+overstate what a new repo gets. `bench/bench.py REPOS_DIR --holdout` runs 28
+other repos (two per language) that were never used for tuning until they were
+measured. The first measurement found the corpus numbers partly fitted: koa
+36.8%, zod 60.5%, ky 67.8%, Pixelorama 81.4%. Each fix since then is a general
+rule (CommonJS prototypes and `delegates`, TS object types and `import type`,
+namespace re-exports, C++ namespaces and aliases, Go embedding, GDScript
+multi-line signatures...) with a fixture test, and it is kept only if the
+tuning corpus doesn't drop. Some of the gain is calls that used to be wrong
+guesses and now reach nothing (named-nothing rises with them), because the
+method is built at runtime and no file defines it; zod's named-nothing went
+from 7.5% to 16.6% and back down to 11.7% once its runtime-built methods
+(`$constructor` factories, members attached with `defineProperty`, functions a
+factory returns) were followed to the code that runs.
+
+| language | held-out repo: project calls exact (October 2026) |
+|---|---|
+| Python | click 95.6%, rich 95.4% |
+| Go | gin 96.5%, urfave/cli 96.7% |
+| Rust | clap 95.1%, fd 95.2% |
+| TypeScript | zod 95.5%, ky 97.5% |
+| JavaScript | axios 95.2%, koa 96.7% |
+| Java | commons-lang 96.4%, javapoet 97.3% |
+| Kotlin | moshi 95.5% |
+| C# | Dapper 96.4%, AutoMapper 95.2% |
+| Elixir | ecto 99.9%, oban 100.0% |
+| GDScript | Pixelorama 96.2% |
+| C | lua 99.9%, cJSON 97.1% |
+| C++ | fmt 95.8%, spdlog 96.9% |
+| Swift | Kingfisher 95.2%, SwiftyJSON 97.8% |
+| Ruby | rack 95.8%, sidekiq 95.3% |
+| PHP | monolog 98.0%, flysystem 95.6% |
+
+All 28 are at 95% or more. The last three to get there were zod (93.5%: schema
+methods built at runtime by `$constructor` and attached with `defineProperty`),
+axios (91.5%: values handed through helpers and callbacks, mock objects shared
+between tests) and sidekiq (91.6%: values yielded to blocks through connection
+pools, instance variables set in `before` blocks). What got them there is
+general: a parameter typed by what every caller passes, a block parameter typed
+by what the method yields, Ruby's lexical constant lookup, a TS `const` read as
+a value rather than the interface of the same name. Checking zod against CodeQL
+also found wrong exact edges that the exact share had counted as wins: `z.parse`
+and `z.compile` had reached a same-named method of an object literal, or of a
+class, through `export *`. Fixing those lowered zod's share before the factory
+rules raised it again.
+
+Against CodeQL, on the held-out repos it has a database for (same columns as
+above):
+
+| repo | lang | CodeQL sites | same callee | wider | wrong | CodeQL's sites seamcheck has | sites only seamcheck resolves |
+|---|---|---|---|---|---|---|---|
+| click | Python | 163 | 98.7% | 1.3% | 0.0% | 93.3% | 27 |
+| koa | JavaScript | 771 | 100.0% | 0.0% | 0.0% | 99.0% | 464 |
+| axios | JavaScript | 3,990 | 98.3% | 0.0% | 1.7%‡ | 85.8% | 387 |
+| ky | TypeScript | 2,055 | 100.0% | 0.0% | 0.0% | 83.9% | 929 |
+| zod | TypeScript | 19,262 | 99.9% | 0.1% | 0.1% | 89.2% | 4,266 |
+| javapoet | Java | 3,631 | 93.5% | 5.8% | 0.7% | 89.3% | 129 |
+| gin | Go | 666 | 96.8% | 3.0% | 0.2% | 80.8% | 1 |
+| rack | Ruby | 2,534 | 97.1% | 2.8% | 0.0% | 86.5% | 2,203 |
+| sidekiq | Ruby | 2,714 | 99.5% | 0.4% | 0.1% | 94.4% | 1,244 |
+| Dapper | C# | 3,448 | 99.6% | 0.2% | 0.2% | 61.0% | 116 |
+| spdlog | C++ | 3,088 | 93.8% | 5.2% | 1.0% | 52.0% | 1,091 |
+
+‡ 41 of axios's 60 are CodeQL resolving a call to its `index.d.ts`
+declaration where seamcheck names the implementation (`lib/axios.create`);
+15 are a destructured callback parameter seamcheck matched to the wrong one of
+a test file's same-named closures. Dapper's and spdlog's coverage is low for
+the reasons in the C# and C++ notes above (property getters, operators and
+implicit constructors, which aren't written as calls).
+
+What gets a call there, beyond imports and declared types: return types
+through chains (`a.b().c()`), generic arity (C#'s `Policy` vs `Policy<T>`),
+lambda and closure parameters typed from the function they're passed to
+(`services.Add(b => b.AddRetry())`, `|m| m.start()`, `xs.map { $0.name }`),
+for-loop and index elements of declared containers and returned sequences,
+Rust `Option` / `Result` kept wrapped until unwrapped and enum variants in
+match arms, Kotlin / C# extension functions, TS `declare global` augmentations
+and JSX runtimes, and a callback parameter called as a function when every
+caller passes the same project function. The rest stay guesses on purpose: a
+duck-typed Ruby value that may be a `Document` or a `Page`, a Swift implicit
+member whose context type isn't written down, a callback the callers don't
+name.
+
+kdeconnect's QML pages get their plugin interface pushed in
+(`pageStack.push(page, {pluginInterface: obj})`, `obj` from the pushing
+item's own factory), a delegate's `device` is a C++ model role, and the
+objects are D-Bus proxies generated at build time. seamcheck follows each:
+a page's untyped property holds what every push hands it (read per instance
+when the page is a property of the pusher), a role is what the model's
+`roleNames()` / `data()` return, and a proxy generated from an interface
+(`OrgKdeKdeconnectDeviceInterface`) calls the class whose `Q_CLASSINFO`
+declares it, so a QML button's `sendCommand()` reaches the daemon's
+`RemoteControlPlugin::sendCommand`. Ruby values typed only by a variable's
+name (`site`, `@document` holding a `Site` / `Document` when the project has
+one class of that name) follow Ruby's convention and count as exact. Precise
+mode (below) asks a language server about the remaining guesses.
+
+### The Ruby adapter
+
+`.rb`, `.rake` and `.ru` files. Each file is a module and each class or
+module its own, `<file>.<A::B>` (`module A; class B` and `class A::B` both
+make `A::B`). Blocks are read off `class` / `module` / `def` / `do` /
+`begin` / `case` / `end`: an `if` / `unless` / `while` that leads a statement
+or a value (`x = if c`, `host << if c`) opens one, a modifier (`return if c`)
+does not, `while c do` is one block, `def x = expr` (endless) none; heredocs,
+`%w()` / `%r{}` literals, regexes, `?"` and `=begin` blocks are blanked
+(interpolated `#{code}` stays: its calls are calls).
+
+A call needs no parentheses: `name(`, every `.name` that isn't a setter
+(`obj.x = v`), and a bare name the method hasn't assigned before (a local, a
+parameter, a block's `|x|`, a `rescue => e` is not a call; a hash key
+`name:`, a symbol and `alias a b` aren't either). `super` calls the parent's
+method of the same name. `attr_reader` / `attr_accessor`, `def_delegators`,
+`delegate ... to:`, `define_method(:x)` and RSpec `let(:x)` / `subject` are
+methods; `Foo = Class.new(Base)` / `Struct.new` is a class.
+
+Ruby states few types, so they are read off what the code does:
+
+- `x = Foo.new(...)`, `@x = Foo.new` (or `self.x =` through an accessor) in
+  any method, including `nil` in one place and a Foo in another, and a test's
+  fields from the `setup do` / `before do` of the contexts around it;
+- a method's last expression (`Foo.new(...).tap { }`, `self`, `@x ||= ...`),
+  YARD `@return [Foo]` / `@param x [Foo]` and Sorbet `sig { params(x:
+  Foo).returns(Bar) }`;
+- a parameter that every project call site passes the same type to
+  (`Reader.new(self)` in Site makes `Reader#initialize(site)`'s `site`, and
+  the `@site` it is stored in, a Site; `Document.new(path, :site => site)`
+  types `@site = relations[:site]`). Product callers must all be typed; a
+  test's call site (often a double) only counts when it agrees. Each
+  subclass built through a shared `initialize` takes its own callers' type
+  (each Drop wraps its own object). For a method other than `initialize`
+  every call of that name in the project must resolve, its name must never be
+  a symbol (`send(:x)`, callbacks), and it must not check what it got
+  (`respond_to?`, `is_a?`, `case x`);
+- a mixin's `site` when every class including it returns the same type.
+
+A library class the project only adds to (`class Rack::Builder` with one
+method, every declaration in that form, none with a superclass or an
+`initialize`) is still a supertype for the methods added, but a value of
+that type is the library's.
 
 ### `[project.groups]`: what a node found by group is
 
@@ -189,6 +848,78 @@ exact. A helper (`var main := _main()`) does not bind, a group not in the table
 stays a guess, and a file that isn't in the project is a config problem. List
 only groups exactly one script joins.
 
+### Precise mode: a language server settles the guesses
+
+The static resolver reads names; it can't know what `shapes["c"].area()` or
+`make().run()` is. With `--precise` (any command that loads the graph) or
+`[precise] enabled = true`, each call it guessed, and each call that reached
+nothing though a project function has the name, goes to the language's server
+as a definition request:
+
+- an answer in the project makes the call one exact edge (the function there,
+  a class's constructor, and like any exact edge its subclasses' overrides);
+- an answer outside it (the standard library, a dependency, `node_modules`)
+  makes the guesses nothing: a library call;
+- no answer, or one that isn't a function seamcheck knows (a parameter holding
+  a callback, an interface's signature, a derive), leaves the call as it was.
+
+Static resolution is the default and doesn't change. Precise mode only replaces
+a guess with what a server says, and `seamcheck stats --precise` counts it:
+
+```
+precise: 631 calls asked (0 answered from cache): 244 guesses and 9 nothings made exact, 177 guesses
+were library calls, 86 nothings confirmed, 115 unsettled  (10347 ms; pyright-langserver: 613 asked, ...)
+```
+
+Servers, used when installed: pyright (`.py`), rust-analyzer (`.rs`), gopls
+(`.go`, also found in `$GOPATH/bin`) and TypeScript's tsserver (`.ts .tsx .js
+.jsx .mts .cts .mjs .cjs`, its own protocol). Any other LSP server over stdio
+works per extension:
+
+```toml
+[precise]
+enabled = true                                   # default: only with --precise
+servers = { ".java" = ["jdtls"], ".js" = [] }    # add or replace one; [] keeps a language static
+wait = 300                                       # s a server may take to load the workspace
+timeout = 60                                     # s without an answer before giving up on it
+```
+
+The built-in servers never fetch or build: gopls runs with `GOPROXY=off`,
+rust-analyzer offline without build scripts or proc macros, and when cargo
+can't resolve the workspace offline (dependencies never fetched) seamcheck
+describes the workspace's own crates to it from `cargo metadata --no-deps`, so
+calls between them and into std still resolve (std needs rustup's `rust-src`).
+A server that is missing, crashes or stops answering is one warning on stderr;
+the run goes on with the static graph.
+
+Speed: requests are pipelined (256 in flight per server), servers run side by
+side, and rust-analyzer is asked again until its workspace has loaded. Answers
+are cached by the asking file's content, line, column and server, so a warm run
+asks nothing, and an edit re-asks only the edited files.
+
+Measured (`stats`, project calls exact; 4 cores, October 2026, no project
+dependencies installed: no venv, no `node_modules`, no fetched crates):
+
+| repo | language | static | precise | static run | precise cold |
+|---|---|---|---|---|---|
+| pallets/flask | Python | 90% | 96% | 1.1 s | 9.0 s |
+| encode/httpx | Python | 92% | 98% | 1.2 s | 9.3 s |
+| psf/requests | Python | 91% | 97% | 0.8 s | 6.3 s |
+| honojs/hono | TypeScript (.ts / .tsx) | 92% / 83% | 95% / 98% | 3.8 s | 21.9 s |
+| excalidraw/excalidraw | TypeScript (.tsx / .ts) | 91% / 89% | 95% / 96% | 8.1 s | 41.0 s |
+| BurntSushi/ripgrep | Rust | 91% | 98% | 1.9 s | 19.5 s |
+| sharkdp/bat | Rust | 91% | 98% | 2.4 s | 44.0 s |
+| spf13/cobra | Go | 91% | 100% | 1.4 s | 2.1 s |
+| junegunn/fzf | Go | 94% | 99% | 2.5 s | 7.7 s |
+
+An unchanged repo loads its cached graph (0.2 to 1.0 s). A cold run is mostly
+the servers' own analysis: pyright answers ~75 questions a second once warm,
+tsserver ~200, and bat's 44 s is pyright on one 8,500-line numpy benchmark
+fixture (its Rust took 14 s). Splitting a server's files over several processes
+was slower (each re-analyses the same imports). What stays unsettled is mostly
+callbacks held in parameters, interface signatures, and calls into dependencies
+that aren't installed.
+
 ## Config: the project's files, never the tool's
 
 seamcheck holds no project's rules. It reads the codebase's own files, merged
@@ -198,9 +929,15 @@ in this order:
 2. every `seamcheck.d/*.toml` beside it (split rules by area)
 3. each `--config PATH` (a file, or a folder of .toml): rules kept outside a repo you don't own
 
-`[project]` and `[runtime]` keys merge (include / exclude lists add up);
-`[[rule]]`, `[[bridge]]`, `[[invariant]]` and `[[contract]]` lists concatenate.
-An id defined twice is an error, and findings name the file a rule came from.
+`[project]` and `[runtime]` keys merge (include / exclude / packs lists add
+up); `[[rule]]`, `[[bridge]]`, `[[invariant]]` and `[[contract]]` lists
+concatenate. An id defined twice is an error, and findings name the file a
+rule came from. `[project] packs` adds seamcheck's framework rules (below).
+
+Not read by default: dependency and build folders (`node_modules`, `deps`,
+`_build`, `target`, `dist`, `build`, `.venv`...) and third-party code kept in
+the tree (`vendor/`, `third_party/`, `*.min.js`). Naming one in `include`
+(`include = ["src/**", "vendor/mylib/**"]`) has it read.
 
 Suppress one line: `# seamcheck: allow rule-id` (or `// seamcheck: allow
 rule-id`) on the line or the line above. Every rule takes `severity`
@@ -253,6 +990,61 @@ func = "start*"                        # optional: in each matching function
 pattern = ['maybe_inject\(', 'enqueue\(']
 ordered = true                         # optional: in this order
 ```
+
+**Architecture rules** (what ArchUnit checks in Java and dependency-cruiser
+in JS / TS, for every language here): a file depends on another when it
+imports it or exactly calls into it (`via = "import" | "call" | "any"`; a call
+through an interface depends on the interface, not on each implementation;
+TypeScript's `import { type X }` is erased, so it is no dependency).
+
+```toml
+[[rule]]
+id = "ui-not-db"                       # depend: nothing in `from` may depend on `to`
+kind = "depend"
+from = ["src/ui/**"]
+to = ["src/db/**"]
+allow = ["src/ui/admin/**"]
+
+[[rule]]
+id = "layers"                          # layers: top first; each may use only the ones after it
+kind = "layers"
+layers = [{ name = "web", in = ["lib/web/**"] },
+          { name = "domain", in = ["lib/domain/**"] },
+          { name = "repo", in = ["lib/repo/**"] }]
+
+[[rule]]
+id = "no-cycles"                       # cycles: one finding per cycle, its shortest loop shown
+kind = "cycles"
+in = ["src/**"]
+level = "dir"                          # file (default) | dir: packages / folders, like ArchUnit's slices
+```
+
+**Paths to a sink** (`kind = "path"`): no chain of exact calls from `from`
+may reach a call matching `to` (regexes over the call as written) within
+`depth` calls, unless it passes a function named in `unless`. With `source`,
+it is a taint check: the entry points are the functions that read the
+source (not tests), and a sink counts only when its arguments carry the
+value: the source itself, a name assigned from it (assignments read in order,
+so `x = escape(x)` cleans x for the rest of its block), or a parameter a
+caller passed a tainted argument to. A value through a call named like an
+`unless` entry (`_sanitize_username(u)`, `params[:id].to_i`) is clean, and so
+is a constant first argument (a parameterized query) unless it names a shell.
+Each sink is reported once, with its shortest chain. The built-in `security`
+pack is this rule for seven languages:
+
+```toml
+[[rule]]
+id = "request-reaches-shell"
+kind = "path"
+from = ["**/views.py:*", "**/app.py:*"]  # function specs: `file:name`, ids, `file:LINE`
+to = ['^subprocess\.(run|Popen)$', '^os\.system$', '^(eval|exec)$', '\.execute$', '^pickle\.loads$']
+source = 'request\.(args|form|json|files|GET|POST)'
+unless = ["escape", "sanitize", "secure_filename"]
+depth = 6
+```
+
+`seamcheck graph [GLOB...] --level dir --format dot|mermaid|json` draws the
+same graph (cycles in red) for docs or a review.
 
 A `together` rule also takes `func` (only functions with these names) and
 `depth = N` (a `then` may match in what the function calls, N exact calls deep:
@@ -427,6 +1219,64 @@ auto_approve = { marker = 'data-testid="auto-approve"', disabled = false }   # m
 abort = { marker = 'data-testid="abort"', when = '^busy\b' }                # the one condition it may have
 ```
 
+## Framework packs
+
+Some rules are true for every project on a framework, not one project's
+contract. seamcheck ships them as packs; a project turns them on:
+
+```toml
+[project]
+packs = ["phoenix", "react"]
+
+[[rule]]                         # override a pack rule by its id: its keys replace the pack's
+id = "phoenix/no-atoms-from-strings"
+severity = "error"
+```
+
+| pack | rules |
+|---|---|
+| `phoenix` | `ets-owner`, `handle-info-catch-all`, `rescue-logged-at-debug` (the lints above); `no-atoms-from-strings` (warn: atoms are never collected) |
+| `react` | `inert-control`, `disabled-by-data` (JSX), `popup-clipped`; `effect-not-async` (an async effect's cleanup never runs), `state-not-assigned` (`this.state.x =` outside the constructor) |
+| `qml` | `unknown-type`, `singleton-import`, `js-shadows-type`, `anchors-in-positioner` |
+| `compose` | `init-order` (`kotlin-init-order`), `inert-control` (Kotlin); `no-global-scope` (warn: a `GlobalScope` coroutine outlives its screen) |
+| `express` | (type knowledge only, below) |
+| `hono` | (type knowledge only, below) |
+| `security` | `python-injection`, `js-injection`, `php-injection`, `ruby-injection`, `go-injection`, `java-injection`, `csharp-injection`: request data into a shell, eval, SQL, a deserializer, a file path, a redirect or an outbound request; `tls-verification-off` (warn), `flask-debug`, `xml-external-entities`, `weak-password-hash`, `jwt-unverified` (see "Security, against CodeQL"). On with no `seamcheck.toml`; `init` lists it for every repo |
+
+A pack also says what its framework hands the code, so the call graph can type
+it. That knowledge applies whenever package.json shows the framework, listed
+in `packs` or not (a pack's rules still need listing):
+
+```toml
+[[param]]                          # packs/express.toml
+id = "handler"
+names = ["req", "res"]             # a function or callback taking (req, res...), (err, req, res...)
+types = { req = "express:lib/request", res = "express:lib/response" }
+
+[[param]]                          # packs/hono.toml
+id = "route"
+names = ["c"]
+in_call = ["get", "post", "use", "on"]   # only a callback passed to app.get(...) and the like
+types = { c = "hono:src/context" }
+
+[[returns]]                        # packs/hono.toml: the RPC client is a runtime Proxy
+id = "rpc-client"
+functions = ["hc", "testClient"]
+```
+
+A type names a module of the framework's package: in an app, a call on `res`
+is the library's (no guess at the app's own `send()`); in that package's own
+repo, it is the module itself (`res.send()` in express's tests reaches
+`lib/response.js`).
+
+Pack rules are named `<pack>/<id>` (`seamcheck check --skip react/popup-clipped`
+leaves one out of a run). An unknown pack, or an override naming a rule its
+pack doesn't have, is a config error. `seamcheck init` lists the packs whose
+framework a manifest declares: `:phoenix` in a mix.exs, `react` in a
+package.json (`express`, `hono` likewise), Qt Quick in a CMakeLists.txt beside
+`.qml` files, Compose in a Gradle build. A pack holds only what is true everywhere; a project's taste
+stays in its own rules.
+
 ## One graph across languages: bridges and impact
 
 Languages meet through strings (a URL, an event name, an op), so no parser
@@ -462,6 +1312,34 @@ seamcheck callers AppWeb.InboxController.index   -> the phone / web code calling
 receives what it emits), certain edges only. It stops where data moves through
 app state rather than calls (a fetched JSON rendered later by a screen):
 contract tests (golden payloads the clients parse) cover that part.
+
+## An MCP server for agents
+
+`seamcheck serve` speaks MCP (2025-06-18, JSON-RPC over stdio, no
+dependencies) and keeps the loaded graph between calls, so an agent's loop of
+small questions skips the load each one paid. Before each call it stats the
+project's files and config (mtime + size) and reloads only when one changed,
+appeared or went: an edit between two calls is seen by the second.
+
+```sh
+claude mcp add seamcheck -- seamcheck serve -C /path/to/repo
+```
+
+| tool | arguments | returns (JSON text) |
+|---|---|---|
+| `check` | `only`, `skip` (rule ids), `errors_only` | the findings, as `check --json` |
+| `gate` | `since` (default `HEAD`), `staged` | `{blocked, changed_files, findings}`, as `gate --json` |
+| `callers` / `callees` | `name`, `depth` (2), `fuzzy`, `wide` (callers) | per match: exact, guess and possible counts, what it reaches with depth; `wide` lists the possible sites |
+| `path` | `from`, `to`, `fuzzy` | the chain, or `through_guesses_only` |
+| `find` | `name` | id, file, lines, callers exact / guessed |
+| `context` | `name` | per match: source, callers (file, line, exact), its calls and their targets, the tests reaching it |
+| `refs` | `name` | defined, callers, mentions |
+| `impact` | `targets` (specs or files), `since`, `staged`, `depth` (4), `fuzzy` | reached functions by area |
+| `stats` | | sizes, timing, per language how calls resolve |
+| `unused` / `tests` | `since` | the rows `--json` prints |
+
+A query that finds nothing is an error result saying why (`no function
+matches 'x'`), not an empty answer.
 
 ## Keeping a big repo tidy
 
@@ -530,10 +1408,37 @@ untracked; `--staged`: only what is being committed), and fails on:
 - functions whose lines it changes that copy a function elsewhere;
 - a test or script that still names a file the change split up or moved.
 
+It also warns, without blocking, when a language the change touches resolves
+worse than at `REF`: its "project calls exact" share (`stats`) fell more than
+2 points. That is a change that broke an import seamcheck followed, so its
+calls fell back to name guesses and every rule over them sees less:
+
+```
+  warning (not blocking): TypeScript (.ts) calls into project code exact: 100.0% at HEAD, 0.0% now (3 of 3 -> 0 of 2)
+```
+
+`check`, `gate` and `stats` record the shares whenever the tree's code and
+config are HEAD's (a small file in the cache, keyed by commit, seamcheck's
+version and the config). With no record for `REF`, the gate measures that
+commit's files itself when the project is small (300 parsed files, no bridge
+that runs a command); otherwise it records and stays quiet until there is one.
+
 Code the change only moved (a file split, a function moved between files) is
 judged as old. Debt already in a file you touched doesn't block you; new debt
 can't land. A `seamcheck: allow gate` comment on (or just above) a declaration
 or line waives it; give the reason in the comment.
+
+With the [pre-commit](https://pre-commit.com) framework:
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/LordJulius/seamcheck
+    rev: main
+    hooks: [{ id: seamcheck }]
+```
+
+Or by hand:
 
 ```sh
 # .git/hooks/pre-commit
@@ -545,10 +1450,52 @@ seamcheck gate --staged || { echo "fix the above, or waive a line with 'seamchec
 forbid_added = ["fallback", "legacy", "compat", "shim"]
 ```
 
-`gate --json` gives one flat list of findings, each with why and how to fix.
+`gate --json` gives one flat list of findings, each with why and how to fix;
+`--format sarif` and `--format github` give the same list to CI (below).
 In a gate, per-file lints read only the touched files, command rules run only
 when the change touches their `when` paths, and `run` outputs come from their
 cache, so a gate after a small edit takes seconds.
+
+### In CI
+
+The repo is a GitHub Action (Python 3.11+ on the runner; `ubuntu-latest` has it):
+
+```yaml
+# .github/workflows/seamcheck.yml
+on: [pull_request]
+jobs:
+  seamcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      # annotations on the diff, and a red check when the change may not land
+      - uses: LordJulius/seamcheck@main
+```
+
+`with: { mode: check, format: sarif }` runs every rule instead and gives the
+SARIF file as `steps.<id>.outputs.sarif-file` for `upload-sarif`; `args`
+passes extra flags (`--only security`). Without the action:
+
+```yaml
+on: [pull_request]
+jobs:
+  seamcheck:
+    runs-on: ubuntu-latest
+    permissions: { contents: read, security-events: write }
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pipx install git+https://github.com/LordJulius/seamcheck
+      # annotations on the diff, and a red check when the change may not land
+      - run: seamcheck gate --since origin/${{ github.base_ref }} --format github
+      # or: every rule as code-scanning alerts
+      - run: seamcheck check --format sarif > seamcheck.sarif || true
+      - uses: github/codeql-action/upload-sarif@v3
+        with: { sarif_file: seamcheck.sarif }
+```
 
 ## Dependencies
 
@@ -682,11 +1629,36 @@ check needs both: the cut-down bug that must fail, and the fixed shape that
 must pass.
 
 The cache lives in `~/.cache/seamcheck/`. Parses are keyed by file content and
-the linked graph by every file's content plus `CACHE_VERSION`
-(`seamcheck/core.py`), so every checkout of a repo (a git worktree, a lane)
-shares them; the cache prunes itself to 3 GB. The graph key does not include
-seamcheck's own code: a change to an adapter or to how calls resolve must bump
-`CACHE_VERSION`, or warm runs keep the old graph.
+the linked graph by every file's content, both with a digest of seamcheck's own
+source (and `CACHE_VERSION`, `seamcheck/core.py`), so every checkout of a repo
+(a git worktree, a lane) shares them, an upgrade or a local change to an
+adapter never reuses what the old code made, and the cache prunes itself to
+3 GB.
+
+`tests/test_languages.py` holds each language's resolution cases, cut down
+from open-source repos (below); after changing an adapter, run `seamcheck
+stats` on a real repo of that language and compare the "project calls exact"
+share.
+
+### Measured on open-source repos
+
+How many of the calls that reach project code are exact (`seamcheck stats`),
+before and after 0.3's adapter work, at each repo's HEAD in October 2026:
+
+| repo | language | 0.2 | 0.3 | what changed |
+|---|---|---|---|---|
+| pallets/flask | Python | 59% | 58% | 1,244 -> 1,301 functions (same-named methods were lost); 0.2's share counted ~680 nested `def` lines as calls |
+| encode/httpx | Python | 33% | 66% | imports, classes, `self`, constructors |
+| spf13/cobra | Go | 36% | 89% | packages, go.mod imports, receivers |
+| junegunn/fzf | Go | 47% | 75% | |
+| BurntSushi/ripgrep | Rust | 49% | 76% | `use` across crates, std methods |
+| sharkdp/bat | Rust | 44% | 66% | |
+| excalidraw/excalidraw | TypeScript (.tsx) | 68% | 82% | class-field handlers, barrels, workspace packages |
+| google/gson | Java | 80% | 89% | 5,300 -> 23,600 call sites (bodies ended at their first statement) |
+| App-vNext/Polly | C# | (0 functions) | 31% | 4,811 functions (Allman braces) |
+| plausible/analytics | Elixir + TS | 98% | 98% | (unchanged) |
+| sinatra/sinatra | Ruby | (no adapter) | 93% | the Ruby adapter |
+| jekyll/jekyll | Ruby | (no adapter) | 90% | |
 
 ## License
 

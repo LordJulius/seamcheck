@@ -178,7 +178,9 @@ class ImportsTest(unittest.TestCase):
     def test_method_named_in_exactly_one_visible_module(self):
         f = self.p.funcs["web/src/store/panel.applyOp"]
         self.assertEqual((f.start, f.end), (6, 8))  # the implementation, not the type member
-        self.assertIn("web/src/store/panel.applyOp", self.exact_callees("web/src/store/panel.test.test applies"))
+        # found, as a guess: only the store's generic type (`create<Store>`) says getState() is a Store,
+        # and a name only one visible module has is no proof (it made `res.json()` Context.json)
+        self.assertEqual(self.p.edges["web/src/store/panel.test.test applies"], [("web/src/store/panel.applyOp", 5, False)])
         self.assertIn("app/ui/Gestures.onTouch", self.exact_callees("app/test/ui/GesturesTest.taps"))
 
     def test_kotlin_package_and_function_import(self):

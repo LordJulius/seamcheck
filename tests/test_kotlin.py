@@ -97,7 +97,7 @@ class KotlinTest(unittest.TestCase):
         self.assertEqual(self.callers("MapPrefs.load"), {"Screen.helper"})  # not MapPrefs.on
 
     def test_declarations_without_bodies(self):
-        self.assertEqual(self.span("MapPrefs.get"), (19, 19))
+        self.assertEqual(self.span("MapPrefs.Repo.get"), (19, 19))  # (an interface in the file is its own module)
 
     def test_long_signature_keeps_its_body(self):
         start, end = self.span("Screen.Screen")

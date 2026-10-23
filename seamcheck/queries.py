@@ -1,0 +1,205 @@
+"""The commands' answers as data. The CLI prints them; `seamcheck serve`
+returns them as JSON. One implementation, so an agent asking over MCP gets
+the answer the terminal gets."""
+from __future__ import annotations
+
+import collections
+import os
+import re
+
+from . import core, exactness
+
+
+def where(p: core.Project, fid: str) -> dict:
+    """A function's id, place and the bridges it sits on."""
+    f = p.funcs.get(fid)
+    via = sorted({b for (a, d), b in p.bridged.items() if fid in (a, d)})
+    return {"id": fid, "file": f.file if f else "", "line": f.start if f else 0, "via": via}
+
+
+def check(p: core.Project, only: list[str] | None = None, skip: list[str] | None = None,
+          errors_only: bool = False) -> list[core.Finding]:
+    found = core.run_rules(p, only, skip)
+    exactness.record(p)  # the gate's exactness guard compares a change against these
+    return [f for f in found if f.severity == "error"] if errors_only else found
+
+
+def flat(p: core.Project, findings: list[core.Finding]) -> list[dict]:
+    """Findings as `check --json` prints them: each with its rule's why and fix."""
+    rules = {r["id"]: r for r in p.config.get("rule", [])}
+    return [dict(f.__dict__, why=rules.get(f.rule, {}).get("why", ""), fix=rules.get(f.rule, {}).get("fix", ""))
+            for f in findings]
+
+
+def walk(p: core.Project, spec: str, depth: int, reverse: bool, fuzzy: bool = False, wide: bool = False) -> list[dict]:
+    """`callers` (reverse) / `callees`: per matching function, its exact and
+    name-guess edge counts and what it reaches within `depth` calls (exact
+    edges unless `fuzzy`). `wide` (callers): also the possible callers, the
+    calls by that name that reached no project function (a library-typed
+    receiver), listed apart."""
+    out = []
+    for s in p.find(spec):
+        ex, guess = core.edge_split(p, s.id, reverse=reverse)
+        dist = core.reach(p, s.id, depth, reverse=reverse, exact_only=not fuzzy and not wide)
+        row = dict(where(p, s.id), exact=ex, guess=guess,
+                   reach=[dict(where(p, k), depth=d) for k, d in sorted(dist.items(), key=lambda kv: (kv[1], kv[0])) if d])
+        if reverse:
+            poss = possible_callers(p, s)
+            row["possible"] = len(poss)
+            if wide:
+                row["possible_sites"] = [dict(where(p, fid), line=ln) for fid, ln in poss]
+        out.append(row)
+    return out
+
+
+def possible_callers(p: core.Project, g) -> list[tuple[str, int]]:
+    """Call sites named like g that reached no project function: a receiver the
+    code types as a library's (`reader.Read()` on an IDataReader) may still be one
+    of the project's own. Not edges: a third tier below exact and name guess."""
+    fam = core._family(g.file)
+    arity = g.targs.split(",") if g.targs and g.file.endswith(".cs") else None
+    return sorted({(fid, ln) for fid, ln, targs in p.possible.get(g.name, ())
+                   if fid in p.funcs and fam & core._family(p.funcs[fid].file)
+                   and not (arity and targs > 0 and str(targs) not in arity)})  # (`Read<int>()`: not `Read()`)
+
+
+def shortest(p: core.Project, a: str, b: str, fuzzy: bool = False) -> tuple[list[str], bool]:
+    """The shortest call chain from `a` to `b`, and (when there is no exact
+    one) whether a chain through name guesses exists: a miss must not read as
+    "nothing connects them"."""
+    froms, tos = p.find(a), {f.id for f in p.find(b)}
+
+    def best(exact_only: bool) -> list[str]:
+        out: list[str] = []
+        for f in froms:
+            for t in tos:
+                c = core.path(p, f.id, t, exact_only=exact_only)
+                if c and (not out or len(c) < len(out)):
+                    out = c
+        return out
+    chain = best(not fuzzy)
+    return chain, bool(not chain and not fuzzy and best(False))
+
+
+def find(p: core.Project, spec: str) -> list[dict]:
+    out = []
+    for f in p.find(spec):
+        ex, guess = core.edge_split(p, f.id)
+        out.append({"id": f.id, "file": f.file, "start": f.start, "end": f.end, "calls": len(f.calls),
+                    "exact_callers": ex, "guess_callers": guess})
+    return out
+
+
+def search(p: core.Project, pattern: str, globs: list[str] | None = None, code: bool = False,
+           limit: int = 200) -> list[dict]:
+    """Lines matching a regex (`code`: comments and string contents left out), each
+    with the function it is in and that function's exact / name-guess callers: a
+    code search that knows the call graph, over every repo the project holds."""
+    rx = re.compile(pattern)
+    out = []
+    for rel in sorted(p.by_file):
+        if globs and not core.match_any(rel, globs):
+            continue
+        m = p.by_file[rel][0]
+        lines = m.code if code else m.raw
+        for i, ln in enumerate(lines, 1):
+            if not rx.search(ln):
+                continue
+            f = next((g for mod in p.by_file[rel] if (g := mod.func_at(i)) and g.kind != "top"), None)
+            row = {"file": rel, "line": i, "text": m.raw[i - 1].strip()[:200], "func": f.id if f else None}
+            if f:
+                row["exact_callers"], row["guess_callers"] = core.edge_split(p, f.id)
+            out.append(row)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def changed_functions(p: core.Project, since: str, staged: bool = False) -> set[str]:
+    """The functions a diff touched (committed since REF, staged, unstaged, untracked)."""
+    from . import tidy
+    start = set()
+    for rel, lines in tidy.changed_lines(p, since, staged, deletions=True).items():
+        for m in p.by_file.get(rel, []):
+            for ln in lines:
+                f = m.func_at(ln)
+                if f and f.kind != "top":
+                    start.add(f.id)
+    return start
+
+
+def target_functions(p: core.Project, targets: list[str]) -> set[str]:
+    """Each target a file (all its functions) or a function spec."""
+    start = set()
+    for t in targets:
+        if t in p.by_file or os.path.exists(os.path.join(p.root, t)):
+            start |= {f.id for m in p.by_file.get(t, []) for f in m.funcs}
+        else:
+            start |= {f.id for f in p.find(t)}
+    return start
+
+
+def impact(p: core.Project, start: set[str], depth: int = 4, fuzzy: bool = False) -> tuple[dict[str, list], set[str]]:
+    """What a change to `start` reaches, by area ([project] areas, else the
+    top folder): {area: [(distance, function id)]}, and the start's own areas."""
+    dist = core.impact(p, start, depth, fuzzy=fuzzy)
+    areas = p.config.get("project", {}).get("areas") or {}
+
+    def area(rel):
+        return next((k for k, g in areas.items() if core.match_any(rel, g)), rel.split("/")[0])
+    by = collections.defaultdict(list)
+    for fid, d in dist.items():
+        if d and fid in p.funcs:
+            by[area(p.funcs[fid].file)].append((d, fid))
+    return {k: sorted(v) for k, v in by.items()}, {area(p.funcs[s].file) for s in start if s in p.funcs}
+
+
+def context(p: core.Project, spec: str, lines: int = 80, depth: int = 4) -> list[dict]:
+    """What an agent wants before editing a function, in one answer: where
+    it is, its source, who calls it (each call site; exact first, then name
+    guesses), what it calls (project functions, or the library), and which
+    tests reach it (the ones to run after the change)."""
+    out = []
+    for f in p.find(spec):
+        mod = next((m for m in p.by_file.get(f.file, []) if m.name == f.module), None)
+        src = mod.raw[f.start - 1:f.end] if mod else []
+        callers = sorted(({"id": src_id, "file": p.funcs[src_id].file, "line": ln, "exact": e}
+                          for src_id, ln, e in p.redges.get(f.id, []) if src_id in p.funcs),
+                         key=lambda c: (not c["exact"], c["file"], c["line"]))
+        by_line: dict = collections.defaultdict(list)
+        for dst, ln, e in p.edges.get(f.id, []):
+            by_line[(ln, dst.rsplit(".", 1)[-1])].append((dst, e))
+        callees = []
+        for c in f.calls:
+            hits = by_line.get((c.line, c.name), [])
+            callees.append({"name": ((".".join(c.chain) + ".") if c.chain else "") + c.name, "line": c.line,
+                            "targets": [d for d, _ in hits][:6], "exact": any(e for _, e in hits)})
+        reach = core.impact(p, {f.id}, depth)
+        tests = sorted({t for t, d in reach.items() if d and t in p.funcs and
+                        (p.funcs[t].kind == "test" or core._is_test_file(p, p.funcs[t].file))},
+                       key=lambda t: (p.funcs[t].file, p.funcs[t].start))
+        out.append({"id": f.id, "file": f.file, "start": f.start, "end": f.end,
+                    "source": "\n".join(src[:lines]) + (f"\n... ({len(src) - lines} more lines)" if len(src) > lines else ""),
+                    "callers": callers, "callees": callees,
+                    "tests": [{"id": t, "file": p.funcs[t].file, "line": p.funcs[t].start} for t in tests]})
+    return out
+
+
+def stats(p: core.Project) -> dict:
+    """Size, timing and, per language, how calls resolve. `project_exact`:
+    of the calls that reach project code, the share that is exact."""
+    exactness.record(p)
+    langs: dict[str, int] = {}
+    for rel in p.by_file:
+        ext = os.path.splitext(rel)[1]
+        langs[ext] = langs.get(ext, 0) + 1
+    res = {}
+    for ext, r in sorted(p.resolution.items(), key=lambda kv: -sum(kv[1][:3])):
+        ex, fz, no = r[:3]
+        res[ext] = {"calls": ex + fz + no, "exact": ex, "guess": fz, "nothing": no, "named": r[3] if len(r) > 3 else 0,
+                    "project_exact": 100 * ex // (ex + fz) if ex + fz else None}
+    return {"root": p.root, "files": len(p.files), "parsed": len(p.by_file), "languages": langs,
+            "modules": len(p.modules), "functions": len(p.funcs),
+            "edges": sum(len(v) for v in p.edges.values()),
+            "exact_edges": sum(1 for v in p.edges.values() for e in v if e[2]),
+            "load_ms": p.parse_ms, "resolution": res}

@@ -1,0 +1,26 @@
+# Qt Quick / QML: true for any QML app. Turn on with `[project] packs = ["qml"]`;
+# ids become `qml/<id>`.
+
+[[rule]]
+id = "unknown-type"
+kind = "lint"
+lint = "qml-unknown-type"
+why = "a QML type nothing defines fails the whole page when it loads, not when it builds"
+
+[[rule]]
+id = "singleton-import"
+kind = "lint"
+lint = "qml-singleton-import"
+why = "a singleton used without importing its module resolves differently per Qt build (an empty object on some)"
+
+[[rule]]
+id = "js-shadows-type"
+kind = "lint"
+lint = "qml-js-shadows-type"
+why = "a .js library named like a type in the same module can hide the type"
+
+[[rule]]
+id = "anchors-in-positioner"
+kind = "lint"
+lint = "qml-anchors-in-positioner"
+why = "Qt refuses anchors inside a positioner or layout and stops laying the item out"

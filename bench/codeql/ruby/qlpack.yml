@@ -1,0 +1,4 @@
+name: seamcheck-bench/ruby-calls
+version: 0.0.1
+dependencies:
+  codeql/ruby-all: "*"

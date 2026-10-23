@@ -22,13 +22,42 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 
 from . import config as config_mod
-from . import lang_elixir, lang_gdscript, lang_other
+from . import lang_elixir, lang_gdscript, lang_other, lang_ruby
 from .model import Func, Module
 from .scan import blank
 
-CACHE_VERSION = 33
+CACHE_VERSION = 34
+
+
+def _code_version() -> str:
+    """CACHE_VERSION plus a digest of seamcheck's own source: a changed adapter
+    or resolver never reuses a parse or graph the old code made (forgetting
+    to bump CACHE_VERSION used to leave warm runs on the old graph)."""
+    global _CODE
+    if _CODE is None:
+        h = hashlib.sha1(str(CACHE_VERSION).encode())
+        here = os.path.dirname(os.path.abspath(__file__))
+        for name in sorted(os.listdir(here)) + sorted("packs/" + n for n in os.listdir(os.path.join(here, "packs"))):
+            if name.endswith((".py", ".txt", ".toml")):
+                with open(os.path.join(here, name), "rb") as fh:
+                    h.update(name.encode() + b"\0" + fh.read())
+        _CODE = f"{CACHE_VERSION}-{h.hexdigest()[:12]}"
+    return _CODE
+
+
+_CODE: str | None = None
 DEFAULT_EXCLUDE = ["**/.git/**", "**/node_modules/**", "**/deps/**", "**/_build/**", "**/target/**",
-                   "**/.godot/**", "**/.claude/**", "**/dist/**", "**/build/**", "**/.venv/**", "**/__pycache__/**"]
+                   "**/.godot/**", "**/.claude/**", "**/dist/**", "**/build/**", "**/.venv/**", "**/__pycache__/**",
+                   # third-party code kept in the tree (Go / Composer / Bundler vendoring, a vendored JS bundle):
+                   # not the project's to check; `include` it explicitly to have it read
+                   "**/vendor/**", "**/third_party/**", "**/*.min.js"]
+
+
+def default_exclude(include: list[str]) -> list[str]:
+    """DEFAULT_EXCLUDE, less what the project's `include` names (`vendor/**`
+    listed in include: the vendored code is read)."""
+    named = " ".join(include)
+    return [d for d in DEFAULT_EXCLUDE if d.strip("*/").split("/")[0] not in named]
 
 
 def adapter_for(rel: str):
@@ -39,6 +68,8 @@ def adapter_for(rel: str):
         return lang_elixir.parse
     if ext == ".py":
         return lang_other.parse_python
+    if ext in lang_ruby.EXT:
+        return lang_ruby.parse
     if ext in lang_other.LANGS:
         return lang_other.parse_brace
     return None
@@ -52,6 +83,8 @@ def scan_family(rel: str) -> str:
         return "elixir"
     if ext == ".py":
         return "python"
+    if ext in lang_ruby.EXT:
+        return "ruby"
     if ext in lang_other.LANGS:
         return lang_other.LANGS[ext][0]
     return "python"  # '#' comments are the safest guess
@@ -92,8 +125,8 @@ def match_any(path: str, globs: list[str]) -> bool:
 
 # --- the project ----------------------------------------------------------------
 
-def _zero3() -> list[int]:
-    return [0, 0, 0]
+def _zero3() -> list[int]:  # [exact, guess only, nothing, nothing though a project function has the name]
+    return [0, 0, 0, 0]
 
 
 @dataclass
@@ -121,6 +154,12 @@ class Project:
     text_cache: dict = field(default_factory=dict)
     parse_ms: int = 0
     config_problems: list[str] = field(default_factory=list)
+    precise: dict = field(default_factory=dict)  # what the language servers settled (precise.py), when asked
+    params: dict = field(default_factory=dict)  # the packs' [[param]] entries in force ("<pack>/<id>" -> entry)
+    # name -> [(caller, line)]: calls that reached no project function though one has the name
+    # (a method on a library-typed value: `reader.Read()` on an IDataReader). `callers --wide`
+    # lists them apart, as possible callers, below the exact and name-guess ones
+    possible: dict[str, list[tuple[str, int]]] = field(default_factory=lambda: defaultdict(list))
 
     # ---- lookups
     def module_of_file(self, rel: str) -> Module | None:
@@ -132,7 +171,15 @@ class Project:
             return fh.read()
 
     def find(self, spec: str) -> list[Func]:
-        """'name' (glob ok), 'Module.name', or 'path/glob:funcglob'."""
+        """An id as `find` prints it, 'name' (glob ok), 'Module.name', 'path/glob:funcglob',
+        or 'path/file.ext:LINE' (the function holding that line)."""
+        if spec in self.funcs:  # (an id copied from another answer: `lib/sinatra/base.Sinatra::Helpers.logger`)
+            return [self.funcs[spec]]
+        lm = re.match(r"^(.+?\.\w+):(\d+)$", spec)
+        if lm and lm.group(1) in self.by_file:  # `src/requests/auth.py:150`
+            ln = int(lm.group(2))
+            held = [f for f in self.funcs.values() if f.file == lm.group(1) and f.start <= ln <= f.end and f.kind != "top"]
+            return sorted(held, key=lambda f: f.end - f.start)[:1]
         if ":" in spec:
             pg, _, fg = spec.partition(":")
             return [f for f in self.funcs.values() if glob_re(pg).match(f.file) and fnmatch.fnmatchcase(f.name, fg or "*")]
@@ -216,7 +263,8 @@ def list_files(root: str, include: list[str], exclude: list[str]) -> list[str]:
     try:
         # ripgrep filters up front (and honours .gitignore): listing is most of
         # the cost on big repos otherwise.
-        args = ["rg", "--files", "--hidden", "-g", "!.git"]
+        # (--follow: a workspace folder of symlinks to checkouts is one graph across them)
+        args = ["rg", "--files", "--hidden", "--follow", "-g", "!.git"]
         for g in include:
             args += ["-g", g]
         for g in exclude:
@@ -227,12 +275,36 @@ def list_files(root: str, include: list[str], exclude: list[str]) -> list[str]:
         # and _build, 164 s instead of 14): git's own listing honours .gitignore
         out = _git_files(root)
         if out is None:
-            out = []
-            for dp, dn, fn in os.walk(root):
+            out, seen = [], set()
+            for dp, dn, fn in os.walk(root, followlinks=True):
+                real = os.path.realpath(dp)
+                if real in seen:  # (a symlink loop)
+                    dn[:] = []
+                    continue
+                seen.add(real)
                 dn[:] = [d for d in dn if d not in (".git", "node_modules", "_build", "deps", ".gradle", "build")]
                 for f in fn:
                     out.append(os.path.relpath(os.path.join(dp, f), root))
-    return sorted(p for p in out if match_any(p, include) and not match_any(p, exclude))
+    return _one_copy(root, sorted(p for p in out if match_any(p, include) and not match_any(p, exclude)))
+
+
+def _one_copy(root: str, files: list[str]) -> list[str]:
+    """Each real file once: a symlink inside the repo to a folder it already holds
+    (swift-argument-parser's Plugins/*/GenerateCommon) would define everything twice.
+    The path without a link wins; a link to code outside the root (a workspace) stays."""
+    real_root = os.path.realpath(root)
+    seen, out = {}, []
+    for rel in files:
+        real = os.path.realpath(os.path.join(root, rel))
+        direct = real == os.path.join(real_root, rel)
+        if real in seen:
+            if direct and not seen[real][1]:
+                out[seen[real][0]] = rel
+                seen[real] = (seen[real][0], True)
+            continue
+        seen[real] = (len(out), direct)
+        out.append(rel)
+    return sorted(out)
 
 
 def _stamp(root: str, rel: str):
@@ -243,7 +315,10 @@ def _stamp(root: str, rel: str):
         return None
 
 
-def load(root: str, config_path: str | list[str] | None = None, use_cache: bool = True) -> Project:
+def load(root: str, config_path: str | list[str] | None = None, use_cache: bool = True,
+         precise: bool | None = None) -> Project:
+    """precise: let language servers settle the calls the static resolver
+    guesses (precise.py); None: as `[precise] enabled` says."""
     import time
     t0 = time.time()
     root = os.path.abspath(root)
@@ -251,10 +326,17 @@ def load(root: str, config_path: str | list[str] | None = None, use_cache: bool 
     config, problems = config_mod.load(root, extra)
     proj_cfg = config.get("project", {})
     include = proj_cfg.get("include", ["**/*"])
-    exclude = DEFAULT_EXCLUDE + proj_cfg.get("exclude", [])
+    exclude = default_exclude(include) + proj_cfg.get("exclude", [])
     files = list_files(root, include, exclude)
+    if precise is None:
+        precise = bool(config.get("precise", {}).get("enabled"))
     project = Project(root, config, files=files)
     project.config_problems = problems
+    # what the frameworks in use hand the functions they call (packs' [[param]]):
+    # type knowledge, so a detected framework's applies without being listed
+    from . import init as init_mod
+    project.params = config_mod.pack_params(sorted(set(proj_cfg.get("packs", []) or [])
+                                                   | set(init_mod.detect_packs(root, files))))
     res = _res_map(files)
     # caches are keyed by content and shared by every checkout of the repo (a
     # lane's worktree reuses the main checkout's parse, graph and command runs)
@@ -265,7 +347,7 @@ def load(root: str, config_path: str | list[str] | None = None, use_cache: bool 
     cache = {}
     if use_cache:
         c = fp.load(parse_name, {})
-        if isinstance(c, dict) and c.get("v") == CACHE_VERSION:
+        if isinstance(c, dict) and c.get("v") == _code_version():
             cache = c["files"]
     todo, parsed = [], {}
     digests = {}
@@ -283,7 +365,9 @@ def load(root: str, config_path: str | list[str] | None = None, use_cache: bool 
             todo.append((root, rel, res))
     # The whole linked graph, when nothing changed: an agent runs seamcheck
     # many times in a row, and linking (edges) is most of a warm load.
-    graph_key = hashlib.sha1(json.dumps([CACHE_VERSION, extra, config, sorted(files), sorted(digests.items())],
+    from . import precise as precise_mod
+    graph_key = hashlib.sha1(json.dumps([_code_version(), extra, config, sorted(files), sorted(digests.items())]
+                                        + ([precise_mod.key(config)] if precise else []),
                                         sort_keys=True, default=str).encode()).hexdigest()
     graph_name = f"{repo}-graph-{graph_key[:16]}.pkl"
     index_name = f"{repo}-graphs.pkl"
@@ -322,7 +406,7 @@ def load(root: str, config_path: str | list[str] | None = None, use_cache: bool 
             slot[digests[r]] = ok[r]
             # two versions per file: the main checkout's and a lane's
             files_cache[r] = dict(list(slot.items())[-2:])
-        fp.save(parse_name, {"v": CACHE_VERSION, "files": files_cache})
+        fp.save(parse_name, {"v": _code_version(), "files": files_cache})
     for rel in files:
         for m in parsed.get(rel, []):
             if isinstance(m, tuple):
@@ -349,7 +433,12 @@ def load(root: str, config_path: str | list[str] | None = None, use_cache: bool 
             if k[0] in old_digests and old_digests[k[0]] == hashes.of(k[0]):
                 project.text_cache[k] = v
         previous = None
-    _build_edges(project)
+    _link(project, precise, use_cache)
+    project.__dict__.pop("_counted", None)  # (only for counting while linking)
+    project.__dict__.pop("_site_out", None)
+    project.__dict__.pop("_js_imported", None)
+    project.__dict__.pop("_js_arg_members", None)
+    project.__dict__.pop("_js_factory", None)
     _apply_bridges(project)
     project.config_problems += project.bridge_problems
     if use_cache:
@@ -379,27 +468,61 @@ def _lookup(project: Project, mod_name: str, name: str) -> Func | None:
 _JS_EXT = ("", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".mts", ".cjs")
 
 
-def _tsconfig_paths(project: Project, d: str, cache: dict) -> list[tuple[str, str]]:
-    """(prefix, target dir) pairs from the nearest tsconfig.json's `paths`."""
+def _read_tsconfig(path: str, depth: int = 0) -> dict:
+    """compilerOptions of a tsconfig, its `extends` chain merged in (the
+    base's `paths` count unless this file sets its own)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            txt = fh.read()
+        try:
+            cfg = json.loads(txt)
+        except ValueError:  # tsconfig allows comments and trailing commas
+            txt = re.sub(r"(?m)^\s*//.*$", "", txt)
+            cfg = json.loads(re.sub(r",(\s*[}\]])", r"\1", txt))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(cfg, dict):
+        return {}
+    opts = dict(cfg.get("compilerOptions") or {})
+    here = os.path.dirname(path)
+    if "baseUrl" in opts:
+        opts["baseUrl"] = os.path.normpath(os.path.join(here, opts["baseUrl"]))
+    ext = cfg.get("extends")
+    if isinstance(ext, str) and ext.startswith(".") and depth < 4:
+        base_path = os.path.normpath(os.path.join(here, ext))
+        if not base_path.endswith(".json"):
+            base_path += ".json"
+        base = _read_tsconfig(base_path, depth + 1)
+        for k, v in base.items():
+            opts.setdefault(k, v)
+        opts.setdefault("\0paths_dir", base.get("\0paths_dir", os.path.dirname(base_path)))
+    if "paths" in (cfg.get("compilerOptions") or {}):
+        opts["\0paths_dir"] = here
+    return opts
+
+
+def _tsconfig_paths(project: Project, d: str, cache: dict) -> list[tuple[str, str, bool]]:
+    """(key, target, wildcard) from the nearest tsconfig.json's `paths`:
+    `"@/*": ["src/*"]` is a prefix, `"@app/common": ["packages/common/src/index.ts"]`
+    one exact name."""
     if d in cache:
         return cache[d]
-    found: list[tuple[str, str]] = []
+    found: list[tuple[str, str, bool]] = []
     p = os.path.join(project.root, d, "tsconfig.json")
     if os.path.isfile(p):
         try:
-            with open(p, encoding="utf-8") as fh:
-                txt = fh.read()
-            try:
-                cfg = json.loads(txt)
-            except ValueError:  # tsconfig allows comments and trailing commas
-                txt = re.sub(r"(?m)^\s*//.*$", "", txt)
-                cfg = json.loads(re.sub(r",(\s*[}\]])", r"\1", txt))
-            opts = cfg.get("compilerOptions", {})
-            base = os.path.normpath(os.path.join(d, opts.get("baseUrl", ".")))
+            opts = _read_tsconfig(p)
+            root = os.path.abspath(project.root)
+            base = opts.get("baseUrl") or opts.get("\0paths_dir") or os.path.dirname(p)
             for k, vs in (opts.get("paths") or {}).items():
-                if vs and k.endswith("*") and vs[0].endswith("*"):
-                    found.append((k[:-1], os.path.normpath(os.path.join(base, vs[0][:-1])) + "/"))
-        except (OSError, ValueError, AttributeError):
+                if not vs or not isinstance(vs, list):
+                    continue
+                target = os.path.relpath(os.path.normpath(os.path.join(base, vs[0].rstrip("*"))), root)
+                if k.endswith("*") and vs[0].endswith("*"):
+                    found.append((k[:-1], target.rstrip("/") + "/" if vs[0][:-1].endswith("/") else target, True))
+                elif "*" not in k:
+                    found.append((k, target, False))
+        except (OSError, ValueError, AttributeError, TypeError):
             pass
     elif d:
         found = _tsconfig_paths(project, d.rsplit("/", 1)[0] if "/" in d else "", cache)
@@ -407,22 +530,312 @@ def _tsconfig_paths(project: Project, d: str, cache: dict) -> list[tuple[str, st
     return found
 
 
+EXTERNAL = "ext:"  # _resolve_where: an import from outside the project
+
+
 def _resolve_where(project: Project, where: str, cache: dict) -> str:
-    """A module name for an adapter's "js:<dir>\\0<spec>" (or anything else, unchanged)."""
+    """A module name for an adapter's "js:<dir>\\0<spec>" / "py:<dir>\\0<spec>"
+    (anything else unchanged). "" when it can't be found, EXTERNAL when it
+    names a package from outside the project (node_modules, the stdlib)."""
+    if where.startswith("py:"):
+        return _resolve_py(project, where, cache)
+    if where.startswith("rs:"):
+        return _resolve_rs(project, where, cache)
+    if where.startswith("inc:"):
+        return _resolve_include(project, where, cache)
+    if where.startswith(("go:", "go?:")):
+        return _resolve_go(project, where.split(":", 1)[1], cache)
     if not where.startswith("js:"):
         return where
     d, _, spec = where[3:].partition("\0")
     if spec.startswith("."):
         base = os.path.normpath(os.path.join(d, spec))
     else:
-        base = next((t + spec[len(pre):] for pre, t in _tsconfig_paths(project, d, cache) if spec.startswith(pre)), "")
+        base = next((t + spec[len(pre):] if wild else t for pre, t, wild in _tsconfig_paths(project, d, cache)
+                     if (spec.startswith(pre) if wild else spec == pre)), "")
         if not base:
-            return ""  # a package from node_modules
-    base = re.sub(r"\.(?:[mc]?[jt]sx?)$", "", base)
-    for cand in (base, base + "/index"):
+            base = _workspace_entry(project, spec, cache)
+        if not base:
+            return EXTERNAL  # a package from node_modules
+    base = re.sub(r"\.(?:[mc]?[jt]sx?)$", "", base.rstrip("/"))
+    base = "" if base == "." else base
+    for cand in ((base, base + "/index", base + "/src/index") if base else ("index", "src/index")):
+        if cand in project.modules:
+            return cand
+    main = _package_main(project, base, cache)  # `require('../..')`: the folder's package.json "main"
+    return main if main in project.modules else ""
+
+
+def _package_main(project: Project, d: str, cache: dict) -> str:
+    """The module a folder's package.json names as its entry ("main", or the
+    "." export's require / import / default), "" if none."""
+    key = ("\0pkgmain", d)
+    if key not in cache:
+        got = ""
+        try:
+            with open(os.path.join(project.root, d, "package.json"), encoding="utf-8") as fh:
+                pkg = json.load(fh)
+        except (OSError, ValueError):
+            pkg = None
+        if isinstance(pkg, dict):
+            ent = [pkg.get("main"), pkg.get("module")]
+            ex = pkg.get("exports")
+            ex = ex.get(".", ex) if isinstance(ex, dict) else ex
+            while isinstance(ex, dict):  # conditions: the first plain target
+                ex = next((ex[k] for k in ("require", "import", "node", "default") if k in ex), None)
+            ent.append(ex)
+            for e in ent:
+                if isinstance(e, str):
+                    m = re.sub(r"\.(?:[mc]?[jt]sx?)$", "", os.path.normpath(os.path.join(d, e)).replace(os.sep, "/"))
+                    if m in project.modules:
+                        got = m
+                        break
+        cache[key] = got
+    return cache[key]
+
+
+def _manifests(project: Project, name: str) -> list[str]:
+    """Every `name` (package.json, go.mod, Cargo.toml) in the repo, whether or
+    not `[project] include` takes it in: they say how imports resolve."""
+    found = project.__dict__.setdefault("_manifests", {})
+    if name not in found:
+        exclude = default_exclude(project.config.get("project", {}).get("include", ["**/*"])) + \
+            project.config.get("project", {}).get("exclude", [])
+        found[name] = list_files(project.root, [name, f"**/{name}"], exclude)
+    return found[name]
+
+
+def _workspace_entry(project: Project, spec: str, cache: dict) -> str:
+    """`@scope/pkg` or `@scope/pkg/sub` -> a path in the project, for monorepo
+    packages named in their package.json (npm / yarn / pnpm workspaces)."""
+    ws = cache.get("\0workspaces")
+    if ws is None:
+        ws = {}
+        for rel in _manifests(project, "package.json"):
+            if rel.endswith("package.json") and rel.rsplit("/", 1)[-1] == "package.json" and "/node_modules/" not in "/" + rel:
+                try:
+                    with open(os.path.join(project.root, rel), encoding="utf-8") as fh:
+                        pkg = json.load(fh)
+                except (OSError, ValueError):
+                    continue
+                if isinstance(pkg, dict) and isinstance(pkg.get("name"), str):
+                    d = rel.rsplit("/", 1)[0] if "/" in rel else ""
+                    main = pkg.get("source") or pkg.get("main") or pkg.get("module") or ""
+                    ws[pkg["name"]] = (d, main if isinstance(main, str) else "")
+        cache["\0workspaces"] = ws
+    for name, (d, main) in ws.items():
+        if spec == name:
+            entry = os.path.normpath(os.path.join(d, main)) if main and not main.startswith(("dist", "./dist", "build", "./build", "lib/", "./lib/")) else ""
+            for cand in ([entry] if entry else []) + [os.path.join(d, x) for x in ("src/index", "source/index", "lib/index", "index")]:
+                if re.sub(r"\.(?:[mc]?[jt]sx?)$", "", cand) in project.modules:
+                    return cand
+            return os.path.join(d, "src/index")
+        if spec.startswith(name + "/"):
+            rest = spec[len(name) + 1:]
+            for cand in (os.path.join(d, "src", rest), os.path.join(d, rest)):
+                c2 = re.sub(r"\.(?:[mc]?[jt]sx?)$", "", cand)
+                if c2 in project.modules or c2 + "/index" in project.modules:
+                    return cand
+            return os.path.join(d, rest)
+    return ""
+
+
+def _resolve_go(project: Project, path: str, cache: dict) -> str:
+    """A Go import path -> "pkg:<dir>#<name>" through the go.mod files'
+    module paths; EXTERNAL for the standard library and other modules."""
+    mods = cache.get("\0gomod")
+    if mods is None:
+        mods = []
+        for rel in _manifests(project, "go.mod"):
+            if rel == "go.mod" or rel.endswith("/go.mod"):
+                try:
+                    with open(os.path.join(project.root, rel), encoding="utf-8") as fh:
+                        mm = re.search(r"^module\s+(\S+)", fh.read(), re.M)
+                except OSError:
+                    continue
+                if mm:
+                    mods.append((mm.group(1).strip('"'), rel.rsplit("/", 1)[0] if "/" in rel else ""))
+        mods.sort(key=lambda x: -len(x[0]))  # the most specific module first
+        cache["\0gomod"] = mods
+        by_dir: dict[str, list[str]] = defaultdict(list)
+        for key in project.packages:
+            if "#" in key:
+                d, _, name = key.rpartition("#")
+                by_dir[d].append(key)
+        cache["\0godirs"] = by_dir
+    for mpath, mdir in mods:
+        if path == mpath or path.startswith(mpath + "/"):
+            d = os.path.normpath(os.path.join(mdir, path[len(mpath):].lstrip("/"))) if path != mpath else mdir
+            d = "" if d == "." else d
+            keys = [k for k in cache["\0godirs"].get(d, []) if not k.endswith("_test")]
+            return f"pkg:{keys[0]}" if len(keys) == 1 else ""
+    return EXTERNAL
+
+
+def _resolve_include(project: Project, where: str, cache: dict) -> str:
+    """A C/C++ `#include "x.h"`: beside the file, else the one project file
+    whose path ends with it (an include directory)."""
+    d, _, spec = where[4:].partition("\0")
+    base = os.path.normpath(os.path.join(d, spec))
+    if base in project.by_file:
+        return project.by_file[base][0].name
+    idx = cache.get("\0inc")
+    if idx is None:
+        idx = cache["\0inc"] = defaultdict(list)
+        for rel in project.by_file:
+            if rel.endswith((".h", ".hpp", ".hh", ".hxx")):
+                parts = rel.split("/")
+                for k in range(len(parts)):
+                    idx["/".join(parts[k:])].append(rel)
+    hits = idx.get(spec.lstrip("./"), [])
+    if len(hits) == 1:
+        return project.by_file[hits[0]][0].name
+    return "" if hits else EXTERNAL  # a system / library header
+
+
+def _rs_crates(project: Project, cache: dict) -> tuple[list[tuple[str, str]], dict[str, str]]:
+    """Rust crates: [(crate dir, src dir)] deepest first, and name -> src dir."""
+    got = cache.get("\0rs")
+    if got is None:
+        dirs, names = [], {}
+        for rel in _manifests(project, "Cargo.toml"):
+            if rel != "Cargo.toml" and not rel.endswith("/Cargo.toml"):
+                continue
+            d = rel.rsplit("/", 1)[0] if "/" in rel else ""
+            src = f"{d}/src" if d else "src"
+            try:
+                with open(os.path.join(project.root, rel), encoding="utf-8") as fh:
+                    txt = fh.read()
+            except OSError:
+                txt = ""
+            # `[lib] path = "x/lib.rs"` / `[[bin]] path = "crates/core/main.rs"`: the crate root is there
+            roots = re.findall(r'(?ms)^\[\[?(?:lib|bin)\]\]?[^\[]*?^\s*path\s*=\s*"([^"]+)"', txt)
+            for r in roots:
+                rd = os.path.normpath(os.path.join(d, os.path.dirname(r)))
+                dirs.append((rd, rd))
+            dirs.append((d, src))
+            for sect in ("package", "lib"):
+                mm = re.search(rf"(?ms)^\[{sect}\][^\[]*?^\s*name\s*=\s*\"([^\"]+)\"", txt)
+                if mm:
+                    lib = re.search(r'(?ms)^\[lib\][^\[]*?^\s*path\s*=\s*"([^"]+)"', txt)
+                    names[mm.group(1).replace("-", "_")] = os.path.normpath(os.path.join(d, os.path.dirname(lib.group(1)))) if lib else src
+        dirs.sort(key=lambda x: -len(x[0]))
+        got = cache["\0rs"] = (dirs, names)
+    return got
+
+
+def _rs_module(project: Project, src: str, parts: list[str]) -> str:
+    """The file module for a module path in a crate ("" when there is none)."""
+    if not parts:
+        for root in ("lib", "main"):
+            if f"{src}/{root}" in project.modules:
+                return f"{src}/{root}"
+        return ""
+    base = f"{src}/{'/'.join(parts)}"
+    for cand in (base, base + "/mod"):
         if cand in project.modules:
             return cand
     return ""
+
+
+def _resolve_rs(project: Project, where: str, cache: dict) -> str:
+    """A Rust `use` path -> the module it names, or the module holding the item
+    it names. `crate::` / `self::` / `super::` / a workspace crate's name; any
+    other first segment is a child module, else another crate (EXTERNAL)."""
+    rel, _, path = where[3:].partition("\0")
+    segs = path.split("::") if path else []
+    dirs, names = _rs_crates(project, cache)
+    src = next((s for d, s in dirs if rel.startswith(s + "/")), "")
+    bm = re.match(r"(.*?/?src/bin)/([^/]+)/", rel)
+    if bm and src and rel.startswith(src + "/bin/"):
+        src = f"{bm.group(1)}/{bm.group(2)}"  # `src/bin/bat/main.rs`: a binary crate rooted there
+    cur: list[str] = []
+    if src:
+        p = rel[len(src) + 1:-3]  # (.rs)
+        cur = [] if p in ("lib", "main") else (p[:-4].split("/") if p.endswith("/mod") else p.split("/"))
+        if p.endswith("/mod") and p[:-4] in ("", "lib"):
+            cur = []
+    if not segs:
+        return ""
+    if segs[0] == "crate":
+        base, segs = [], segs[1:]
+    elif segs[0] in ("self", "super"):
+        base = list(cur)
+        while segs and segs[0] in ("self", "super"):
+            if segs[0] == "super":
+                base = base[:-1]
+            segs = segs[1:]
+    elif segs[0] in names:
+        src, base, segs = names[segs[0]], [], segs[1:]
+    elif src and _rs_module(project, src, cur + [segs[0]]):
+        base = list(cur)
+    elif src and _rs_module(project, src, [segs[0]]):
+        base = []  # (2015 edition: paths start at the crate root)
+    else:
+        return EXTERNAL  # std, core, alloc or a dependency
+    if not src:
+        return ""
+    best = _rs_module(project, src, base)
+    for k in range(len(segs)):
+        m = _rs_module(project, src, base + segs[:k + 1])
+        if not m:
+            break
+        best = m
+    return best
+
+
+def _py_index(project: Project, cache: dict) -> dict[str, list[str]]:
+    """Dotted-path suffix -> Python file modules: `flask.helpers` is any
+    module named `.../flask/helpers` (or a package `.../flask/helpers/__init__`)."""
+    idx = cache.get("\0py")
+    if idx is None:
+        idx = defaultdict(list)
+        for m in project.modules.values():
+            if m.owner or not m.file.endswith(".py"):
+                continue
+            path = m.name[:-len("/__init__")] if m.name.endswith("/__init__") else m.name
+            parts = path.split("/")
+            for k in range(len(parts)):
+                idx[".".join(parts[k:])].append(m.name)
+        cache["\0py"] = idx
+    return idx
+
+
+def _resolve_py(project: Project, where: str, cache: dict) -> str:
+    d, _, spec = where[3:].partition("\0")
+    if spec.startswith("."):
+        dots = len(spec) - len(spec.lstrip("."))
+        base = d
+        for _ in range(dots - 1):
+            base = base.rsplit("/", 1)[0] if "/" in base else ""
+        rest = spec[dots:].replace(".", "/")
+        path = f"{base}/{rest}" if base and rest else base or rest
+        for cand in (path, f"{path}/__init__" if path else "__init__"):
+            if cand in project.modules:
+                return cand
+        return ""
+    depth = spec.count(".") + 1
+
+    def root(h):
+        parts = (h[:-len("/__init__")] if h.endswith("/__init__") else h).split("/")
+        return "/".join(parts[:len(parts) - depth])
+    # an absolute import starts at a source root, never inside a package:
+    # `import typing` in flask/ is the stdlib's, not flask/typing.py
+    hits = [h for h in _py_index(project, cache).get(spec, []) if not root(h) or root(h) + "/__init__" not in project.modules]
+    if not hits:
+        return EXTERNAL  # the stdlib or an installed package
+    if len(hits) == 1:
+        return hits[0]
+    # several (`utils` in two packages, a test fixture named like the real
+    # package): what Python would do. A source root holding the importing
+    # file wins (the longest such); else the shallowest root (`src/flask`
+    # over `tests/apps/x/flask`).
+    mine = [h for h in hits if root(h) == "" or d == root(h) or d.startswith(root(h) + "/")]
+    pool = mine or hits
+    key = (lambda h: -len(root(h).split("/"))) if mine else (lambda h: len(root(h).split("/")) if root(h) else 0)
+    best = min(key(h) for h in pool)
+    top = [h for h in pool if key(h) == best]
+    return top[0] if len(top) == 1 else ""
 
 
 _EX_IMPORT = re.compile(r"^\s*import\s+([A-Z]\w*(?:\.[A-Z]\w*)*|__MODULE__)")
@@ -485,17 +898,54 @@ def _qml_context(project: Project) -> None:
     is then a call on ContinuityClient, not a guess."""
     names: dict[str, set[str]] = {}
     for rel, mods in project.by_file.items():
+        if rel.endswith((".h", ".hpp", ".hh", ".cpp", ".cc", ".cxx", ".c")) and mods and "QML_NAMED_ELEMENT" in "\n".join(mods[0].raw):
+            # `class FooForeign { QML_NAMED_ELEMENT(Foo) QML_FOREIGN(FooImpl) }`: QML's `Foo` is FooImpl
+            raw = "\n".join(mods[0].raw)
+            for body in re.split(r"\b(?:class|struct)\s+(?=\w+[^;]*\{)", raw)[1:]:
+                cls = re.match(r"(?:\w+\s+)*?(\w+)\s*(?::|\{)", body)
+                named = re.search(r"\bQML_NAMED_ELEMENT\s*\(\s*(\w+)\s*\)", body)
+                if cls and named:
+                    foreign = re.search(r"\bQML_FOREIGN\s*\(\s*([\w:]+)\s*\)", body)
+                    project.__dict__.setdefault("_qml_names", {})[named.group(1)] = \
+                        (foreign.group(1) if foreign else cls.group(1)).split("::")[-1]
         if not rel.endswith((".cpp", ".cc", ".cxx")) or not mods:
             continue
         raw = "\n".join(mods[0].raw)
+        # `qmlRegisterType<ConversationModel>("uri", 1, 0, "ConversationModel")`: a C++ class under a QML name
+        for cls, qname in re.findall(r"qmlRegister\w*Type<\s*([A-Za-z_][\w:]*)\s*>\s*\([^;]*?\"(\w+)\"\s*[,)]", raw):
+            project.__dict__.setdefault("_qml_names", {})[qname] = cls.split("::")[-1]
         if "setContextProperty" not in raw:
             continue
         for name, var in _CONTEXT_PROP.findall(raw):
+            if var == "new":  # `setContextProperty("X", new Foo(...))`
+                nm = re.search(rf'"{name}"\s*\)?\s*,\s*new\s+([A-Z]\w*)', raw)
+                if nm:
+                    names.setdefault(name, set()).add(nm.group(1))
+                continue
             decl = re.search(rf"(?:^|[;{{}}(\s])([A-Z]\w*)\s*[\*&]?\s*\b{var}\b\s*[;({{=]", raw, re.M) or \
                 re.search(rf"\b{var}\s*=\s*(?:new\s+|std::make_unique<|std::make_shared<)([A-Z]\w*)", raw)
             if decl:
                 names.setdefault(name, set()).add(decl.group(1))
     bound = {n: "type:" + next(iter(t)) for n, t in names.items() if len(t) == 1}
+    # an id declared in one QML file only: a child component's `conversationModel`
+    # (QML looks ids up through the components that instantiate it) is that one
+    from .lang_other import _QML_ID
+    ids: dict[str, set[str]] = {}
+    for rel, mods in project.by_file.items():
+        if rel.endswith(".qml") and mods:
+            code = "\n".join(mods[0].code)
+            for m in _QML_ID.finditer(code):
+                held = mods[0].bound.get(m.group(1), "")
+                ids.setdefault(m.group(1), set()).add(held if held.startswith(("type:", "mod:")) else "?" + rel)
+            # the root object's own properties: what a child component sees by
+            # QML's dynamic scope (`appSettings` of main.qml, in TerminalWindow.qml)
+            for m in re.finditer(r"\bproperty[ \t]+[\w.<>]+[ \t]+([a-z_]\w*)", code):
+                if code.count("{", 0, m.start()) - code.count("}", 0, m.start()) == 1:
+                    held = mods[0].bound.get(m.group(1), "")
+                    ids.setdefault(m.group(1), set()).add(held if held.startswith(("type:", "mod:")) else "?" + rel)
+    for n, held in ids.items():
+        if len(held) == 1 and next(iter(held)).startswith(("type:", "mod:")):
+            bound.setdefault(n, next(iter(held)))
     if not bound:
         return
     for rel, mods in project.by_file.items():
@@ -503,6 +953,23 @@ def _qml_context(project: Project) -> None:
             for m in mods:
                 for n, t in bound.items():
                     m.bound.setdefault(n, t)
+
+
+def _js_imported_files(project: Project) -> set[str]:
+    """The JS / TS files some module imports (or re-exports) from."""
+    got = project.__dict__.get("_js_imported")
+    if got is None:
+        got = project.__dict__["_js_imported"] = set()
+        for m in project.modules.values():
+            if not m.file.endswith(_JS_FILE_EXTS):
+                continue
+            for w, _n in m.imported.values():
+                if w in project.modules:
+                    got.add(project.modules[w].file)
+            for w in m.reexports:
+                if w in project.modules:
+                    got.add(project.modules[w].file)
+    return got
 
 
 def _is_test_file(project: Project, rel: str) -> bool:
@@ -513,13 +980,78 @@ def _is_test_file(project: Project, rel: str) -> bool:
     return cache[rel]
 
 
+def _jvm_member_home(project: Project, path: str) -> str:
+    """`okhttp3.TestUtil` / `okhttp3.CipherSuite.Companion`: the module of type
+    TestUtil (CipherSuite) in package okhttp3, or ""."""
+    pkg, _, typ = path.rpartition(".")
+    if typ == "Companion":
+        pkg, _, typ = pkg.rpartition(".")
+    for mn in project.packages.get(pkg, []):
+        m = project.modules[mn]
+        if typ in m.decls:
+            inner = f"{mn}.{typ}"
+            return inner if inner in project.modules else mn
+    return ""
+
+
 def _resolve_imports(project: Project) -> None:
     cache: dict = {}
+    lang_ruby.link(project)  # Ruby: requires, constants and supertypes, across files (lang_ruby.py)
+    lang_other.qt_dbus_interfaces(project)  # Qt: a generated D-Bus proxy stands for the class it calls
+    lang_other.qml_page_props(project)  # QML: what each page's untyped properties are handed
+
+    def res(v):
+        return _resolve_where(project, v, cache)
+
     for m in project.modules.values():
         if m.package:
             project.packages[m.package].append(m.name)
-        m.aliases = {k: r for k, v in m.aliases.items() if (r := _resolve_where(project, v, cache))}
-        m.imported = {k: (r, n) for k, (v, n) in m.imported.items() if (r := _resolve_where(project, v, cache))}
+    for m in project.modules.values():
+        ext: set[str] = set()
+        aliases, imported = {}, {}
+        for k, v in m.aliases.items():
+            r = res(v)
+            if r == EXTERNAL:
+                ext.add(k)
+            elif r:
+                if v.startswith("go?:") and r.startswith("pkg:"):
+                    k = r.rpartition("#")[2]  # imported without a name: the package's own name
+                aliases[k] = r
+        jvm = m.file.endswith((".kt", ".kts", ".java"))
+        for k, (v, n) in m.imported.items():
+            r = res(v)
+            if jvm and r.startswith("pkg:") and r[4:] not in project.packages:
+                # `import okhttp3.TestUtil.headerEntries`: a member of object TestUtil in package
+                # okhttp3 (or of a companion); a package the project doesn't have: a library's
+                r = _jvm_member_home(project, r[4:]) or EXTERNAL
+            if r == EXTERNAL:
+                ext.add(k)
+            elif r:
+                imported[k] = (r, n)
+        m.aliases, m.imported = aliases, imported
+        m.uses = [r for r in (res(u) for u in m.uses) if r and r != EXTERNAL]
+        rx = [res(u) for u in m.reexports]
+        if EXTERNAL in rx:
+            m.__dict__["_ext_star"] = True  # `export * from "@testing-library/react"`
+        m.reexports = [r for r in rx if r and r != EXTERNAL]
+        m.external = ext - set(aliases) - set(imported)
+    for m in project.modules.values():
+        for k, (w, n) in list(m.imported.items()):  # `export { renderApp as render }` in the module imported from
+            src = project.modules.get(w)
+            alias = src.bound.get("\0export:" + n, "") if src is not None else ""
+            if alias.startswith("export:") and alias[7:] != n:
+                m.imported[k] = (w, alias[7:])
+                m.external.discard(k)
+    for m in project.modules.values():
+        # a name imported from a module that re-exports a library wholesale, and that no
+        # project module defines (`fireEvent` through test-utils): the library's
+        for k, (w, n) in list(m.imported.items()):
+            src = project.modules.get(w)
+            if src is not None and src.__dict__.get("_ext_star") and not _in_scope(project, w, n) \
+                    and not _defining_module(project, w, n) and not any(f"{w}.{n}" == mn for mn in project.modules):
+                m.external.add(k)
+                del m.imported[k]
+    _python_names(project)
     _qml_context(project)
     for m in project.modules.values():
         for u in m.using:
@@ -528,42 +1060,238 @@ def _resolve_imports(project: Project) -> None:
                     m.uses.append(w)
 
 
-def _in_scope(project: Project, where: str, name: str) -> list[Func]:
-    """`name` in a module, or in any file of a "pkg:" package."""
+def _py_class(project: Project, mod: Module, name: str, depth: int = 0) -> str:
+    """The class module a Python name in `mod`'s file means (`Base`, `models.Base`, an
+    imported or re-exported class), or ""."""
+    file_mod = project.modules.get(mod.owner) if mod.owner else mod
+    if file_mod is None or depth > 4:
+        return ""
+    if "." in name:
+        q, _, rest = name.rpartition(".")
+        target = file_mod.aliases.get(q.split(".")[-1])
+        if target and target in project.modules:
+            if f"{target}.{rest}" in project.modules:
+                return f"{target}.{rest}"
+            return _py_class(project, project.modules[target], rest, depth + 1)
+        return ""
+    if f"{file_mod.name}.{name}" in project.modules:
+        return f"{file_mod.name}.{name}"
+    if name in file_mod.aliases and project.modules.get(file_mod.aliases[name], mod).owner:
+        return file_mod.aliases[name]
+    if name in file_mod.imported:
+        w, n = file_mod.imported[name]
+        if w in project.modules:
+            return _py_class(project, project.modules[w], n, depth + 1)
+    for w in file_mod.reexports:
+        if w in project.modules:
+            hit = _py_class(project, project.modules[w], name, depth + 1)
+            if hit:
+                return hit
+    return ""
+
+
+def _python_names(project: Project) -> None:
+    """Python, once every import is resolved: `from x import Foo` (a class) and
+    `from pkg import sub` (a submodule) become aliases, so `Foo.m()` and
+    `sub.f()` are exact; and each class's base names its parent class."""
+    py = [m for m in project.modules.values() if m.file.endswith(".py")]
+    for m in py:
+        if m.owner:
+            continue
+        for local, (w, n) in list(m.imported.items()):
+            sub = (w[:-len("/__init__")] if w.endswith("/__init__") else w.rsplit("/", 1)[0] if "/" in w else "") + "/" + n
+            sub = sub.lstrip("/")
+            if sub in project.modules or sub + "/__init__" in project.modules:
+                m.aliases.setdefault(local, sub if sub in project.modules else sub + "/__init__")
+                continue
+            target = project.modules.get(w)
+            cls = _py_class(project, target, n) if target else ""
+            if cls:
+                m.aliases.setdefault(local, cls)
+    for m in py:
+        if m.owner:
+            fm = project.modules.get(m.owner)
+            if fm:
+                m.aliases, m.imported, m.uses, m.reexports, m.external = fm.aliases, fm.imported, fm.uses, fm.reexports, fm.external
+        if m.parent.startswith("py:"):
+            m.parent = _py_class(project, m, m.parent[3:])
+        if m.bases and m.bases[0].startswith("py:"):
+            # every base (`class FlaskProxy(ProxyMixin[Flask], Flask)`); one from a
+            # library (`werkzeug.test.Client`) means an inherited method may be its
+            fm = project.modules.get(m.owner, m)
+            got = [c for b in m.bases if (c := _py_class(project, m, b[3:]))]
+            if any(not _py_class(project, m, b[3:]) and (b[3:].split(".")[0] in fm.external or b[3:] in _PY_BUILTINS
+                                                          or _py_lib_reexport(project, fm, b[3:].split(".")[0]))
+                   for b in m.bases):  # (`class Config(dict)`, `class MyError(ValueError)`: Python's own)
+                m.unresolved = True
+            m.bases = got
+            m.parent = m.parent or (got[0] if got else "")
+
+
+def _py_lib_reexport(project: Project, fm: Module, name: str, depth: int = 0) -> bool:
+    """`from .compat import MutableMapping`, where compat imports it from a
+    library: the name is the library's."""
+    if depth > 4 or name not in fm.imported:
+        return False
+    w, n = fm.imported[name]
+    src = project.modules.get(w)
+    if src is None:
+        return False
+    return n in src.external or _py_lib_reexport(project, src, n, depth + 1)
+
+
+def _in_scope(project: Project, where: str, name: str, depth: int = 0) -> list[Func]:
+    """`name` in a module, or in any file of a "pkg:" package. A module that
+    only re-exports the name (an `index.ts` barrel, a package `__init__.py`)
+    leads on to where it is defined."""
     if where.startswith("pkg:"):
         return [t for t in (_lookup(project, mn, name) for mn in project.packages.get(where[4:], [])) if t]
     if where.startswith("type:"):
         return []  # a type is only a scope for method names (see _scope)
+    dm_ = project.modules.get(where) if name == "default" else None
+    if dm_ is not None and dm_.imported.get("default", ("", "default"))[1] != "default" and depth < 4:
+        # `module.exports = class Application` beside a `static get default()`: the export, not that getter
+        w, n = dm_.imported["default"]
+        return _in_scope(project, w, n, depth + 1)
     t = _lookup(project, where, name)
-    return [t] if t else []
+    if t and not _js_call_arg_member(project, t) and not _js_member_assigned(project, t):
+        return [t]
+    m = project.modules.get(where)
+    if m is None or depth >= 8:  # (zod/mini -> external -> parse -> core/index -> core/parse -> a factory)
+        return []
+    if name in m.imported:
+        w, n = m.imported[name]
+        hits = _in_scope(project, w, n, depth + 1)
+        if hits:
+            return hits
+    for w in m.reexports:
+        hits = [h for h in _in_scope(project, w, name, depth + 1) if not _js_class_member(project, h)]
+        if hits:
+            return hits
+    held = m.bound.get(name, "")
+    if m.file.endswith(_JS_FILE_EXTS) and re.fullmatch(r"expr:[A-Za-z_$][\w$]*", held) and held[5:] != name:
+        return _in_scope(project, where, held[5:], depth + 1)  # `export const __getDirectAgent = getDirectAgent`
+    if m.file.endswith(_JS_FILE_EXTS) and not m.owner:
+        g = _js_factory_made(project, m, name, depth)
+        if g is not None:
+            return [g]
+    return []
+
+
+def _js_factory_made(project: Project, m: Module, name: str, depth: int):
+    """`export const safeParse: <T>(...) => R = core._safeParse(ZodRealError)` where the
+    project's `_safeParse` is `(_Err) => (schema, value) => {...}` (or builds a closure
+    and returns it): calling safeParse runs that closure, in the factory's body."""
+    from .chains import expression
+    cache = project.__dict__.setdefault("_js_factory", {})
+    key = (m.name, name)
+    if key in cache:
+        return cache[key]
+    cache[key] = None
+    code = "\n".join(m.code)
+    dm = re.search(rf"^[ \t]*(?:export[ \t]+)?const[ \t]+{re.escape(name)}\b", code, re.M)
+    if dm is None:
+        return None
+    k, depth_, n = dm.end(), 0, len(code)
+    while k < n:  # the `=` after the type annotation, at the top level
+        c = code[k]
+        if c in "([{<":
+            depth_ += 1
+        elif c in ")]}>" and not (c == ">" and code[k - 1] == "="):
+            depth_ -= 1
+        elif c == "=" and depth_ <= 0 and code[k + 1:k + 2] not in "=>" and code[k - 1] not in "=!<>":
+            break
+        elif c == ";" and depth_ <= 0:
+            return None
+        k += 1
+    ch = expression(code, k + 1) if k < n else ()
+    if not ch or not ch[-1].endswith("()") or len(ch) > 2:
+        return None
+    fname = ch[-1][:-2]
+    if len(ch) == 1:
+        hits = _in_scope(project, m.name, fname, depth + 1)
+    else:
+        w = m.aliases.get(ch[0]) or (m.imported[ch[0]][0] if ch[0] in m.imported else "")
+        hits = _in_scope(project, w, fname, depth + 1) if w in project.modules else []
+    if len(hits) != 1 or not hits[0].file.endswith(_JS_FILE_EXTS):
+        return None
+    g = hits[0]
+    gm = project.modules.get(g.module)
+    head = "\n".join(gm.code[g.start - 1:g.start + 1]) if gm else ""
+    curried = re.search(r"=>\s*(?:async\s+)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*(?::[^=;{]+)?=>", head)
+    local = re.fullmatch(r"expr:([A-Za-z_$][\w$]*)", g.returns or "")
+    closure = local and re.search(rf"\b(?:const|let)\s+{re.escape(local.group(1))}\s*(?::[^=;]+)?=\s*(?:async\s+)?"
+                                  rf"(?:\([^()]*\)\s*(?::[^=;{{]+)?=>|function\b)", g.code)
+    if curried or closure:
+        cache[key] = g
+    return cache[key]
+
+
+_JS_FILE_EXTS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts")
+
+
+def _defining_module(project: Project, where: str, name: str, depth: int = 0) -> str:
+    """The module that defines the object a named import refers to
+    (`import { API } from "./helpers"`, through re-exports): `API.create()`
+    is that module's `create`."""
+    m = project.modules.get(where)
+    if m is None or depth > 4:
+        return ""
+    if f"{where}.{name}" in project.modules:  # a class with a module of its own
+        return f"{where}.{name}"
+    if name in m.decls or f"{where}.{name}" in project.funcs:
+        return where
+    if name in m.imported:
+        w, n = m.imported[name]
+        return _defining_module(project, w, n, depth + 1)
+    if name in m.aliases and m.file.endswith(_JS_FILE_EXTS) and m.aliases[name] in project.modules:
+        return m.aliases[name]  # `import * as z from "./external.js"; export { z }`: that module's namespace
+    for w in m.reexports:
+        hit = _defining_module(project, w, name, depth + 1)
+        if hit:
+            return hit
+    if name == "default" and m.file.endswith((".js", ".cjs", ".mjs")) and not m.owner:
+        return where  # `require('./context')` of `module.exports = { inspect() {...} }`: the module's own object
+    return ""
 
 
 def _scope(project: Project, mod: Module, cache: dict) -> set[str]:
     """The modules a file can see: itself, what it imports, its package."""
     if mod.name in cache:
         return cache[mod.name]
-    out = {mod.name, *mod.aliases.values(), *(w for w, _ in mod.imported.values())}
-    for w in mod.uses + ([f"pkg:{mod.package}"] if mod.package else []):
+    fm = project.modules.get(mod.owner, mod) if mod.owner else mod
+    out = {mod.name, fm.name, *fm.aliases.values(), *(w for w, _ in fm.imported.values())}
+    for w in fm.uses + ([f"pkg:{fm.package}"] if fm.package else []):
         if w.startswith("pkg:"):
             out.update(project.packages.get(w[4:], []))
         elif w.startswith("type:"):
             out.update(project.short.get(w[5:], []))
         else:
             out.add(w)
+    # a file seen is all of it: its classes' modules too
+    out |= {m.name for w in list(out) if w in project.modules for m in project.by_file.get(project.modules[w].file, ())}
     cache[mod.name] = out
     return out
 
 
 _LOCALS = re.compile(r"\b(?:val|var|let|const)\s+([A-Za-z_$][\w$]*)|[(,]\s*([A-Za-z_$][\w$]*)\s*:(?!:)")
+_DESTRUCTURED = re.compile(r"\b(?:val|var|let|const)\s*[\[{(]([^\]})=;]*)[\]})]\s*(?::[^=;]+)?=")
 _locals_cache: dict[str, set[str]] = {}
 
 
 def _shadowed(f: Func, name: str) -> bool:
     """`name` is a parameter or local of `f` (Kotlin/Java/TS/Rust), so a bare
-    `name()` calls that value, not a function in scope."""
+    `name()` calls that value, not a function in scope. (Ruby's `foo(key: v)`
+    passes a keyword, it declares nothing.)"""
     loc = _locals_cache.get(f.id)
     if loc is None:
-        loc = _locals_cache[f.id] = {a or b for a, b in _LOCALS.findall(f.code)}
+        rb = f.file.endswith((".rb", ".rake", ".ru"))
+        loc = _locals_cache[f.id] = {a or ("" if rb else b) for a, b in _LOCALS.findall(f.code)} - {""}
+        for dm in _DESTRUCTURED.finditer(f.code):  # `const [value, setValue] = useState()`, `const { a, b: c } =`
+            for part in dm.group(1).split(","):
+                nm = re.sub(r"^\s*\.\.\.", "", part).split("=")[0].split(":")[-1].strip()
+                if re.match(r"^[A-Za-z_$][\w$]*$", nm):
+                    loc.add(nm)
     return name in loc
 
 
@@ -584,7 +1312,11 @@ def _groups(project: Project) -> dict[str, str]:
 def _typed_targets(project: Project, mod: Module | None, ty: str, name: str, ext_cache: dict) -> tuple[list[Func], bool]:
     """The functions `x.name()` reaches when x is declared `ty`, and whether ty
     is a project type at all."""
+    if mod and mod.file.endswith(".go"):
+        return _go_typed(project, mod, ty, name)
     mods = []
+    if mod and mod.file.endswith(".py") and (cls := _py_class(project, mod, ty)):
+        mods.append(cls)
     if mod and ty in mod.aliases:
         mods.append(mod.aliases[ty])
     if ty in project.modules:
@@ -605,6 +1337,32 @@ def _typed_targets(project: Project, mod: Module | None, ty: str, name: str, ext
     return hits, bool(mods)
 
 
+def _go_typed(project: Project, mod: Module, ty: str, name: str) -> tuple[list[Func], bool]:
+    """Go `x.M()` with x declared a type of the caller's own package: that
+    type's method M, from whichever file of the package defines it."""
+    fm = project.modules.get(mod.owner, mod) if mod.owner else mod
+    idx = project.__dict__.setdefault("_go_types", {})
+    if not idx:
+        for m in project.modules.values():
+            if m.owner and m.file.endswith(".go"):
+                o = project.modules.get(m.owner)
+                if o and o.package:
+                    idx.setdefault((o.package, m.decls[0]), []).append(m.name)
+        idx.setdefault(("", ""), [])
+    pkg = fm.package
+    if "." in ty:  # `w tui.Window`: a type of an imported package
+        q, _, ty = ty.partition(".")
+        target = mod.aliases.get(q, "")
+        if not target.startswith("pkg:"):
+            return [], False  # another module's or the standard library's type
+        pkg = target[4:]
+    hits = [t for mn in idx.get((pkg, ty), []) if (t := project.funcs.get(f"{mn}.{name}"))]
+    if hits:
+        return hits, True
+    declared = any(ty in project.modules[mn].decls for mn in project.packages.get(pkg, []) if mn in project.modules)
+    return [], declared  # declared here and missed: an embedded type's method (a guess); else a builtin
+
+
 # A qualifier that is a module's name: `Enum`, `Foo.Bar`, `Vector3`. Not a
 # value: `main`, `self.x`, `Foo.get()`, and not an ALL_CAPS constant holding
 # an object (`LOG`, `INSTANCE`).
@@ -618,9 +1376,32 @@ _FAMILIES = {
     ".ex": {"ex"}, ".exs": {"ex"},
     ".kt": {"jvm"}, ".kts": {"jvm"}, ".java": {"jvm"},
     ".ts": {"web"}, ".tsx": {"web"}, ".jsx": {"web"}, ".mjs": {"web"}, ".cjs": {"web"}, ".js": {"web", "qt"},
-    ".qml": {"qt"}, ".cpp": {"qt"}, ".cc": {"qt"}, ".cxx": {"qt"}, ".h": {"qt"}, ".hpp": {"qt"}, ".hh": {"qt"},
+    ".qml": {"qt"}, ".c": {"qt"}, ".cpp": {"qt"}, ".cc": {"qt"}, ".cxx": {"qt"}, ".h": {"qt"}, ".hpp": {"qt"}, ".hh": {"qt"},
     ".py": {"py"}, ".gd": {"gd"}, ".rs": {"rs"}, ".go": {"go"}, ".cs": {"cs"},
+    ".rb": {"rb"}, ".rake": {"rb"}, ".ru": {"rb"},
 }
+
+
+# what Swift's standard types conform to (an extension of the protocol is theirs too)
+_SWIFT_SEQ = ("Sequence", "Collection", "BidirectionalCollection", "RandomAccessCollection", "Equatable", "Hashable")
+_SWIFT_CONFORMS = {
+    "String": ("StringProtocol", "RangeReplaceableCollection", "Comparable", "CustomStringConvertible") + _SWIFT_SEQ,
+    "Substring": ("StringProtocol", "RangeReplaceableCollection", "Comparable") + _SWIFT_SEQ,
+    "Array": ("MutableCollection", "RangeReplaceableCollection", "ExpressibleByArrayLiteral") + _SWIFT_SEQ,
+    "ArraySlice": ("MutableCollection", "RangeReplaceableCollection") + _SWIFT_SEQ,
+    "Range": _SWIFT_SEQ, "ClosedRange": _SWIFT_SEQ,
+    "Dictionary": ("Sequence", "Collection", "Equatable", "Hashable"),
+    "Set": ("Sequence", "Collection", "SetAlgebra", "Equatable", "Hashable"),
+    "Int": ("BinaryInteger", "FixedWidthInteger", "SignedInteger", "Numeric", "Comparable", "Equatable", "Hashable"),
+    "Double": ("BinaryFloatingPoint", "FloatingPoint", "Numeric", "Comparable", "Equatable", "Hashable"),
+    "Character": ("Comparable", "Equatable", "Hashable"),
+}
+
+# browser globals a project augments (`declare global { interface Window { h: ... } }`): what the
+# augmentation doesn't declare is the browser's
+_DOM_GLOBALS = {"Window", "Document", "Navigator", "HTMLElement", "Element", "Node", "EventTarget", "Event",
+                "GlobalThis", "WorkerGlobalScope", "ServiceWorkerGlobalScope", "Console", "Location", "History",
+                "HTMLCanvasElement", "CanvasRenderingContext2D", "Performance", "Storage", "ImportMeta"}
 
 
 def _family(rel: str) -> set[str]:
@@ -628,16 +1409,638 @@ def _family(rel: str) -> set[str]:
     return _FAMILIES.get(ext, {ext})
 
 
-def _scoped_language(rel: str) -> bool:
+_EXPLICIT_RECEIVER = (".go", ".rs", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".php")
+
+
+def _argc(mod, c) -> int | None:
+    """How many arguments a call passes, where overloads go by count (Java, C#,
+    Kotlin, C++); None elsewhere or when it can't be read."""
+    if mod is None or not mod.file.endswith(infer_mod._OVERLOADED) or not (0 < c.line <= len(mod.code)):
+        return None
+    lines = mod.code
+    text = "\n".join(lines[c.line - 1:c.line + 30])
+    k = text.find("(", c.col if c.col >= 0 else 0)
+    if k < 0 or text[c.col:k].strip(" \t") not in ("",) and not re.fullmatch(r"\w*\s*(?:<[^()]*>)?\s*", text[c.col:k]):
+        return None
+    close = infer_mod._paren_close(text, k)
+    if close < 0:
+        return None
+    inner = text[k + 1:close]
+    if not inner.strip():
+        return 0
+    inner = re.sub(r"(?<=\w)\s*<[\w\s,.?<>\[\]]*>(?=\s*[(\[{>),]|\s*$)", "", inner)  # `new HashMap<A, B>()`
+    return len(infer_mod._top_split(inner.replace("<", " ").replace(">", " ")))
+
+
+_CPP_EXTS = (".cpp", ".cc", ".cxx", ".hpp", ".hh")
+_C_DEFINE = re.compile(r"^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)\(([^)]*)\)((?:[^\n]*\\\n)*[^\n]*)", re.M)
+_C_KEYWORDS = {"if", "for", "while", "switch", "return", "sizeof", "do", "else", "case", "typeof", "__typeof__", "defined",
+               "_Generic", "offsetof", "__builtin_expect", "__attribute__"}
+
+
+_C_FAMILY = (".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh")
+_STD_NAMESPACES = {"std", "boost", "absl", "Qt", "QtConcurrent", "chrono", "filesystem", "ranges", "views", "this_thread"}
+
+
+def _cpp_namespaces(project: Project) -> set:
+    got = project.__dict__.get("_cpp_ns")
+    if got is None:
+        got = project.__dict__["_cpp_ns"] = {part for g in project.funcs.values() if g.ns for part in g.ns.split("::")}
+    return got
+
+
+def _cpp_namespace_call(project: Project, f: Func, c, targets: list) -> bool:
+    """`detail::write(...)`, `details::os::localtime(...)`, `std::move(...)`: a call
+    qualified by a namespace path. True when the path names namespaces (not a
+    class or a variable): `targets` gets the free functions of that name in a
+    namespace ending with that path (one overload set: exact), none for `std::`."""
+    if not all(re.fullmatch(r"[A-Za-z_]\w*", s_) for s_ in c.chain) or c.chain[-1] in f.bound:
+        return False
+    own = _cpp_namespaces(project)
+    if c.chain[0] in _STD_NAMESPACES and c.chain[0] not in own:
+        return True  # the standard library's (or boost's): no project function
+    if not all(s_ in own for s_ in c.chain):
+        return False  # a class (`Foo::make()`) or a variable: the type layer decides
+    path = "::".join(c.chain)
+    hits = [g for g in project.by_name.get(c.name, []) if g.ns and (g.ns == path or g.ns.endswith("::" + path))]
+    if not hits:  # `details::m_formatter<Padder>(...)`: a class's constructor, the class named in that namespace
+        hits = [g for g in project.by_name.get(c.name, []) if g.module.rsplit(".", 1)[-1] == c.name and project.modules[g.module].owner]
+        if len({g.module for g in hits}) == 1:
+            targets.extend((g, True) for g in hits)
+            return True
+        return False
+    sure = len({g.ns for g in hits}) == 1  # (overloads in one namespace, over several headers: one function)
+    targets.extend((g, sure) for g in hits)
+    return True
+
+
+def _c_macros(project: Project) -> dict[str, list[str]]:
+    """Function-like macros in the project's C files: name -> the names their body calls."""
+    got = project.__dict__.get("_c_macros")
+    if got is None:
+        got = project.__dict__["_c_macros"] = {}
+        for rel, mods in project.by_file.items():
+            if not rel.endswith((".c", ".h")) or not mods:
+                continue
+            for m in _C_DEFINE.finditer("\n".join(mods[0].raw)):
+                params = {p.strip() for p in m.group(2).split(",")}
+                body = m.group(3).replace("\\\n", " ")
+                names = [n for n in re.findall(r"\b([A-Za-z_]\w*)\s*\(", body) if n not in params and n not in _C_KEYWORDS]
+                got.setdefault(m.group(1), names)
+    return got
+
+
+def _c_macro_targets(project: Project, caller_file: str, name: str, depth: int = 0) -> list:
+    """The project functions a call to macro `name` runs (through macros it uses, 3 deep)."""
+    out = []
+    for n in _c_macros(project).get(name, []) if depth < 3 else []:
+        cfuncs = [g for g in project.by_name.get(n, []) if g.kind != "top" and g.file.endswith((".c", ".h"))]
+        own = [g for g in cfuncs if g.file == caller_file]
+        glob_ = [g for g in cfuncs if not _c_static(project, g) or g.file.endswith(".h")]
+        if own:
+            out.append(own[0])
+        elif len({g.file for g in glob_}) == 1 and glob_:
+            out.append(glob_[0])
+        elif not cfuncs:
+            out += _c_macro_targets(project, caller_file, n, depth + 1)
+    return list({g.id: g for g in out}.values())
+
+
+def _needs_receiver(project: Project, g: Func) -> bool:
+    """`g` is a method a call reaches only through a receiver (Go's `func (c *Command) X`,
+    Rust's `fn x(&self)`, a JS / TS / PHP class's method), not a free function."""
+    if g.file.endswith(".go"):
+        return bool(g.recv)
+    if g.file.endswith(".rs"):
+        return re.search(r"\(\s*(?:&\s*)?(?:'\w+\s+)?(?:mut\s+)?self\b", g.code.split("{", 1)[0]) is not None \
+            or bool(project.modules[g.module].owner)
+    return bool(project.modules[g.module].owner)
+
+
+def _scoped_language(rel: str, mod=None) -> bool:
     """A language where a bare name resolves only through the file's own
     definitions and imports. A plain .js script (a QML library, a browser
-    script) sees globals from anywhere, so it is not."""
-    return os.path.splitext(rel)[1] in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts")
+    script) sees globals from anywhere, so it is not; a CommonJS or ES
+    module .js file (`require(`, `module.exports`, `import`) is."""
+    ext = os.path.splitext(rel)[1]
+    if ext in (".js", ".jsx", ".mjs", ".cjs") and mod is not None:
+        fm = mod
+        hit = _MODULE_JS.get(fm.file)
+        if hit is None:
+            raw = "\n".join(fm.raw)
+            hit = _MODULE_JS[fm.file] = ext in (".mjs", ".cjs") or bool(re.search(
+                r"\brequire\s*\(\s*['\"]|\bmodule\.exports\b|^[ \t]*exports\.\w+\s*=|^[ \t]*(?:import|export)\b", raw, re.M)) \
+                and not re.search(r"^[ \t]*(?:global|globalThis|window)\.\w+\s*=", raw, re.M)
+        return hit
+    return ext in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts", ".py", ".go", ".rs",
+                   ".swift", ".php", ".rb", ".rake", ".ru")
+
+
+_MODULE_JS: dict[str, bool] = {}
+
+
+def _implicit_member(project: Project, types, mod, f: Func, c: Call):
+    """What a Swift implicit member `.name(...)` is, from its context:
+    ("none", []) for a pattern, an enum case or a library type's member;
+    ("exact", funcs) for the expected type's static function; ("?", []) when
+    the context doesn't say the type."""
+    if mod is None or not (0 < c.line <= len(mod.raw)):
+        return "?", []
+    line = mod.raw[c.line - 1]
+    code_ = mod.code if mod.code and len(mod.code) == len(mod.raw) else mod.raw
+    # the text before the member, from a few lines up (a call's arguments span lines)
+    before = "\n".join(code_[max(0, c.line - 12):c.line - 1] + [code_[c.line - 1][:max(0, c.col - 1)]])
+    if re.search(r"\bcase\s+(?:let\s+|var\s+)?$", before) or \
+            re.match(r"\s*(?:case|if\s+case|guard\s+case|for\s+case)\b", line) and "=" not in before.split("case", 1)[-1]:
+        return "none", []  # `case .value(let v):` matches, it builds nothing
+    ty = ""
+    elem = re.search(r"(?:\breturn\s*\[|=\s*\[|\b(\w+)\s*\.\s*(?:append|insert)\s*\(|\[\s*)\s*$", before)
+    if elem:  # an element: of the returned / declared array, or of the one appended to
+        src = "\n".join(mod.raw[max(0, f.start - 1):f.start + 4]) if "return" in elem.group(0) else ""
+        if elem.group(1):
+            src = "\n".join(mod.raw)
+            dm = re.search(r"\b" + re.escape(elem.group(1)) + r"\s*:\s*\[([\w.]+)\]", src)
+        elif "return" in elem.group(0):
+            dm = re.search(r"->\s*\[([\w.]+)\]", src)
+        else:
+            dm = re.search(r"\b(?:let|var)\s+\w+\s*:\s*\[([\w.]+)\]\s*=\s*\[\s*$", before)
+        if dm:
+            ty = dm.group(1)
+    if ty:
+        pass
+    elif re.search(r"\breturn\s*$", before):
+        ty = f.returns if f.returns and not f.returns.startswith("expr:") else ""
+    elif re.search(r"\bself\s*=\s*$", before):
+        own = types.own_class(mod, f)
+        ty = project.modules[own[0]].decls[0] if own and project.modules[own[0]].decls else ""
+    elif (tm := re.search(r"\b(?:let|var)\s+\w+\s*:\s*([\w.]+)[?!]?\s*=\s*$", before)):
+        ty = tm.group(1)
+    elif (lm := re.search(r"(?:^|[(,]\s*)(\w+)\s*:\s*$", before)) or re.search(r",\s*$", before):
+        # a labelled argument: the parameter of that label in the callee's signature
+        # (start just after the `(` or `,` the label follows, so that paren is the call's own)
+        depth, k, text = 0, len(before) - (len(lm.group(0)) - (1 if lm.group(0)[:1] in "(," else 0) if lm else 0), before
+        while k > 0:
+            k -= 1
+            if text[k] == ")":
+                depth += 1
+            elif text[k] == "(":
+                if depth == 0:
+                    break
+                depth -= 1
+        ty = _param_type(project, types, mod, text, k, lm.group(1) if lm else "",
+                         len(_top_commas(text[k + 1:])) if k >= 0 else 0, f, c.line)
+    elif (am := re.search(r"\(\s*$", before)):
+        ty = _param_type(project, types, mod, before, am.start(), "", 0, f, c.line)  # the first, unlabelled argument
+    from .chains import type_name
+    verdicts = []
+    for t in (ty.split("|") if ty else []):  # overloads: the parameter type that has the member
+        t = type_name(t)
+        if not t or t == "Self":
+            verdicts.append(("?", []))
+            continue
+        nested = None  # `Value` inside `Element`: the enclosing types' own nested `Value` first
+        o = mod.name
+        while o and nested is None:
+            if f"{o}.{t}" in project.modules:
+                nested = f"{o}.{t}"
+            o = project.modules[o].owner if o in project.modules else ""
+        tmods, ex, declared = ([nested], True, True) if nested else types.type_modules(mod, t)
+        if not declared:
+            verdicts.append(("lib", []))  # a library type's member
+            continue
+        if not ex:
+            verdicts.append(("?", []))
+            continue
+        hits = [g for g in types.method(list(tmods), c.name)[0] if _is_static(project, g)]
+        if hits:
+            verdicts.append(("exact", hits))
+        elif any(_enum_case(project.modules[m_], c.name) for m_ in tmods):
+            verdicts.append(("none", []))  # an enum case: `case option(String)`
+        else:
+            verdicts.append(("miss", []))  # this overload's type has no such member
+    found = list({(v[0], tuple(g.id for g in v[1])): v for v in verdicts if v[0] in ("exact", "none")}.values())
+    if len(found) == 1 and all(v[0] in ("exact", "none", "miss") for v in verdicts):
+        return found[0]
+    if verdicts and all(v[0] == "lib" for v in verdicts):
+        return "none", []
+    return "?", []
+
+
+def _top_commas(text: str) -> list[int]:
+    """The positions of the commas at bracket depth 0."""
+    out, d = [], 0
+    for i, ch in enumerate(text):
+        d += ch in "([{"
+        d -= ch in ")]}"
+        if ch == "," and d == 0:
+            out.append(i)
+    return out
+
+
+def _params(sig: str) -> list[tuple[str, str]]:
+    """A Swift signature's parameters: (external label, type text)."""
+    a = sig.find("(")
+    if a < 0:
+        return []
+    d, b = 0, a
+    for b in range(a, len(sig)):
+        d += sig[b] in "(["
+        d -= sig[b] in ")]"
+        if d == 0:
+            break
+    body, out, last = sig[a + 1:b], [], 0
+    for cut in _top_commas(body) + [len(body)]:
+        p = body[last:cut].strip()
+        last = cut + 1
+        pm = re.match(r"(\w+)(?:\s+\w+)?\s*:\s*(?:inout\s+|@\w+\s+)*([^=]+)", p)
+        if pm:
+            out.append((pm.group(1), pm.group(2).strip().removesuffix("...")))  # (variadic `T...`: each a T)
+    return out
+
+
+from . import infer as infer_mod  # noqa: E402
+
+
+def _overload_starts(raw: list[str], g: Func) -> list[int]:
+    """The lines of every `func name(` in the type block `g` is in: overloads
+    share one Func (`add(name:value:)`, `add(_ header:)`)."""
+    def owner(i):  # the top-level declaration line i sits under
+        while i >= 0 and not re.match(r"(?:\w+\s+)*(?:struct|class|enum|extension|protocol|actor)\s", raw[i]):
+            i -= 1
+        return i
+    top = owner(g.start - 1)
+    pat = re.compile(r"\s*(?:@\w+\s+)*(?:\w+\s+)*func\s+" + re.escape(g.name) + r"\s*[(<]")
+    starts = [g.start]
+    if top < 0:
+        return starts
+    for i in range(top + 1, len(raw)):
+        if re.match(r"(?:\w+\s+)*(?:struct|class|enum|extension|protocol|actor)\s", raw[i]):
+            break
+        if i + 1 != g.start and pat.match(raw[i]):
+            starts.append(i + 1)
+    return starts
+
+
+def _param_type(project: Project, types, mod, text: str, k: int, label: str, index: int = 0,
+                f: Func | None = None, line_no: int = 0) -> str:
+    """The declared type of the parameter `label` (or the first, unlabelled
+    one) of the call whose `(` is at text[k]: `Element(value: .option(x))`,
+    `session.request(.status(401))`. "" when the callees disagree."""
+    callee = re.search(r"([A-Za-z_]\w*)\s*$", text[:k]) if k > 0 else None
+    if not callee:
+        return ""
+    name = callee.group(1)
+    prefix = text[:callee.start(1)]  # where the callee is: `text` ends on line `line_no`
+    callee_line = line_no - (text.count("\n") - prefix.count("\n"))
+    callee_col = len(prefix) - (prefix.rfind("\n") + 1)
+    if name == "init" and re.search(r"\b(?:self|Self|super)\s*\.\s*init\s*$", text[:k]):
+        own = types.own_class(mod, f) if f else None  # `self.init(base: .message(x))`: this type's own init
+        cands = [g for a in (types.ancestors(own[0]) if own else []) for g in project.modules[a].funcs if g.name == "init"]
+    elif name[:1].isupper():
+        tmods, ex, _ = types.type_modules(mod, name)
+        cands = [g for m_ in (tmods if ex else []) for a in types.ancestors(m_)
+                 for g in project.modules[a].funcs if g.name == "init"]
+    else:
+        cands = project.by_name.get(name, [])
+        # the callee through its own receiver: `session.request(` is Session's request
+        outer = next((c2 for c2 in (f.calls if f else []) if c2.line == callee_line and c2.name == name
+                      and c2.col == callee_col), None) if line_no else None
+        if outer is not None and outer.chain:
+            v = types.chain(mod, f, outer.chain)
+            if v is not None and not infer_mod.is_ext(v) and v[0] in ("inst", "static"):
+                cands = types.method(list(v[1]), name)[0] or cands
+        elif outer is not None and mod is not None:
+            own = types.own_class(mod, f)
+            hits = types.method(own, name)[0] if own else []
+            cands = hits or cands
+    found = set()
+    for g in cands[:12]:
+        gm = project.modules.get(g.module)
+        if gm is None:
+            continue
+        for start in _overload_starts(gm.raw, g):
+            sig = " ".join(gm.raw[start - 1:start + 6])
+            ps = _params(sig[sig.find(g.name):] if g.name in sig else sig)
+            hit = [t for lab, t in ps if lab == label] if label else ([ps[index][1]] if index < len(ps) and ps[index][0] == "_" else [])
+            if hit:
+                found.add(hit[0])
+    if not found and label and (name == "init" or name[:1].isupper()) and mod is not None:
+        # a struct's memberwise init (`Element(value: .option(x))`, `self.init(base: .message(t))`):
+        # the parameter is the stored property of that name
+        if name == "init":
+            owners = types.own_class(mod, f) if f else []
+        else:
+            tmods, ex, _ = types.type_modules(mod, name)
+            owners = tmods if ex else []
+        for o in owners or []:
+            for a in types.ancestors(o):
+                held = project.modules[a].bound.get(label, "")
+                if held.startswith("type:"):
+                    found.add(held[5:])
+                    break
+    return "|".join(sorted(found))  # (overloads: each parameter type; the member settles which)
+
+
+def _gd_declared(project: Project, types, mod, f: Func, chain: tuple) -> str:
+    """The engine class a GDScript receiver is declared as (`var x: Camera3D`),
+    or "" (untyped, or a project script's type)."""
+    if len(chain) == 1:
+        held = f.bound.get(chain[0]) or mod.bound.get(chain[0], "")
+    else:
+        v = types.chain(mod, f, chain[:-1])
+        if v is None or infer_mod.is_ext(v) or v[0] != "inst" or len(v[1]) != 1:
+            return ""
+        held = project.modules[v[1][0]].bound.get(chain[-1], "")
+    ty = held[5:] if held and held.startswith("type:") else ""
+    return ty if ty and ty not in project.modules and not project.short.get(ty) else ""
+
+
+def _gd_extends(project: Project, module: str, engine: str) -> bool:
+    """A script's `extends` chain reaches the engine class `engine`."""
+    seen = set()
+    m = project.modules.get(module)
+    while m is not None and m.name not in seen:
+        seen.add(m.name)
+        if m.parent == engine:
+            return True
+        m = project.modules.get(m.parent) if m.parent else None
+    return False
+
+
+def _swift_labels_match(project: Project, mod, c: Call, g: Func) -> bool:
+    """A Swift call's first argument label against `g`'s first parameter:
+    `append(contentsOf:)` is the library's, not the project's `append(optional:)`."""
+    if mod is None or not (0 < c.line <= len(mod.raw)):
+        return True
+    am = re.match(r"\s*\(\s*(?:(\w+)\s*:(?!:))?", mod.raw[c.line - 1][c.col + len(c.name):])
+    gm = project.modules.get(g.module)
+    ps = _params(" ".join(gm.raw[g.start - 1:g.start + 3])[" ".join(gm.raw[g.start - 1:g.start + 3]).find(g.name):]) if gm else []
+    if not am or not ps:
+        return True
+    want = am.group(1) or "_"
+    return ps[0][0] == want
+
+
+def _enum_case(m: Module, name: str) -> bool:
+    """`enum <m's type> { case name(...) }`: name is one of its cases (in the
+    enum's own body, not another type's in the same file)."""
+    if not m.decls:
+        return False
+    text = "\n".join(m.raw)
+    for em in re.finditer(r"\benum\s+" + re.escape(m.decls[0].split(".")[-1]) + r"\b[^{]*\{", text):
+        d, k = 1, em.end()
+        while k < len(text) and d:
+            d += text[k] == "{"
+            d -= text[k] == "}"
+            k += 1
+        body = text[em.end():k]
+        if re.search(r"\bcase\s+(?:[^\n]*,\s*)?" + re.escape(name) + r"\b", body):
+            return True
+    return False
+
+
+def _rs_crate_dir(project: Project, rel: str) -> str:
+    """The directory of the crate root a Rust file belongs to: the nearest ancestor
+    holding main.rs / lib.rs (an integration test binary's `tests/builder/main.rs`)."""
+    d = os.path.dirname(rel)
+    while d:
+        if f"{d}/main.rs" in project.by_file or f"{d}/lib.rs" in project.by_file:
+            return d + "/"
+        d = os.path.dirname(d)
+    return ""
+
+
+def _c_included(project: Project, rel: str) -> set:
+    """The .c files a C file `#include`s (a test that includes the unit it tests)."""
+    got, todo, seen = set(), [rel], {rel}
+    while todo:  # (through headers: a test's `common.h` includes `../cJSON.c`)
+        m = project.by_file.get(todo.pop())
+        for inc in (getattr(m[0], "c_includes", ()) if m else ()):
+            if inc not in project.by_file:
+                inc = next((r for r in project.by_file if r.endswith("/" + inc.rsplit("/", 1)[-1])), inc)
+            if inc in seen:
+                continue
+            seen.add(inc)
+            if inc.endswith(".c"):
+                got.add(inc)
+            todo.append(inc)
+    return got
+
+
+def _c_static(project: Project, g: Func) -> bool:
+    """A C function declared `static` (file-local)."""
+    m = project.modules.get(g.module)
+    if not m:
+        return False
+    head = " ".join(m.raw[max(0, g.start - 2):g.start])
+    return bool(re.search(r"\bstatic\b", head))
+
+
+def _is_static(project: Project, g: Func) -> bool:
+    """A function declared `static` / `class func` (callable as `.name(...)`)."""
+    m = project.modules.get(g.module)
+    line = m.raw[g.start - 1] if m and 0 < g.start <= len(m.raw) else ""
+    return bool(re.search(r"\b(?:static|class)\s+(?:func|var|let)\b", line))
+
+
+_PY_BUILTINS = set(dir(__import__("builtins")))
+_SELF = {"self", "this", "Self", "cls"}
+_CTOR_NAMES = {"init", "__init__", "constructor", "__construct", "initialize"}
+_RS_STD_METHODS = {
+    "unwrap", "expect", "unwrap_or", "unwrap_or_else", "unwrap_or_default", "unwrap_err", "is_none", "is_some",
+    "is_ok", "is_err", "ok", "err", "map_err", "ok_or", "ok_or_else", "and_then", "as_ref", "as_mut", "as_deref",
+    "clone", "cloned", "copied", "to_string", "to_owned", "into", "iter", "iter_mut", "into_iter", "collect",
+    "push", "push_str", "pop", "len", "is_empty", "as_bytes", "as_str", "as_slice", "to_vec", "extend", "borrow",
+    "borrow_mut", "lock", "take", "chars", "bytes", "trim", "split", "join", "starts_with", "ends_with",
+    "filter", "filter_map", "enumerate", "zip", "rev", "any", "all", "fold", "sum", "count", "last", "first",
+    "to_str", "to_path_buf", "display", "fmt", "eq", "cmp", "partial_cmp", "hash", "deref", "drop", "default",
+    # Option / Result / Iterator combinators (`.map(|v| v.as_str())` after `.get_one()`)
+    "map", "map_or", "map_or_else", "flat_map", "flatten", "skip", "skip_while", "take_while", "peekable",
+    "windows", "chunks", "position", "rposition", "max_by", "min_by", "max_by_key", "min_by_key", "sorted",
+    "unwrap_or_else", "is_some_and", "is_none_or", "inspect", "step_by", "cycle", "product", "partition",
+    "as_deref_mut", "transpose", "zip_with", "chars", "char_indices", "lines", "split_whitespace", "trim_end",
+    "trim_start", "to_lowercase", "to_uppercase", "to_ascii_lowercase", "repeat", "retain", "dedup", "truncate",
+}
+
+
+def _nothing(project: Project, f: Func, c) -> None:
+    """A call that reaches no project function. Counted apart when a project
+    function in the caller's language has that name: the share stats shows
+    so a resolver can't look better by turning guesses into nothing."""
+    project.__dict__.setdefault("_site_out", {})[(f.file, c.line, c.col, c.name)] = []
+    if not _first_count(project, f, c):
+        return
+    res = project.resolution[os.path.splitext(f.file)[1]]
+    res[2] += 1
+    fam = _family(f.file)
+    named = any(g.kind != "top" and fam & _family(g.file) for g in project.by_name.get(c.name, ()))
+    if named:
+        res[3] += 1
+        project.possible[c.name].append((f.id, c.line, c.targs))
+    if _TRACE is not None:
+        _TRACE.append((f.file, c.line, c.name, c.chain, "named" if named else "nothing", ()))
+
+
+def _first_count(project: Project, f: Func, c) -> bool:
+    """Whether this call site is counted now: a call inside a nested function
+    (a callback, a lambda) belongs to every enclosing function's calls, but
+    the resolution counters count each site once."""
+    seen = project.__dict__.setdefault("_counted", set())
+    key = (f.file, c.line, c.col, c.name)
+    if key in seen:
+        return False
+    seen.add(key)
+    return True
+
+
+# SEAMCHECK_TRACE=1: every call's outcome, for tuning a resolver (bench/trace.py)
+_TRACE: list | None = [] if os.environ.get("SEAMCHECK_TRACE") else None
+
+
+def _link(project: Project, precise: bool, use_cache: bool) -> None:
+    """The static call graph; in precise mode, language servers then settle
+    the calls it guessed, read from this build's trace (precise.py)."""
+    global _TRACE
+    if not precise:
+        _build_edges(project)
+        return
+    outer, _TRACE = _TRACE, []
+    try:
+        _build_edges(project)
+        trace = _TRACE
+    finally:
+        _TRACE = outer
+    if outer is not None:
+        outer.extend(trace)
+    from . import precise as precise_mod
+    precise_mod.refine(project, trace, use_cache)
+
+
+def _cs_static_usings(project: Project, mod) -> set:
+    """C#: the simple names of the types a file's bare calls may name through
+    `using static X;` (the file's own, `global using static`, and a .csproj's
+    `<Using Include="X" Static="true"/>`)."""
+    glob = project.__dict__.get("_cs_global_static")
+    if glob is None:
+        glob = project.__dict__["_cs_global_static"] = set()
+        for m in project.modules.values():
+            if m.file.endswith(".cs") and not m.owner:
+                glob.update(x.rsplit(".", 1)[-1] for x in re.findall(r"^[ \t]*global[ \t]+using[ \t]+static[ \t]+([\w.]+)", "\n".join(m.code), re.M))
+        for dirpath, dirs, files in os.walk(project.root):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("node_modules", "bin", "obj")]
+            for fn in files:
+                if fn.endswith((".csproj", ".props")):
+                    try:
+                        with open(os.path.join(dirpath, fn), encoding="utf-8", errors="replace") as fh:
+                            glob.update(x.rsplit(".", 1)[-1] for x in re.findall(
+                                r"<Using\s+Include=\"([\w.]+)\"\s+Static=\"[Tt]rue\"", fh.read()))
+                    except OSError:
+                        pass
+    fm = project.modules.get(mod.owner, mod) if mod.owner else mod
+    own = {x.rsplit(".", 1)[-1] for x in re.findall(r"^[ \t]*using[ \t]+static[ \t]+([\w.]+)", "\n".join(fm.code), re.M)}
+    return glob | own
+
+
+def _js_plain_function(project: Project, g: Func) -> bool:
+    """A JS/TS function declared on its own (`function close(s) {`, `const close = (s) =>`),
+    not a class or object member, and never stored as a property or exported
+    under its name in an object (`{ close }`, `x.close = close`)."""
+    m = project.modules.get(g.module)
+    if m is None or not 0 < g.start <= len(m.raw):
+        return False
+    if not re.match(rf"^\s*(?:export\s+)?(?:default\s+)?(?:return\s+)?(?:async\s+)?(?:function\s*\*?\s*{re.escape(g.name)}\s*[(<]|"
+                    rf"(?:const|let|var)\s+{re.escape(g.name)}\s*=)", m.raw[g.start - 1]):
+        return False
+    if (m.owner or m.kind) and not any(h is not g and h.kind != "top" and h.start < g.start <= h.end
+                                        for h in m.funcs):
+        return False  # (a class's member; a `function setHeader(...)` inside one of its methods is a plain local)
+    stored = project.__dict__.setdefault("_js_stored_names", {})
+    if m.name not in stored:  # names this file hands on as properties / object members / exports
+        text = "\n".join(m.code)
+        stored[m.name] = set(re.findall(r"[{,]\s*([A-Za-z_$][\w$]*)\s*(?=[,}])", text)) | \
+            set(re.findall(r"[.\w$\]]\s*=\s*([A-Za-z_$][\w$]*)\s*[;\n]", text)) | \
+            set(re.findall(r":\s*([A-Za-z_$][\w$]*)\s*[,}\n]", text))
+    return g.name not in stored[m.name]
+
+
+def _js_member_assigned(project: Project, g: Func) -> bool:
+    """`inst.validate = (...) => ...` inside a function: a property of that object, not a
+    name in the module (a CommonJS `exports.x = ...` / `module.exports.x = ...` is one)."""
+    m = project.modules.get(g.module)
+    return bool(m is not None and g.file.endswith(_JS_FILE_EXTS) and 0 < g.start <= len(m.raw)
+                and _js_property_fn(project, g)
+                and not re.match(r"\s*(?:module\.)?exports\.", m.raw[g.start - 1]))
+
+
+def _js_class_member(project: Project, g: Func) -> bool:
+    """A method of the class a JS / TS file is named for (`doc.ts`'s `class Doc { compile() }`):
+    `export * from "./doc.js"` hands on `Doc`, not its methods."""
+    m = project.modules.get(g.module)
+    return bool(m is not None and m.kind == "class" and not m.owner and g.file.endswith(_JS_FILE_EXTS)
+                and 0 < g.start <= len(m.raw) and m.raw[g.start - 1][:1] in " \t")
+
+
+def _js_call_arg_member(project: Project, g: Func) -> bool:
+    """A JS method of an object literal handed to a call (`buildURL(url, params, {
+    encode(v) {...} })`, `$constructor("ZodType", init, { parse(d) {...} })`): a member
+    of that object, never a name in the module's scope."""
+    if not g.file.endswith(_JS_FILE_EXTS):
+        return False
+    cache = project.__dict__.setdefault("_js_arg_members", {})
+    if g.id not in cache:
+        m = project.modules.get(g.module)
+        got = False
+        if m is not None and not m.owner and not m.kind and 0 < g.start <= len(m.raw) and re.match(
+                rf"\s+(?:async\s+)?\*?\s*{re.escape(g.name)}\s*(?:\(|:\s*(?:async\s+)?function\b)", m.raw[g.start - 1]):
+            text = "\n".join(m.code[:g.start - 1])
+            depth, k = 0, len(text) - 1
+            while k >= 0:  # back to the object literal's own `{`
+                ch = text[k]
+                if ch in ")]}":
+                    depth += 1
+                elif ch in "([{":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                k -= 1
+            before = text[:k].rstrip() if k >= 0 and text[k] == "{" else ""
+            got = before.endswith((",", "("))
+        cache[g.id] = got
+    return cache[g.id]
+
+
+def _js_scoped_patch(project: Project, g: Func, caller: Func) -> bool:
+    """`Object.prototype.on = function () {` inside a test's body (a prototype-pollution
+    check): a builtin's prototype patched while that function runs, out of reach of
+    calls made anywhere else."""
+    m = project.modules.get(g.module)
+    if m is None or not 0 < g.start <= len(m.raw) or not re.match(
+            rf"^\s*(?:Object|Array|String|Function|Number|Boolean)\.prototype\.{re.escape(g.name)}\s*=", m.raw[g.start - 1]):
+        return False
+    around = [h for h in project.funcs.values() if h.file == g.file and h.kind != "top" and h is not g
+              and h.start < g.start <= h.end]
+    return bool(around) and not any(caller.file == h.file and h.start <= caller.start and caller.end <= h.end
+                                    for h in around)
+
+
+def _js_property_fn(project: Project, g: Func) -> bool:
+    """A JS function stored as a property (`req.setTimeout = () => {}`): never called bare."""
+    m = project.modules.get(g.module)
+    return bool(m and 0 < g.start <= len(m.raw) and g.file.endswith((".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"))
+                and re.match(rf"^\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.{re.escape(g.name)}\s*=", m.raw[g.start - 1]))
+
+
+def walk_order(project: Project) -> list[Func]:
+    """The order calls are resolved in (and the trace written): innermost
+    function first, so a call in a callback or a nested class's method is
+    counted where it is made, with that function's `this` and locals."""
+    return sorted(project.funcs.values(), key=lambda g: g.end - g.start)
 
 
 def _build_edges(project: Project) -> None:
     _resolve_imports(project)
     _locals_cache.clear()
+    _MODULE_JS.clear()
     groups = _groups(project)
     scope_cache: dict = {}
     ext_cache: dict = {}
@@ -646,35 +2049,228 @@ def _build_edges(project: Project) -> None:
     # MapPrefs.kt, or the one declaring `object MapPrefs`.
     for m in project.modules.values():
         stem = os.path.splitext(os.path.basename(m.file))[0]
-        for nm in {stem, *m.decls}:
+        for nm in ({*m.decls} if m.owner else {stem, *m.decls}):  # a Python class is named by its class, not its file
             if m.name not in project.short[nm]:
                 project.short[nm].append(m.name)
     # C++: a class's members are declared in its header; the .cpp's functions
     # use them (`m_board->indexOf()`): the header's fields count for the .cpp.
     for rel, mods in project.by_file.items():
         stem, ext = os.path.splitext(rel)
-        if ext in (".cpp", ".cc", ".cxx") and mods:
+        im_ = re.match(r"(.+?)[-_](?:inl|impl)$", stem) if ext in (".h", ".hpp", ".hh") else None
+        if im_ or ext in (".inl", ".ipp", ".tpp"):  # `logger-inl.h`, `format.inl`: a header's out-of-line definitions
+            stem, ext = (im_.group(1) if im_ else stem), ".cpp"
+        if ext in (".cpp", ".cc", ".cxx", ".c") and mods:
             for hext in (".h", ".hpp", ".hh"):
                 for hm in project.by_file.get(stem + hext, []):
                     for k, v in hm.bound.items():
                         mods[0].bound.setdefault(k, v)
-    # every module's descendants (for overrides)
+    # supertypes as modules, then every module's descendants (for overrides
+    # and for an interface's implementations)
+    from . import infer
+    infer.resolve_bases(project)
+    types = infer.Types(project)
+    pending: list = []
+    pending_recv: list = []
+    site_out = project.__dict__["_site_out"] = {}  # a call site's callees, once resolved
     for m in project.modules.values():
-        seen, cur = set(), m.parent
-        while cur and cur not in seen:
-            seen.add(cur)
-            project.children[cur].append(m.name)
-            par = project.modules.get(cur)
-            cur = par.parent if par else ""
-    for f in project.funcs.values():
+        for a in types.ancestors(m.name)[1:]:
+            project.children[a].append(m.name)
+    for f in walk_order(project):
         mod = project.modules.get(f.module)
         for c in f.calls:
+            done = site_out.get((f.file, c.line, c.col, c.name))
+            if done is not None:
+                # a call inside a nested function (a callback, an object literal's method) was
+                # resolved there, with that function's parameters and locals: the enclosing
+                # functions reach the same callees
+                for tid, exact in done:
+                    project.edges[f.id].append((tid, c.line, exact))
+                    project.redges[tid].append((f.id, c.line, exact))
+                continue
             targets: list[tuple[Func, bool]] = []
+            recv: tuple = ()  # the receiver's type, when known: overrides only in its subtypes run
             q = c.qual
-            if q == "super" and mod:
+            if c.chain == ("<implicit>",):
+                # `.option(x)` / `case .value(let v)`: an enum case or a static member of the
+                # type the context expects. A pattern runs nothing; with the expected type
+                # known, that type's static function (or its enum case: nothing); else a
+                # guess among the project's static functions of that name
+                kind_, got = _implicit_member(project, types, mod, f, c)
+                if kind_ == "none":
+                    _nothing(project, f, c)
+                    continue
+                if kind_ == "exact":
+                    targets = [(g, True) for g in got]
+                else:
+                    stat = [g for g in project.by_name.get(c.name, []) if _is_static(project, g)]
+                    if not stat:
+                        _nothing(project, f, c)
+                        continue
+                    targets = [(g, False) for g in stat]
+            elif c.chain and mod and f.file.endswith(_C_FAMILY) and _cpp_namespace_call(project, f, c, targets):
+                if not targets:
+                    _nothing(project, f, c)  # `std::move(x)`: the standard library's
+                    continue
+            elif c.chain and mod:
+                # the receiver's type, step by step (see infer.py)
+                types.line = c.line
+                v = types.chain(mod, f, c.chain)
+                if v is not None and v[0] == "wrap":
+                    v = infer.EXT  # `self.bump().map(...)`: Option's own method
+                if infer.is_ext(v):
+                    # a library value; a Kotlin / C# / Swift extension the project
+                    # declares on that library type is the one exception
+                    exts = (types.ext_fns.get((v[1][0], c.name), []) or
+                            types.ext_fns.get((v[1][0].split("`")[0], c.name), [])) if v[1] else []
+                    if not exts and v[1] and f.file.endswith(".cs"):
+                        # `connection.Execute(...)` on a DbConnection with Dapper's `Execute(this IDbConnection cnn)`:
+                        # a library interface the value's library class implements, by .NET's naming
+                        # (IDbConnection / DbConnection, SqlConnection; IDataReader / DbDataReader)
+                        last = re.findall(r"[A-Z][a-z0-9]*", v[1][0].split("`")[0])[-1:]
+                        cand = [g for (rt, nm), gs in types.ext_fns.items() if nm == c.name and rt.split("`")[0] not in types.by_type
+                                and re.match(r"I[A-Z]", rt) and re.findall(r"[A-Z][a-z0-9]*", rt.split("`")[0])[-1:] == last
+                                for g in gs]
+                        if cand and last and types.one_type(cand):
+                            exts = cand
+                    if not exts and v[1] and f.file.endswith(".swift"):
+                        # `sample.wrapped(to:)` on a String: an extension of a protocol String conforms to
+                        exts = next((types.ext_fns[(pr, c.name)] for pr in _SWIFT_CONFORMS.get(v[1][0], ())
+                                     if (pr, c.name) in types.ext_fns), [])
+                    if exts and f.file.endswith(".swift"):
+                        exts = [g for g in exts if _swift_labels_match(project, mod, c, g)]
+                    own = [g for g in exts if g.file == f.file]
+                    exts = own if len(own) == 1 else exts
+                    if not exts:
+                        _nothing(project, f, c)
+                        continue
+                    targets = [(g, len(exts) == 1) for g in exts]
+                    v = None
+                if v is not None and v[0] == "static" and len(v[1]) > 1 and f.file.endswith(".rs"):
+                    root_ = _rs_crate_dir(project, f.file)  # (each test binary's own `mod utils`)
+                    own_ = tuple(mn for mn in v[1] if project.modules[mn].file.startswith(root_)) if root_ else ()
+                    if len(own_) == 1:
+                        v = ("static", own_, True)
+                if v is not None and v[0] in ("static", "inst") and f.file.endswith(infer._JS_EXTS):
+                    v = types.forward(mod, v, c.name) or v  # `ctx.redirect()`: delegated to ctx.response
+                if v is not None:
+                    kind, mods_, ex = v
+                    if kind == "ns":
+                        hits, on_type = [], True
+                    elif kind == "pkg":
+                        hits, on_type = _in_scope(project, "pkg:" + mods_[0], c.name), True
+                    elif kind == "static":
+                        hits = [h for mn in mods_ for h in _in_scope(project, mn, c.name)]
+                        on_type = True
+                        if not hits and f.file.endswith(infer._JS_EXTS) and (g_ := types.func_ref(mods_, c.name)) is not None:
+                            hits = [g_]  # `z.string()` with `export { stringType as string }`, `stringType = ZodString.create`
+                        if not hits and f.file.endswith(infer._JS_EXTS) and (g_ := types.expando_fn(mods_, c.name)) is not None:
+                            hits = [g_]  # `validators.transitional()`: `validators.transitional = function transitional(...)`
+                        if not hits:
+                            hits, on_type = types.method(list(mods_), c.name, _argc(mod, c))
+                    else:
+                        hits, on_type = types.method(list(mods_), c.name, _argc(mod, c))
+                        if not hits and kind == "inst" and f.file.endswith(infer._JS_EXTS) and \
+                                (g_ := types.expando_fn(mods_, c.name)) is not None:
+                            hits, on_type = [g_], True  # `axios.create()`: `instance.create = function create(...)`
+                        if kind == "inst":  # (`super.x()` runs the parent's x itself: no subtype's)
+                            recv = ("\0super",) if c.chain[-1] in ("super", "base", "parent") else tuple(mods_)
+                    if len(hits) > 1 and c.targs >= 0:  # C#: `NoOp()` is not `NoOp<T>()`
+                        hits = [h for h in hits if not h.targs or str(c.targs) in h.targs.split(",")] or hits
+                    if hits:
+                        # on the type: one definition (or one type's overloads); through an
+                        # interface: each implementation runs. Several same-named types and
+                        # only one has the method: the receiver's name settles it.
+                        sure = (ex and (len(hits) == 1 or not on_type or types.one_type(hits))) or \
+                            (on_type and types.one_type(hits))
+                        targets = [(h, sure) for h in hits]
+                    elif kind != "pkg" and any(types.external_base(mn) for mn in mods_):
+                        _nothing(project, f, c)  # inherited from a library supertype
+                        continue
+                    elif kind == "inst" and mods_ and f.file.endswith(infer._JS_EXTS) and any(
+                            project.modules[a].kind == "interface" and c.name in project.modules[a].methods
+                            for mn in mods_ for a in types.ancestors(mn)):
+                        _nothing(project, f, c)  # a TS type's member no project class implements: an object's, unknown
+                        continue
+                    elif kind == "inst" and mods_ and all(project.modules[mn].kind == "interface" and (
+                            project.modules[mn].file.endswith(".d.ts") and not types._es_module(project.modules[mn].file)
+                            or (project.modules[mn].decls or [""])[0] in _DOM_GLOBALS) for mn in mods_):
+                        _nothing(project, f, c)  # `interface CanvasRenderingContext2D {...}` in global.d.ts adds to the DOM's
+                        continue
+                    elif kind == "inst" and mods_ and all(project.modules[mn].kind == "ext" for mn in mods_) and \
+                            f.file.endswith((".swift", ".kt", ".kts", ".cs")):
+                        _nothing(project, f, c)  # `Data` the project only extends: a method not in an extension is the library's
+                        continue
+            if not q and mod and not targets and f.file.endswith(infer._JS_EXTS[:-1]) and c.name in f.bound \
+                    and f.bound[c.name].startswith("lam:"):
+                types.line = c.line
+                if infer.is_ext(types.first(mod, f, c.name, 0)):
+                    _nothing(project, f, c)  # `new Promise((resolve) => resolve(x))`: the runtime's function
+                    continue
+            if not q and mod and not f.file.endswith((".py", ".ex", ".exs")) and not targets:
+                # a bare call in a class: its own (or an inherited) method first;
+                # `Foo(...)` / `new Foo(...)` / `: Base(args)`: Foo's constructor
+                own = types.own_class(mod, f) if (mod.owner or mod.kind) else None
+                # (Go, Rust, JS/TS, PHP: a method needs its receiver, `c.Name()` / `self.x()` /
+                # `this.x()` / `$this->x()`; a bare `MarkFlagRequired(...)` in a method is the package's)
+                hits, on_type = types.method(own, c.name) if own else ([], False)
+                if f.file.endswith(_EXPLICIT_RECEIVER):
+                    hits = [g for g in hits if not _needs_receiver(project, g)]
+                if hits and on_type and len(hits) == 1:
+                    targets = [(hits[0], True)]
+                elif c.name[:1].isupper() and not _in_scope(project, (project.modules.get(mod.owner, mod) if mod.owner else mod).name, c.name):
+                    tmods, ex, declared = types.type_modules(mod, c.name)
+                    fm_i = project.modules.get(mod.owner, mod) if mod.owner else mod
+                    if not declared and f.file.endswith(infer._JS_EXTS) and c.name in fm_i.imported:
+                        dm_ = _defining_module(project, *fm_i.imported[c.name])  # `const Koa = require('..')`; `new Koa()`
+                        if dm_ and (project.modules[dm_].decls or project.modules[dm_].kind == "class"):
+                            tmods, ex, declared = [dm_], True, True
+                    if declared and not _is_test_file(project, f.file):
+                        # product code never builds a test's type (a test target's `extension URL`)
+                        tmods = [m for m in tmods if not _is_test_file(project, project.modules[m].file)]
+                        declared = bool(tmods)
+                    if declared:
+                        ctor, _ = types.method([m for m in tmods if types.searchable(m) or project.modules[m].kind],
+                                               c.name) if tmods else ([], False)
+                        ctor = [g for g in ctor if g.name == c.name] or [
+                            g for m in tmods for n in ("constructor", "init", "__construct", "new")
+                            if (g := project.funcs.get(f"{m}.{n}"))][:1]
+                        ctor = list({g.id: g for g in ctor}.values())
+                        if ctor:
+                            targets = [(g, ex and (len(ctor) == 1 or types.one_type(ctor))) for g in ctor]
+                        else:
+                            _nothing(project, f, c)  # a project type with no constructor of its own: no function runs
+                            continue
+                if not targets and own and not hits and any(types.external_base(m) for m in own) and \
+                        not _in_scope(project, (project.modules.get(mod.owner, mod) if mod.owner else mod).name, c.name):
+                    # inherited from a library supertype (Qt's `disconnect`, `data`)
+                    _nothing(project, f, c)
+                    continue
+            if targets:
+                pass
+            elif q == "super" and mod and mod.parent:
                 t = _lookup(project, mod.parent, c.name)
                 if t:
                     targets = [(t, True)]
+            elif q == "super" and mod and f.file.endswith((".rb", ".rake", ".ru")):
+                # Ruby's `super`: the same method in the nearest ancestor (superclass, included modules)
+                own = types.own_class(mod, f)
+                for a in (types.ancestors(own[0])[1:] if own else []):
+                    t = project.funcs.get(f"{a}.{c.name}")
+                    if t is not None and t.id != f.id:
+                        targets = [(t, True)]
+                        break
+                else:
+                    if own and types.external_base(own[0]):
+                        _nothing(project, f, c)  # a library superclass's
+                        continue
+            elif q and mod and q in _SELF and (t := _lookup(project, mod.name, c.name)) and (q != "cls" or mod.owner):
+                # `self.x()` / `this.x()` / `Self::x()`: the caller's own class
+                # (a Python class is its own module; elsewhere, the file)
+                targets = [(t, True)]
+            elif q and mod and q in mod.external and q not in f.bound:
+                # `json.dumps()`, `fmt.Println()`, `path.join()`: a library the file imports
+                _nothing(project, f, c)
+                continue
             elif q:
                 # Each way to name the qualifier, most certain first; a miss falls
                 # through to the next (an elif chain sent a missed alias straight to
@@ -697,15 +2293,21 @@ def _build_edges(project: Project) -> None:
                         hits = own  # a file's own (private) extension shadows the others'
                     if hits:
                         targets = [(t, len(hits) == 1) for t in hits]
-                    elif not in_project:
-                        project.resolution[os.path.splitext(f.file)[1]][2] += 1
+                    elif not in_project and not (f.file.endswith(infer._DYNAMIC) and held[5:] in types.extended):
+                        _nothing(project, f, c)  # (`n: Node` in GDScript may hold a project script: not this)
                         continue
                 if not targets and mod and q in mod.aliases:
-                    t = _lookup(project, mod.aliases[q], c.name)
-                    if t:
-                        targets = [(t, True)]
+                    hits = _in_scope(project, mod.aliases[q], c.name)  # (through a package's re-exports)
+                    if len(hits) == 1:
+                        targets = [(hits[0], True)]
                 if not targets and q in project.modules:
                     t = _lookup(project, q, c.name)
+                    if t:
+                        targets = [(t, True)]
+                if not targets and mod and q in mod.imported:
+                    # a named import (`import { API } from "./helpers"`): its module's function
+                    dm = _defining_module(project, *mod.imported[q])
+                    t = _lookup(project, dm, c.name) if dm else None
                     if t:
                         targets = [(t, True)]
                 if not targets:
@@ -715,43 +2317,164 @@ def _build_edges(project: Project) -> None:
                         if hits:
                             targets = [(t, len(hits) == 1) for t in hits]
                             break
+            elif not q and mod and f.file.endswith(".py") and f.kind != "top" and re.search(
+                    rf"^[ \t]+(?:from[ \t]+[\w.]+[ \t]+)?import[ \t][^\n]*(?:(?<![\w.]){re.escape(c.name)}\b(?![ \t]+as\b)|\bas[ \t]+{re.escape(c.name)}\b)",
+                    f.code, re.M) and c.name in project.modules.get(mod.owner, mod).imported:
+                # `from ._termui_impl import get_pager_file` inside the function: that one, not the
+                # module's own function of the same name (Python scoping: the local binding wins)
+                w_, n_ = project.modules.get(mod.owner, mod).imported[c.name]
+                hits = _in_scope(project, w_, n_)
+                if len(hits) == 1:
+                    targets = [(hits[0], True)]
+                else:
+                    _nothing(project, f, c)
+                    continue
             elif not q and mod and _shadowed(f, c.name):
                 # a parameter or local holding a function: the helper the
                 # caller itself defines (`const nudge = () => ...` inside a
                 # component) when there is one, else a name guess at most
                 inner = [g for g in project.by_name.get(c.name, []) if g.file == f.file
-                         and f.start <= g.start <= f.end and g.id != f.id]
+                         and f.start <= g.start <= f.end and g.id != f.id
+                         and not (mod and re.match(rf"^\s*{re.escape(c.name)}\s*:", mod.raw[g.start - 1]))]  # (not `key: () =>`)
                 if len(inner) == 1:
                     targets = [(inner[0], True)]
+                elif not inner and _scoped_language(f.file, mod):
+                    if f.file.endswith(_PARAM_FLOW_EXTS) and c.name in _param_names(f):
+                        pending.append((f, c))  # a parameter: what the callers pass (after this pass)
+                    _nothing(project, f, c)  # a closure or a parameter: no project function by that name
+                    continue
             elif not q and mod:
                 # own module, then a name imported by itself, then modules and
-                # packages imported whole, then the rest of its own package
-                hits = _in_scope(project, mod.name, c.name)
-                if not hits and c.name in mod.imported:
-                    w, n = mod.imported[c.name]
+                # packages imported whole, then the rest of its own package.
+                # (A bare name in a Python method means the file's, not the class's.)
+                smod = project.modules.get(mod.owner, mod) if mod.owner else mod
+                hits = _in_scope(project, smod.name, c.name)
+                if not hits and c.name in smod.imported:
+                    w, n = smod.imported[c.name]
                     hits = _in_scope(project, w, n)
-                for w in ([] if hits else mod.uses):
+                for w in ([] if hits else smod.uses):
                     hits = _in_scope(project, w, c.name)
                     if hits:
                         break
-                if not hits and mod.package:
-                    hits = _in_scope(project, "pkg:" + mod.package, c.name)
-                targets = [(t, len(hits) == 1) for t in hits]
-                if not targets and _scoped_language(f.file) and c.name not in mod.imported:
+                if not hits and smod.package:
+                    hits = _in_scope(project, "pkg:" + smod.package, c.name)
+                if not hits and f.file.endswith(".py"):
+                    # `Foo(...)` builds a Foo: its __init__
+                    cls = _py_class(project, mod, c.name)
+                    t = _lookup(project, cls, "__init__") if cls else None
+                    if t:
+                        hits = [t]
+                    elif cls:
+                        _nothing(project, f, c)  # a project class with no __init__ of its own: no function runs
+                        continue
+                # Go: two functions of one name in one package are build variants
+                # (`_windows.go` / `_unix.go`): the call reaches whichever is built
+                variants = f.file.endswith(".go") and len({t.module for t in hits}) == len(hits) and \
+                    len({(project.modules[t.module].owner or t.module) and project.modules.get(project.modules[t.module].owner or t.module, project.modules[t.module]).package for t in hits}) == 1
+                hits = list({t.id: t for t in hits}.values())  # (overloads share an id: one function)
+                targets = [(t, len(hits) == 1 or variants or types.one_type(hits)) for t in hits]
+                if not targets and c.name in mod.external:
+                    _nothing(project, f, c)
+                    continue
+                if not targets and _scoped_language(f.file, mod) and c.name not in mod.imported:
                     # Elixir, Kotlin, Java, an ES module: a bare call reaches only
                     # what is local, imported or in its package. Nothing in scope
                     # means a library or the language's own (Enum, Compose's Row,
                     # vitest's expect, ConnTest's post): not a guess at every
                     # project function of that name.
-                    project.resolution[os.path.splitext(f.file)[1]][2] += 1
+                    _nothing(project, f, c)
                     continue
+            if not targets and q and f.file.endswith(".py") and c.name[:1].isupper() and mod is not None \
+                    and (cls := _py_class(project, mod, f"{q}.{c.name}")):
+                # `sessions.Session()`: a class through its module builds one, so its __init__ runs
+                t = _lookup(project, cls, "__init__")
+                if t is None:
+                    _nothing(project, f, c)  # (a class with no __init__ of its own: no project function runs)
+                    continue
+                targets = [(t, True)]
             if not targets and q and _MODULE_Q.match(q) and q != "Self":
                 # A qualifier that names a module (`Enum.reject`, `Repo.rollback`)
                 # and misses: the function lives outside the project (or the alias
                 # is wrong). Nothing, not a guess: `Enum.reject` used to land on
                 # every project function named reject.
-                res = project.resolution[os.path.splitext(f.file)[1]]
-                res[2] += 1
+                _nothing(project, f, c)
+                continue
+            if not targets and c.chain and f.file.endswith(".rs") and all(re.fullmatch(r"[a-z_]\w*", s_) for s_ in c.chain):
+                # `utils::assert_output(...)` in an integration test: the `mod utils` of the
+                # caller's own crate root (tests/builder/main.rs has its utils.rs, tests/derive another)
+                path_ = "/".join(c.chain)
+                root_ = _rs_crate_dir(project, f.file)
+                mine = [g for g in project.by_name.get(c.name, []) if g.file.startswith(root_)
+                        and (g.file[:-3].endswith("/" + path_) or g.file.endswith("/" + path_ + "/mod.rs"))]
+                if len({g.file for g in mine}) == 1:
+                    targets = [(mine[0], True)]
+            if not targets and q and (c.name == "GetType" and f.file.endswith(".cs") or
+                                      c.name == "getClass" and f.file.endswith((".java", ".kt", ".kts"))):
+                _nothing(project, f, c)  # `o.GetType()`: System.Object's, non-virtual (no project override exists)
+                continue
+            if not targets and q and c.name in _RS_STD_METHODS and f.file.endswith(".rs"):
+                # `.unwrap()`, `.len()`, `.push()` on a receiver of unknown type:
+                # Option / Result / Vec / String, not a project function of that name
+                _nothing(project, f, c)
+                continue
+            if not targets and not q and (f.file.endswith((".c", ".h")) or f.file.endswith(_CPP_EXTS) and any(
+                    g.file.endswith((".c", ".h")) for g in project.by_name.get(c.name, ()))):
+                # (a C++ file calling the project's C functions: the same linker rule)
+                # C: no imports, the linker's rule. A `static` function is its file's;
+                # any other is global to the program: the call reaches the file's own
+                # definition, else the project's one non-static definition of that name
+                cfuncs = [g for g in project.by_name.get(c.name, []) if g.kind != "top" and g.file.endswith((".c", ".h"))]
+                inc_c = _c_included(project, f.file)  # (`#include "../cJSON.c"`: its statics are this file's too)
+                own = [g for g in cfuncs if g.file == f.file or g.file == os.path.splitext(f.file)[0] + ".h"] or \
+                    [g for g in cfuncs if g.file in inc_c]
+                glob_ = [g for g in cfuncs if not _c_static(project, g) or g.file.endswith(".h")]  # (a header's static inline: its includers')
+                if own:
+                    targets = [(g, True) for g in own[:1]]
+                elif len({g.file for g in glob_}) == 1 and glob_:
+                    targets = [(glob_[0], True)]
+                elif not cfuncs:
+                    # libc, a library's, or a macro: a project macro (`JV_ARRAY(a, b)`) runs the
+                    # functions its body calls, resolved by the same rule
+                    for g in _c_macro_targets(project, f.file, c.name):
+                        project.edges[f.id].append((g.id, c.line, True))
+                        project.redges[g.id].append((f.id, c.line, True))
+                    _nothing(project, f, c)
+                    continue
+            if not targets and not q and not c.chain and mod is not None and f.file.endswith(".cs") and c.name[:1].isupper():
+                # C# has no free functions: a bare call is the enclosing classes' (or their bases'),
+                # or a `using static` type's (`Call(...)`, `Default(...)`: System.Linq.Expressions.Expression's)
+                statics = _cs_static_usings(project, mod)
+                scope, o = set(), mod.name
+                while o in project.modules:
+                    scope.update(types.ancestors(o))
+                    if not project.modules[o].owner:
+                        break
+                    o = o.rsplit(".", 1)[0]
+                cands_ = [g for g in project.by_name.get(c.name, ()) if g.file.endswith(".cs") and g.kind != "top"]
+                if cands_ and not any(g.module in scope or (project.modules[g.module].decls and
+                                                            project.modules[g.module].decls[0].split("`")[0] in statics)
+                                      for g in cands_) and c.name not in {m_.decls[0].split("`")[0] for m_ in
+                                                                          (project.modules[g.module] for g in cands_) if m_.decls}:
+                    _nothing(project, f, c)
+                    continue
+            if not targets and not q and not c.chain and mod is not None and f.file.endswith((".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh")):
+                cands_ = [g for g in project.by_name.get(c.name, ()) if g.kind != "top" and _family(g.file) & _family(f.file)]
+                own_ = {mod.name, mod.owner}
+                if cands_ and all(g.file != f.file and g.file.endswith((".cpp", ".cc", ".cxx")) and (
+                        (g.ns and not (f.ns == g.ns or f.ns.startswith(g.ns + "::") or g.ns.startswith(f.ns + "::") and f.ns))
+                        or (project.modules[g.module].owner and g.module not in own_)) for g in cands_):
+                    _nothing(project, f, c)  # `fclose(f)`: libc's; a `test::fclose` in another .cc isn't visible here
+                    continue
+            if not targets and q and c.chain and mod is not None and f.file.endswith(infer._JS_EXTS[:-1]):
+                cands_ = [g for g in project.by_name.get(c.name, ()) if g.kind != "top" and _family(g.file) & _family(f.file)]
+                if cands_ and all(_js_plain_function(project, g) for g in cands_):
+                    _nothing(project, f, c)  # `server.close()`: no `function close(server)` declaration is a method
+                    continue
+            if not targets and not q and not c.chain and mod is not None and f.file.endswith(infer._JS_EXTS) and not any(
+                    g.kind != "top" and _family(g.file) & _family(f.file) and not project.modules[g.module].owner
+                    and project.modules[g.module].kind not in ("class", "interface") and not _js_property_fn(project, g)
+                    for g in project.by_name.get(c.name, ())):
+                _nothing(project, f, c)  # `setTimeout(...)`: a JS method needs its receiver; no free function has the name
                 continue
             if not targets:
                 # A method on some object, or an import we can't see: every
@@ -760,6 +2483,16 @@ def _build_edges(project: Project) -> None:
                 in_test = _is_test_file(project, f.file)
                 cands = [g for g in project.by_name.get(c.name, []) if g.kind != "top" and fam & _family(g.file)
                          and (in_test or not _is_test_file(project, g.file))]  # product code never calls a test
+                if f.file.endswith(".cs") and c.targs > 0:  # `multi.Read<int>()` takes a method with one type parameter
+                    cands = [g for g in cands if not g.targs or str(c.targs) in g.targs.split(",")]
+                vague = len(cands) > 8  # (a very common name, before the ones out of reach are dropped)
+                if f.file.endswith(_JS_FILE_EXTS):
+                    cands = [g for g in cands if not _js_scoped_patch(project, g, f)]
+                if in_test and f.file.endswith(_JS_FILE_EXTS):
+                    # a JS test file no module imports keeps its own functions (`on()` of one test's
+                    # mock socket): another file can't be handed them
+                    cands = [g for g in cands if g.file == f.file or not _is_test_file(project, g.file)
+                             or g.file in _js_imported_files(project)]
                 if q and mod and 0 < c.line <= len(mod.raw) and f"{q}::{c.name}" in mod.raw[c.line - 1]:
                     # `veridian::api::parseClaim(...)`: the namespace names where it lives
                     named = [g for g in cands if f"/{q}/" in "/" + g.file or g.module.split("::")[-1] == q
@@ -774,9 +2507,32 @@ def _build_edges(project: Project) -> None:
                 # the file imports or shares a package with: that is the one.
                 seen_mods = _scope(project, mod, scope_cache) if mod and not _shadowed(f, c.name) else set()
                 mine = [g for g in cands if g.module in seen_mods]
-                own = [g for g in cands if g.file == f.file and g.recv]
+                if f.file.endswith(".py"):
+                    # x.f() reaches a module-level Python function only through
+                    # the module's own name (resolved above), never `session.get()`
+                    mine = [g for g in mine if project.modules[g.module].owner]
+                if q:
+                    # an untyped receiver can hold anything: a name only one module in scope
+                    # has is no proof (`res.json()` on a fetch Response is not Context.json,
+                    # `@app.call` not Logger#call); the receiver's type is what settles it
+                    mine = []
+                own = [g for g in cands if g.file == f.file and g.recv] if not f.file.endswith((".cs", ".go")) else []
+                # (Go: a method's receiver is no extension; `err[i].Error()` on an `error` isn't this file's Error)
+                fm_ = project.modules.get(mod.owner, mod) if mod and mod.owner else mod
+                if not targets and c.chain and f.file.endswith(".gd") and mod is not None:
+                    # `var part: RigidBody3D = ...` then `part.explode()`: the object is a script
+                    # extending RigidBody3D; the project's one such script with an explode() it is
+                    eng = _gd_declared(project, types, mod, f, c.chain)
+                    sub = [g for g in cands if eng and _gd_extends(project, g.module, eng)] if eng else []
+                    if len({g.module for g in sub}) == 1:
+                        targets = [(sub[0], True)]
                 if targets:
                     pass
+                elif q and f.file.endswith((".kt", ".kts")) and len(cands) == 1 and cands[0].recv and fm_ is not None and \
+                        (cands[0].file == f.file or fm_.imported.get(c.name, ("", ""))[1] == c.name):
+                    # Kotlin: the project's one function of that name is an extension this file
+                    # declares or imports by name (`import ...alias`): nothing else is in scope
+                    targets = [(cands[0], True)]
                 elif len(own) == 1 and q != "" and len(cands) > 1:
                     # an extension the caller's own file declares (each generated
                     # parser's private JSONObject.textOrNull): it shadows the others'
@@ -788,22 +2544,259 @@ def _build_edges(project: Project) -> None:
                     # JSONArray.textOrNull side by side): the call is one of them
                     targets = [(g, True) for g in mine]
                 else:
-                    if len(cands) > 8:
+                    if vague or len(cands) > 8:
                         cands = []  # a very common name (run, get, init...): too vague to be a useful edge
                     targets = [(g, False) for g in cands]
             # Virtual dispatch: a call that lands on a parent's function can
             # run any subclass override of it too.
             more = []
+            below = {s for r in recv if r in project.modules
+                     for s in [r] + types.parts(project.modules[r]) + project.children.get(r, [])} if recv else None
             for t, exact in targets:
+                if t.name in _CTOR_NAMES or (t.name[:1].isupper() and c.name == t.name):
+                    continue  # a constructor builds that type, not a subclass
+                n_args = _argc(mod, c)
                 for sub in project.children.get(t.module, ()):
+                    if below is not None and sub not in below:
+                        continue  # a sibling's override: not this receiver's
                     o = project.funcs.get(f"{sub}.{t.name}")
-                    if o:
+                    if o and (n_args is None or types._takes(o, o.name, n_args)):  # (an override of another overload: not this call's)
                         more.append((o, exact))
-            res = project.resolution[os.path.splitext(f.file)[1]]
-            res[0 if any(e for _, e in targets) else 1 if targets else 2] += 1
+            if not q and f.file.endswith(_PARAM_FLOW_EXTS) and not any(e for _, e in targets) and c.name in _param_names(f):
+                pending.append((f, c))  # `checkFn(x)` on a parameter: what the callers pass (after this pass)
+            if not targets:
+                _nothing(project, f, c)
+            elif _first_count(project, f, c):
+                project.resolution[os.path.splitext(f.file)[1]][0 if any(e for _, e in targets) else 1] += 1
+                if _TRACE is not None:
+                    _TRACE.append((f.file, c.line, c.name, c.chain, "exact" if any(e for _, e in targets) else "guess",
+                                   tuple(t.id for t, _ in targets[:4])))
+            if f.file.endswith(".py") and mod is not None and 0 < c.line <= len(mod.raw) \
+                    and mod.raw[c.line - 1].lstrip().startswith("@") and len(targets) == 1 and targets[0][1]:
+                # `@app.route("/")`: route() runs, then the function it returns gets the decorated one
+                inner = _py_returned_closure(project, targets[0][0])
+                if inner is not None:
+                    more.append((inner, True))
+            seen_t = {t.id for t, _ in targets}
+            more = [(o, e) for o, e in more if o.id not in seen_t and not seen_t.add(o.id)]
+            site_out[(f.file, c.line, c.col, c.name)] = [(t.id, exact) for t, exact in targets + more]
+            if targets and not any(e for _, e in targets) and c.chain and f.file.endswith(_JS_FILE_EXTS) \
+                    and c.chain[0] not in f.bound and c.chain[0] in _param_names(f):
+                pending_recv.append((f, c))  # `headers.set(...)` on a parameter: typed by what the callers pass
             for t, exact in targets + more:
                 project.edges[f.id].append((t.id, c.line, exact))
                 project.redges[t.id].append((f.id, c.line, exact))
+    _param_flow(project, types, pending)
+    _param_receivers(project, types, pending_recv)
+
+
+def _py_returned_closure(project: Project, g: Func):
+    """The function a Python decorator factory returns: `def route(...): def decorator(f): ...;
+    return decorator` gives route's `decorator`, or None."""
+    rets = list(re.finditer(r"^([ \t]*)return\s+([A-Za-z_]\w*)\s*$", g.code, re.M))
+    if not rets:
+        return None
+    m = min(rets, key=lambda r: len(r.group(1).expandtabs(4)))  # (the function's own return, not its closure's)
+    name = m.group(2)
+    for h in project.by_name.get(name, ()):
+        if h.file == g.file and g.start < h.start <= g.end:
+            return h
+    return None  # (a file's same-named closures are one function, whose span is the first's: only that factory's)
+
+
+def _passed(project: Project, types, f: Func, k: int, depth: int):
+    """The one project function every caller of f passes as its k-th argument
+    (its id), or None."""
+    from . import lambdas
+    callers = project.redges.get(f.id, [])
+    if depth > 4 or not callers or not all(e for _, _, e in callers):
+        return None
+    got = set()
+    pname = (_param_names(f) + [""] * (k + 1))[k]
+    for src, line, _ in callers:
+        g = project.funcs.get(src)
+        gm = next((m for m in project.by_file.get(g.file, []) if m.name == g.module), None) if g else None
+        site = next((c2 for c2 in (g.calls if g else []) if c2.line == line and c2.name == f.name and c2.col >= 0), None)
+        if site is None or gm is None:
+            return None
+        code = "\n".join(gm.code[line - 1:line + 30])
+        o = code.find("(", site.col)
+        close = lambdas.matching(code, o) if o >= 0 else -1
+        args = lambdas.split_top(code[o + 1:close]) if close > 0 else []
+        arg = args[k].strip() if 0 <= k < len(args) else ""
+        if not re.match(r"^[A-Za-z_$][\w$]*$", arg):
+            return None
+        if g.id == f.id and arg == pname:
+            continue  # a recursive call handing the parameter on
+        gparams = _param_names(g)
+        if arg in gparams and arg not in g.bound:  # the caller's own parameter: what its callers pass
+            hit_id = _passed(project, types, g, gparams.index(arg), depth + 1)
+        else:
+            hit = types.bare(gm, g, arg)
+            hit_id = hit.id if hit is not None and hit.kind != "top" else None
+        if hit_id is None:
+            return None
+        got.add(hit_id)
+        if len(got) > 1:
+            return None
+    return got.pop() if len(got) == 1 else None
+
+
+_PARAM_FLOW_EXTS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".py")
+
+
+def _param_names(f: Func) -> list[str]:
+    """A JS / TS / Python function's parameter names, in order ("" for one
+    this can't name: a destructuring, `*args`)."""
+    from . import lambdas
+    k = f.code.find("(")
+    if k < 0 or k > 400:
+        return []
+    e = lambdas.matching(f.code, k)
+    if e < 0:
+        return []
+    out = []
+    for p_ in lambdas.split_top(f.code[k + 1:e]):
+        m = re.match(r"^\s*(?:(?:public|private|protected|readonly)\s+)?([A-Za-z_$][\w$]*)\s*[?]?\s*(?:[:=].*)?$", p_, re.S)
+        out.append(m.group(1) if m and m.group(1) not in ("self", "cls") else "")
+    return out
+
+
+def _arg_value(project: Project, types, f: Func, k: int, depth: int = 0):
+    """The value every caller of f passes as its k-th argument (JS / TS): each
+    caller exact, each argument a chain that evaluates to the same project
+    type (or every one a library's value: a literal, a builtin's), or the
+    caller's own parameter whose callers do; else None."""
+    from . import lambdas, chains
+    callers = project.redges.get(f.id, [])
+    if depth > 3 or not callers or not all(e for _, _, e in callers) or len(callers) > 40:
+        return None
+    got = set()
+    for src, line, _ in callers:
+        g = project.funcs.get(src)
+        gm = project.modules.get(g.module) if g else None
+        site = next((c2 for c2 in (g.calls if g else []) if c2.line == line and c2.name == f.name and c2.col >= 0), None)
+        if site is None or gm is None or not 0 < line <= len(gm.code):
+            return None
+        code = "\n".join(gm.code[line - 1:line + 30])
+        o = code.find("(", site.col)
+        close = lambdas.matching(code, o) if o >= 0 else -1
+        args = lambdas.split_top(code[o + 1:close]) if close > 0 else []
+        if len(args) <= k or any(a.strip().startswith("...") for a in args[:k + 1]):
+            return None
+        text = args[k].strip()
+        if re.fullmatch(r"""(?s)'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`[^`$]*`|-?\d[\d_.]*|\[.*\]""", text):
+            got.add(("ext",))  # a string, a number, an array: the runtime's
+            if len(got) > 1:
+                return None
+            continue
+        gparams = _param_names(g)
+        if re.fullmatch(r"[A-Za-z_$][\w$]*", text) and text in gparams and text not in g.bound:
+            v = _arg_value(project, types, g, gparams.index(text), depth + 1)  # handed on from its own callers
+            got.add(None if v is None else ("ext",) if infer_mod.is_ext(v) else (v[0], tuple(sorted(v[1]))))
+            if None in got or len(got) > 1:
+                return None
+            continue
+        ch = chains.expression(text, 0)
+        flat = text
+        while re.search(r"\([^()]*[^()\s][^()]*\)", flat):
+            flat = re.sub(r"\([^()]*\)", "()", flat)  # (the arguments: not part of the chain)
+        if not ch or re.sub(r"\s+|\bnew\b|\??\.", "", flat) != re.sub(r"\s+|\bnew\b|\??\.", "", "".join(ch)):
+            return None  # (not a plain chain: `a || b`, a literal)
+        types.line = line
+        v = types.chain(gm, g, ch)
+        if v is None or v is infer_mod.UNKNOWN:
+            return None
+        got.add(("ext",) if infer_mod.is_ext(v) else (v[0], tuple(sorted(v[1]))) if v[0] == "inst" and v[2] else None)
+        if None in got or len(got) > 1:
+            return None
+    one = got.pop()
+    return infer_mod.EXT if one == ("ext",) else ("inst", one[1], True)
+
+
+def _param_receivers(project: Project, types, pending: list) -> None:
+    """A JS / TS call guessed on a parameter (`headers.set(k, v)` in
+    `setFormDataHeaders(headers, ...)`): typed by what every caller passes,
+    the call reaches that type's method, or (a library value) nothing."""
+    for f, c in pending:
+        params = _param_names(f)
+        v = _arg_value(project, types, f, params.index(c.chain[0]))
+        if v is None:
+            continue
+        mod = project.modules.get(f.module)
+        types.line = c.line
+        v = types.chain(mod, f, c.chain, start=v) if len(c.chain) > 1 else v
+        if v is None or v is infer_mod.UNKNOWN:
+            continue
+        if infer_mod.is_ext(v):
+            hits = []
+        elif v[0] == "inst":
+            hits = types.method(list(v[1]), c.name)[0]
+            if not hits:
+                continue
+        else:
+            continue
+        for fid in [g.id for g in project.funcs.values() if g.file == f.file and g.start <= f.start and f.end <= g.end]:
+            old = [(d, ln, e) for d, ln, e in project.edges.get(fid, []) if ln == c.line and not e
+                   and d.rsplit(".", 1)[-1] == c.name]
+            if not old:
+                continue
+            for d, ln, e in old:
+                project.edges[fid].remove((d, ln, e))
+                if (fid, ln, e) in project.redges.get(d, []):
+                    project.redges[d].remove((fid, ln, e))
+            for h in hits:
+                project.edges[fid].append((h.id, c.line, True))
+                project.redges[h.id].append((fid, c.line, True))
+        res = project.resolution[os.path.splitext(f.file)[1]]
+        if res[1] > 0:
+            res[1] -= 1
+            if hits:
+                res[0] += 1
+            else:
+                res[2] += 1
+                fam = _family(f.file)
+                if any(g.kind != "top" and fam & _family(g.file) for g in project.by_name.get(c.name, ())):
+                    res[3] += 1
+        if _TRACE is not None:
+            for i, r in enumerate(_TRACE):
+                if r[0] == f.file and r[1] == c.line and r[2] == c.name and r[4] == "guess":
+                    _TRACE[i] = (r[0], r[1], r[2], r[3], "exact" if hits else "named", tuple(h.id for h in hits[:4]))
+                    break
+
+
+def _param_flow(project: Project, types, pending: list) -> None:
+    """A call through a parameter (`checkFn(x)` in `runCheck(checkFn)`): when
+    every caller is exact and passes the same project function there by name
+    (or hands on its own parameter, whose callers do), the call reaches that
+    function."""
+    for f, c in pending:
+        params = _param_names(f)
+        if c.name not in params:
+            continue
+        got = _passed(project, types, f, params.index(c.name), 0)
+        if got is None:
+            continue
+        target = project.funcs[got]
+        old = [(d, ln, e) for d, ln, e in project.edges[f.id] if ln == c.line and d.rsplit(".", 1)[-1] == c.name and not e]
+        for d, ln, e in old:
+            project.edges[f.id].remove((d, ln, e))
+            if (f.id, ln, e) in project.redges.get(d, []):
+                project.redges[d].remove((f.id, ln, e))
+        project.edges[f.id].append((target.id, c.line, True))
+        project.redges[target.id].append((f.id, c.line, True))
+        res = project.resolution[os.path.splitext(f.file)[1]]
+        if old and res[1] > 0:
+            res[1] -= 1
+            res[0] += 1
+        elif not old and res[2] > 0:  # (it reached nothing: a closure's parameter)
+            res[2] -= 1
+            res[0] += 1
+        if _TRACE is not None:
+            for i, r in enumerate(_TRACE):
+                if r[0] == f.file and r[1] == c.line and r[2] == c.name and r[4] in ("guess", "nothing", "named"):
+                    _TRACE[i] = (r[0], r[1], r[2], r[3], "exact", (target.id,))
+                    break
 
 
 # --- queries ----------------------------------------------------------------------
@@ -906,6 +2899,11 @@ def _text_for(project: Project, rel: str, mode: str) -> list[str]:
     return out
 
 
+def picked(rid: str, ids: list[str] | None) -> bool:
+    """`--only` / `--skip` name a rule by its id or a pack by its name (`security` is every `security/...`)."""
+    return bool(ids) and any(rid == i or rid.startswith(i.rstrip("/") + "/") for i in ids)
+
+
 def run_rules(project: Project, only: list[str] | None = None, skip: list[str] | None = None) -> list[Finding]:
     out: list[Finding] = [Finding("config", "error", pr.split(":")[0], 0, "", pr) for pr in project.config_problems]
     out += [Finding("config", "warn", n.split(":")[0], 0, "", n) for n in getattr(project, "env_notes", [])]
@@ -913,17 +2911,19 @@ def run_rules(project: Project, only: list[str] | None = None, skip: list[str] |
     # start them all at once, then collect in rule order
     from concurrent.futures import ThreadPoolExecutor
     cmds = [r for r in project.config.get("rule", []) if r.get("kind") == "command"
-            and not (only and r["id"] not in only) and not (skip and r["id"] in skip)]
+            and not (only and not picked(r["id"], only)) and not picked(r["id"], skip)]
     pool = ThreadPoolExecutor(max_workers=max(1, min(8, len(cmds)))) if cmds else None
     pending = {r["id"]: pool.submit(_command, project, r) for r in cmds} if pool else {}
     for r in project.config.get("rule", []):
         rid = r["id"]
-        if (only and rid not in only) or (skip and rid in skip):
+        if (only and not picked(rid, only)) or picked(rid, skip):
             continue
         kind = r.get("kind", "forbid")
         fn = {"forbid": _forbid, "together": _together, "reach": _reach, "coverage": _coverage,
               "require": _require, "deps": _deps, "fanout": _fanout, "lint": _lint,
-              "essential": _essential, "command": _command}.get(kind)
+              "essential": _essential, "command": _command,
+              "depend": _arch("depend"), "layers": _arch("layers"), "cycles": _arch("cycles"),
+              "path": _arch("path")}.get(kind)
         if fn is None:
             out.append(Finding(rid, "error", r.get("_file", "seamcheck.toml"), 0, "", f"unknown rule kind {kind!r}"))
             continue
@@ -1038,6 +3038,14 @@ def _require(project: Project, r: dict) -> list[Finding]:
                     if r.get("ordered"):
                         pos = m.end()
     return out
+
+
+def _arch(kind: str):
+    """Architecture rules (arch.py): depend, layers, cycles."""
+    def run(project: Project, r: dict) -> list[Finding]:
+        from . import arch
+        return getattr(arch, kind)(project, r)
+    return run
 
 
 def _deps(project: Project, r: dict) -> list[Finding]:
@@ -1677,7 +3685,7 @@ def dead(project: Project) -> list[Func]:
             called.add(tgt)
     out = []
     for f in project.funcs.values():
-        if f.kind == "top" or f.id in called or f.name in refs or ENGINE_CALLBACKS.match(f.name):
+        if f.kind in ("top", "test") or f.id in called or f.name in refs or ENGINE_CALLBACKS.match(f.name):
             continue
         # anything named in any file's text as a string or @rpc etc.: be conservative
         out.append(f)
