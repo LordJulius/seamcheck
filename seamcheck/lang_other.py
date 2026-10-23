@@ -2322,6 +2322,11 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             name_col = max(0, lines[sa].find(name))  # the return type before it is no call (`Task<int> Run(`)
             body = "\n".join(lines[sa:sb + 1])
             for nm_, held in _assignments(tk, body):
+                if held.startswith(f"expr:{nm_}\x1f") and tk == "rust":
+                    # `let te = te.normalize_line(true);`: a shadowing rebind; the earlier binding
+                    # (a tuple element, a constructor) stays the base it is evaluated from
+                    f.bound.setdefault(nm_ + "\0rebind", held)
+                    continue
                 f.bound.setdefault(nm_, held)
             for nm_, held in _loop_bindings(tk, body):
                 f.bound.setdefault(nm_, held)

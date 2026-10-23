@@ -722,6 +722,36 @@ class Types:
                 return generic_name(f.returns) or ""
         return ""
 
+    def _rs_macro_value(self, mod, name: str):
+        """What a project `macro_rules! name` builds: the one project type its body
+        constructs (`$crate::Arg::new(...)`, `Arg::new(...)`); else unknown."""
+        from . import lambdas
+        key = ("\0rsmacro", name)
+        if key in self.cache:
+            return self.cache[key]
+        self.cache[key] = None
+        bodies = []
+        for m in self.p.modules.values():
+            if m.owner or not m.file.endswith(".rs"):
+                continue
+            raw = "\n".join(m.raw)
+            for mm in re.finditer(rf"\bmacro_rules!\s*{re.escape(name)}\s*\{{", raw):
+                e_ = lambdas.matching(raw, mm.end() - 1)
+                bodies.append((m, raw[mm.end():e_ if e_ > 0 else len(raw)]))
+        if not bodies:
+            self.cache[key] = EXT if name in ("vec", "format", "matches", "println", "write", "writeln", "assert",
+                                              "assert_eq", "include_str", "concat", "env", "todo", "panic") else None
+            return self.cache[key]
+        tys = set()
+        for m, body in bodies:
+            tys |= {t.group(1) for t in re.finditer(r"(?:\$crate::(?:\w+::)*)?\b([A-Z]\w*)::(?:new|default|builder)\s*\(", body)}
+        if len(tys) == 1:
+            ty = tys.pop()
+            got = self.instance(bodies[0][0], ty)
+            if got is not None and not is_ext(got):
+                self.cache[key] = got
+        return self.cache[key]
+
     def _lib_results(self) -> set:
         got = self.cache.get("\0libres")
         if got is None:
@@ -1048,6 +1078,8 @@ class Types:
             # RSpec: the class the (outermost) `describe Foo do` names
             dm = re.search(r"^\s*(?:RSpec\.)?describe\s*\(?\s*((?:::)?[A-Z][\w:]*)", "\n".join(fm.raw), re.M)
             return self.chain(fm, None, (dm.group(1).lstrip(":"),), depth + 1) if dm else None
+        if seg.endswith("!()") and fm.file.endswith(".rs"):
+            return self._rs_macro_value(fm, seg[:-3])
         if seg.endswith("()"):
             name = seg[:-2]
             held = f.bound.get(name, "") if f is not None else ""
@@ -1493,11 +1525,14 @@ class Types:
                 hits = [g for g in hits if not g.targs or want in g.targs.split(",")] or hits
             if hits and kind == "static" and all(g.returns == "Self" for g in hits) and mod.file.endswith(_JS_EXTS):
                 return cur  # `res.status(404)` on the module object `res`: `return this` gives that object back
+            # (Rust / Swift / Kotlin: an associated function's `Self` is the type it is called on,
+            # `TimeFilter::after(s) -> Option<Self>`)
+            sm_ = list(mods) if kind == "inst" or (kind == "static" and mod.file.endswith((".rs", ".swift", ".kt", ".kts"))) else None
             if len(hits) == 1:
-                return self.returns(hits[0], list(mods) if kind == "inst" else None, depth + 1, targs)
+                return self.returns(hits[0], sm_, depth + 1, targs)
             if hits and len({g.returns for g in hits}) == 1 and hits[0].returns:
                 # overloads that all return the same type: whichever runs, that is the value
-                return self.returns(hits[0], list(mods) if kind == "inst" else None, depth + 1, targs)
+                return self.returns(hits[0], sm_, depth + 1, targs)
             if hits and kind == "inst" and {g.returns for g in hits if g.returns} == {"Self"} and mod.file.endswith(".swift"):
                 return cur  # `request.validate()`: each overload declared returns `Self` (the rest unread)
             if not hits and kind == "static" and mod.file.endswith(_JS_EXTS) and depth < _MAX:

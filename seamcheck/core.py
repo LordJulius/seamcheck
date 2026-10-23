@@ -1677,6 +1677,17 @@ def _enum_case(m: Module, name: str) -> bool:
     return False
 
 
+def _rs_crate_dir(project: Project, rel: str) -> str:
+    """The directory of the crate root a Rust file belongs to: the nearest ancestor
+    holding main.rs / lib.rs (an integration test binary's `tests/builder/main.rs`)."""
+    d = os.path.dirname(rel)
+    while d:
+        if f"{d}/main.rs" in project.by_file or f"{d}/lib.rs" in project.by_file:
+            return d + "/"
+        d = os.path.dirname(d)
+    return ""
+
+
 def _c_included(project: Project, rel: str) -> set:
     """The .c files a C file `#include`s (a test that includes the unit it tests)."""
     got, todo, seen = set(), [rel], {rel}
@@ -1721,6 +1732,12 @@ _RS_STD_METHODS = {
     "borrow_mut", "lock", "take", "chars", "bytes", "trim", "split", "join", "starts_with", "ends_with",
     "filter", "filter_map", "enumerate", "zip", "rev", "any", "all", "fold", "sum", "count", "last", "first",
     "to_str", "to_path_buf", "display", "fmt", "eq", "cmp", "partial_cmp", "hash", "deref", "drop", "default",
+    # Option / Result / Iterator combinators (`.map(|v| v.as_str())` after `.get_one()`)
+    "map", "map_or", "map_or_else", "flat_map", "flatten", "skip", "skip_while", "take_while", "peekable",
+    "windows", "chunks", "position", "rposition", "max_by", "min_by", "max_by_key", "min_by_key", "sorted",
+    "unwrap_or_else", "is_some_and", "is_none_or", "inspect", "step_by", "cycle", "product", "partition",
+    "as_deref_mut", "transpose", "zip_with", "chars", "char_indices", "lines", "split_whitespace", "trim_end",
+    "trim_start", "to_lowercase", "to_uppercase", "to_ascii_lowercase", "repeat", "retain", "dedup", "truncate",
 }
 
 
@@ -1859,6 +1876,11 @@ def _build_edges(project: Project) -> None:
                         continue
                     targets = [(g, len(exts) == 1) for g in exts]
                     v = None
+                if v is not None and v[0] == "static" and len(v[1]) > 1 and f.file.endswith(".rs"):
+                    root_ = _rs_crate_dir(project, f.file)  # (each test binary's own `mod utils`)
+                    own_ = tuple(mn for mn in v[1] if project.modules[mn].file.startswith(root_)) if root_ else ()
+                    if len(own_) == 1:
+                        v = ("static", own_, True)
                 if v is not None:
                     kind, mods_, ex = v
                     if kind == "ns":
@@ -2077,6 +2099,15 @@ def _build_edges(project: Project) -> None:
                 # every project function named reject.
                 _nothing(project, f, c)
                 continue
+            if not targets and c.chain and f.file.endswith(".rs") and all(re.fullmatch(r"[a-z_]\w*", s_) for s_ in c.chain):
+                # `utils::assert_output(...)` in an integration test: the `mod utils` of the
+                # caller's own crate root (tests/builder/main.rs has its utils.rs, tests/derive another)
+                path_ = "/".join(c.chain)
+                root_ = _rs_crate_dir(project, f.file)
+                mine = [g for g in project.by_name.get(c.name, []) if g.file.startswith(root_)
+                        and (g.file[:-3].endswith("/" + path_) or g.file.endswith("/" + path_ + "/mod.rs"))]
+                if len({g.file for g in mine}) == 1:
+                    targets = [(mine[0], True)]
             if not targets and q and c.name in _RS_STD_METHODS and f.file.endswith(".rs"):
                 # `.unwrap()`, `.len()`, `.push()` on a receiver of unknown type:
                 # Option / Result / Vec / String, not a project function of that name

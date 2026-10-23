@@ -132,6 +132,11 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                     arity = "`" + str(1 + _top_commas(code[g + 1:j - 1]))
                     j = _skip_back_ws(code, g)
             s = _ident_back(code, j)
+            if s == j and j > 1 and code[j - 1] == "!" and code[j - 2] in _IDENT_CH and code[j - 2:j] != "!!":
+                ms = _ident_back(code, j - 1)  # Rust `arg!(...)`: a macro's value starts the chain
+                segs.append(code[ms:j - 1] + "!()")
+                i = ms
+                break
             if s == j:  # `(expr).x`: a parenthesized expression
                 inner = code[k + 1:i - 1]
                 cast = re.search(r"\bas[!?]?\s+([A-Z][\w.]*)\s*[?]?\s*$", inner) or \
@@ -263,6 +268,25 @@ def expression(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
         j = i
         while j < n and code[j] in " \t":
             j += 1
+        if not segs and j + 1 < n and code[j] == "!" and code[j + 1] in "([{" :
+            # Rust `command!()...`, `arg!(x: -f)`: a macro's value starts the chain
+            depth, k = 0, j + 1
+            while k < n:
+                if code[k] in "([{":
+                    depth += 1
+                elif code[k] in ")]}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k += 1
+            segs.append(name + "!()")
+            i = k + 1
+            while i < n and code[i] in " \t\n":
+                i += 1
+            if i < n and code[i] == "." and code[i + 1:i + 2] != ".":
+                i += 1
+                continue
+            return tuple(segs)
         arity = ""
         if j < n and code[j] == "<":  # generic arguments: `make<T>(` / `List<Foo>()`
             depth, k = 0, j
