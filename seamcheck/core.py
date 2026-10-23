@@ -1285,6 +1285,44 @@ def _argc(mod, c) -> int | None:
     return len(infer_mod._top_split(inner.replace("<", " ").replace(">", " ")))
 
 
+_CPP_EXTS = (".cpp", ".cc", ".cxx", ".hpp", ".hh")
+_C_DEFINE = re.compile(r"^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)\(([^)]*)\)((?:[^\n]*\\\n)*[^\n]*)", re.M)
+_C_KEYWORDS = {"if", "for", "while", "switch", "return", "sizeof", "do", "else", "case", "typeof", "__typeof__", "defined",
+               "_Generic", "offsetof", "__builtin_expect", "__attribute__"}
+
+
+def _c_macros(project: Project) -> dict[str, list[str]]:
+    """Function-like macros in the project's C files: name -> the names their body calls."""
+    got = project.__dict__.get("_c_macros")
+    if got is None:
+        got = project.__dict__["_c_macros"] = {}
+        for rel, mods in project.by_file.items():
+            if not rel.endswith((".c", ".h")) or not mods:
+                continue
+            for m in _C_DEFINE.finditer("\n".join(mods[0].raw)):
+                params = {p.strip() for p in m.group(2).split(",")}
+                body = m.group(3).replace("\\\n", " ")
+                names = [n for n in re.findall(r"\b([A-Za-z_]\w*)\s*\(", body) if n not in params and n not in _C_KEYWORDS]
+                got.setdefault(m.group(1), names)
+    return got
+
+
+def _c_macro_targets(project: Project, caller_file: str, name: str, depth: int = 0) -> list:
+    """The project functions a call to macro `name` runs (through macros it uses, 3 deep)."""
+    out = []
+    for n in _c_macros(project).get(name, []) if depth < 3 else []:
+        cfuncs = [g for g in project.by_name.get(n, []) if g.kind != "top" and g.file.endswith((".c", ".h"))]
+        own = [g for g in cfuncs if g.file == caller_file]
+        glob_ = [g for g in cfuncs if not _c_static(project, g) or g.file.endswith(".h")]
+        if own:
+            out.append(own[0])
+        elif len({g.file for g in glob_}) == 1 and glob_:
+            out.append(glob_[0])
+        elif not cfuncs:
+            out += _c_macro_targets(project, caller_file, n, depth + 1)
+    return list({g.id: g for g in out}.values())
+
+
 def _needs_receiver(project: Project, g: Func) -> bool:
     """`g` is a method a call reaches only through a receiver (Go's `func (c *Command) X`,
     Rust's `fn x(&self)`, a JS / TS / PHP class's method), not a free function."""
@@ -1962,7 +2000,9 @@ def _build_edges(project: Project) -> None:
                 # Option / Result / Vec / String, not a project function of that name
                 _nothing(project, f, c)
                 continue
-            if not targets and not q and f.file.endswith((".c", ".h")):
+            if not targets and not q and (f.file.endswith((".c", ".h")) or f.file.endswith(_CPP_EXTS) and any(
+                    g.file.endswith((".c", ".h")) for g in project.by_name.get(c.name, ()))):
+                # (a C++ file calling the project's C functions: the same linker rule)
                 # C: no imports, the linker's rule. A `static` function is its file's;
                 # any other is global to the program: the call reaches the file's own
                 # definition, else the project's one non-static definition of that name
@@ -1974,7 +2014,12 @@ def _build_edges(project: Project) -> None:
                 elif len({g.file for g in glob_}) == 1 and glob_:
                     targets = [(glob_[0], True)]
                 elif not cfuncs:
-                    _nothing(project, f, c)  # libc, a macro, a library's: no project function runs
+                    # libc, a library's, or a macro: a project macro (`JV_ARRAY(a, b)`) runs the
+                    # functions its body calls, resolved by the same rule
+                    for g in _c_macro_targets(project, f.file, c.name):
+                        project.edges[f.id].append((g.id, c.line, True))
+                        project.redges[g.id].append((f.id, c.line, True))
+                    _nothing(project, f, c)
                     continue
             if not targets:
                 # A method on some object, or an import we can't see: every

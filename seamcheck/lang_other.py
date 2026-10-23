@@ -70,7 +70,11 @@ _GO = [re.compile(r"^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(", re.M)]
 # keeps the method name; the class is a declared type for qualifier lookup.
 _CPP = [re.compile(r"^[ \t]*(?!(?:return|else|delete|new|throw|case|co_return|co_await|emit|Q_EMIT|goto|using|typedef|if|for|while|switch)\b)"
                    r"(?:template[ \t]*<[^>\n]*>[ \t]*)?(?:[A-Za-z_][\w:<>,\*&~]*[ \t]+){1,6}[\*&]*(?:\w+::)*(~?[A-Za-z_]\w*)[ \t]*\(", re.M),
-        re.compile(r"^(?:\w+::)+(~?[A-Za-z_]\w*)[ \t]*\(", re.M)]  # out-of-line Class::Class( constructors
+        re.compile(r"^(?:\w+::)+(~?[A-Za-z_]\w*)[ \t]*\(", re.M),  # out-of-line Class::Class( constructors
+        # GNU style, the return type on its own line (`int\nyyparse (block* answer, ...)\n{`)
+        re.compile(r"^(?:(?:static|inline|extern|const|unsigned|signed|struct|enum|union)[ \t]+)*[A-Za-z_]\w*(?:[ \t]*\*)*[ \t]*\n"
+                   r"([A-Za-z_]\w*)[ \t]*\((?:[^;{}()]|\([^()]*\))*\)[ \t]*\n?"
+                   r"(?:[ \t]*[A-Za-z_][\w \t\*,\[\]]*;[ \t]*\n)*[ \t]*\{", re.M)]  # (K&R: `cmp(C, a, b)\n BCinfo *C; ...\n{`)
 # QML: JS functions, signal handlers (`onClicked: {...}` or one line), and
 # component instances (`Button {` is a call to Button.qml) handled below.
 # Swift: `func name(` / `func name<T>(`, and initializers (`Foo(...)` runs `init`)
