@@ -423,6 +423,9 @@ class Types:
         if depth > _MAX:
             return None
         if held.startswith("type:"):
+            if held[5:].split(".")[0] in ("std", "boost", "absl") and mod.file.endswith(_C_EXTS) \
+                    and held[5:].split(".")[0] not in self.by_type:
+                return EXT  # `std::vector<...> formatters_`: the standard library's
             return self.instance(mod, held[5:], self_mods)
         if held.startswith("mod:"):  # a component whose file names no type (`mousepad.qml`'s root id)
             return ("inst", (held[4:],), True) if held[4:] in self.p.modules else None

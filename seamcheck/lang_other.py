@@ -135,7 +135,8 @@ _CPP_TYPED = re.compile(r"(?<![\w:>])([A-Z]\w*)\s*[\*&]+\s*([a-z_]\w*)\s*(?=[,;=
 # a C++ class member in a header: `BoardModel* m_board = nullptr;`, `Hub m_hub;`
 # `Q_PROPERTY(SortFilterRoomTreeModel *model READ model CONSTANT)`: QML's `obj.model`
 _Q_PROPERTY = re.compile(r"^\s*Q_PROPERTY\(\s*(?:const\s+)?((?:[\w:]+)(?:<[^()]*?>)?)\s*[\*&]?\s*([A-Za-z_]\w*)\s+(?:READ|MEMBER|BINDABLE)\b")
-_CPP_FIELD = re.compile(r"^\s*(?:(?:mutable|static|const|inline)\s+)*((?:std::|[A-Z])[\w:]*(?:<[^;()]*>)?)\s*[\*&]?\s*([a-z_]\w*)\s*(?:=[^;]*|\{[^;]*\})?;")
+# (any type name: `details::circular_q<filename_t> filenames_q_;`, `memory_buf_t cached_datetime_;`)
+_CPP_FIELD = re.compile(r"^\s*(?:(?:mutable|static|const|inline|volatile)\s+)*((?:\w+::)*[A-Za-z_]\w*(?:<[^;()]*>)?)\s*[\*&]?\s*([a-z_]\w*)\s*(?:=[^;]*|\{[^;]*\})?;")
 _KT_RECV = r"\bfun\s+(?:<[^>]*>\s*)?([A-Z]\w*)(?:<[^>]*>)?\??\.%s\s*\("
 _ALLCAPS = re.compile(r"[A-Z0-9_]+$")
 
@@ -1735,6 +1736,10 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         d = rel.rsplit("/", 1)[0] if "/" in rel else ""
         for im in re.finditer(r'^[ \t]*#[ \t]*include[ \t]*"([^"]+)"', text, re.M):
             mod.uses.append(f"inc:{d}\0{im.group(1)}")
+    if ext in (".c", ".h"):  # C: the files it includes, for a `.c` among them (a test pulling in the unit it tests)
+        d = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        mod.c_includes = [os.path.normpath(os.path.join(d, im.group(1))).replace(os.sep, "/")
+                          for im in re.finditer(r'^[ \t]*#[ \t]*include[ \t]*"([^"]+\.[ch])"', text, re.M)]
     seen: set[tuple[int, str]] = set()
     found = []
     kotlin = fam == "kotlin"
@@ -2124,7 +2129,11 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 if qm and (t := type_name(qm.group(1))) and not _ALLCAPS.match(t):
                     got_fields.setdefault(qm.group(2), set()).add(t)  # what QML reads as `obj.name`
                 for m in _CPP_FIELD.finditer(ln):
+                    if m.group(1).split("::")[-1].split("<")[0] in _CPP_NOT_TYPE or m.group(2) in _CPP_NOT_TYPE:
+                        continue  # (`return x;`, `delete p;`, `int n;`)
                     t = type_name(m.group(1))  # (`QPointer<CaptureTool>` holds a CaptureTool)
+                    if m.group(1).startswith("std::") and "<" in m.group(1):
+                        t = m.group(1).split("<")[0].replace("::", ".")  # `std::vector<X> xs_`: a library container
                     if t and not _ALLCAPS.match(t) and t not in ("Q_OBJECT", "Q_PROPERTY"):
                         got_fields.setdefault(m.group(2), set()).add(t)
             for pat_ in pats_:
@@ -2148,9 +2157,16 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     go_test = go and rel.endswith("_test.go")
     decl_pos = None
     cpp_ns = []  # C / C++: (body start, body end, name) of each `namespace x {` ("" anonymous)
+    raw_text = "\n".join(raw) if cpp else ""
     for nm_m in re.finditer(r"\bnamespace\s+((?:\w+::)*\w+)?\s*\{", code) if cpp else ():
         e_ = lambdas.matching(code, nm_m.end() - 1)
-        cpp_ns.append((nm_m.end() - 1, e_ if e_ > 0 else len(code), nm_m.group(1) or ""))
+        e_ = e_ if e_ > 0 else len(code)
+        if nm_m.group(1):  # `}  // namespace dragonbox`: where it says it ends (an `#if` branch's braces mislead the count)
+            cm = re.compile(rf"^[ \t]*}}[ \t;]*//[ \t]*(?:end[ \t]+(?:of[ \t]+)?)?namespace[ \t]+{re.escape(nm_m.group(1))}\b", re.M
+                            ).search(raw_text, nm_m.end())
+            if cm and cm.start() < e_:
+                e_ = cm.start()
+        cpp_ns.append((nm_m.end() - 1, e_, nm_m.group(1) or ""))
     for (hname, name), ss in sorted(spans.items(), key=lambda kv: kv[1][0]):
         a_, b_, npos, bpos = max(ss, key=lambda s_: s_[1] - s_[0])
         home, cls = owners[(hname, name)]

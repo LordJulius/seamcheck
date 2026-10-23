@@ -1677,6 +1677,23 @@ def _enum_case(m: Module, name: str) -> bool:
     return False
 
 
+def _c_included(project: Project, rel: str) -> set:
+    """The .c files a C file `#include`s (a test that includes the unit it tests)."""
+    got, todo, seen = set(), [rel], {rel}
+    while todo:  # (through headers: a test's `common.h` includes `../cJSON.c`)
+        m = project.by_file.get(todo.pop())
+        for inc in (getattr(m[0], "c_includes", ()) if m else ()):
+            if inc not in project.by_file:
+                inc = next((r for r in project.by_file if r.endswith("/" + inc.rsplit("/", 1)[-1])), inc)
+            if inc in seen:
+                continue
+            seen.add(inc)
+            if inc.endswith(".c"):
+                got.add(inc)
+            todo.append(inc)
+    return got
+
+
 def _c_static(project: Project, g: Func) -> bool:
     """A C function declared `static` (file-local)."""
     m = project.modules.get(g.module)
@@ -2072,7 +2089,9 @@ def _build_edges(project: Project) -> None:
                 # any other is global to the program: the call reaches the file's own
                 # definition, else the project's one non-static definition of that name
                 cfuncs = [g for g in project.by_name.get(c.name, []) if g.kind != "top" and g.file.endswith((".c", ".h"))]
-                own = [g for g in cfuncs if g.file == f.file or g.file == os.path.splitext(f.file)[0] + ".h"]
+                inc_c = _c_included(project, f.file)  # (`#include "../cJSON.c"`: its statics are this file's too)
+                own = [g for g in cfuncs if g.file == f.file or g.file == os.path.splitext(f.file)[0] + ".h"] or \
+                    [g for g in cfuncs if g.file in inc_c]
                 glob_ = [g for g in cfuncs if not _c_static(project, g) or g.file.endswith(".h")]  # (a header's static inline: its includers')
                 if own:
                     targets = [(g, True) for g in own[:1]]
