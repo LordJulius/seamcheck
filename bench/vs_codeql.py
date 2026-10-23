@@ -50,17 +50,26 @@ def _codeql(path: str) -> dict:
     return sites
 
 
-def _align(sites: dict, cq: dict, reach: int = 20) -> dict:
+def continues(raw, ln: int) -> bool:
+    """Line `ln` goes on with the expression above it: `.create()` under `new GsonBuilder()`."""
+    if raw is None or not (1 < ln <= len(raw)):
+        return False
+    here, above = raw[ln - 1].lstrip(), raw[ln - 2].rstrip()
+    return here.startswith((".", ")", "?.")) or above.endswith((".", "(", ",", "->", "=>"))
+
+
+def _align(sites: dict, cq: dict, raw_of, reach: int = 20) -> dict:
     """seamcheck places a call on the line of its name (`.create(` in a builder
     chain), CodeQL on the line its whole expression starts (`new GsonBuilder()`):
-    a seamcheck site with no CodeQL site of its own moves to the nearest
-    same-named CodeQL site starting at most `reach` lines above it."""
+    a seamcheck site with no CodeQL site of its own, on a line continuing the
+    expression above, moves to the nearest same-named CodeQL site at most
+    `reach` lines above it."""
     starts = collections.defaultdict(list)
     for f, ln, n in cq:
         starts[(f, n)].append(ln)
     out = collections.defaultdict(set)
     for (f, ln, n), v in sites.items():
-        if (f, ln, n) not in cq:
+        if (f, ln, n) not in cq and continues(raw_of(f), ln):
             above = [l0 for l0 in starts.get((f, n), ()) if ln - reach <= l0 < ln and (f, l0, n) not in sites]
             if above:
                 ln = max(above)
@@ -132,8 +141,11 @@ def main() -> None:
             if g is None:
                 continue
             (exact if ex else guess)[(f.file, ln, g.name)].add(g.id)
-    exact = _align(exact, cq)
-    guess = _align(guess, cq)
+    def raw_of(f):
+        mods = p.by_file.get(f) or []
+        return mods[0].raw if mods else None
+    exact = _align(exact, cq, raw_of)
+    guess = _align(guess, cq, raw_of)
     files = {k[0] for k in cq}
     raws = {}
 

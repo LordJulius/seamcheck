@@ -25,6 +25,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from seamcheck import core  # noqa: E402
 
 _SG_LANG = {"python": "python", "javascript": "javascript", "ruby": "ruby", "java": "java", "go": "go",
@@ -82,12 +83,15 @@ def _semgrep(semgrep: str, root: str, lang: str, name: str) -> set:
     return hits
 
 
-def _align_lines(got: set, truth: set, reach: int = 20) -> set:
+def _align_lines(got: set, truth: set, p, reach: int = 20) -> set:
     """A site on the line of the call's name moves to the line CodeQL gives the
-    whole call expression (a builder chain's start), when that is the nearest above."""
+    whole call expression (a builder chain's start), when that is the nearest
+    above and the line continues it (see vs_codeql.continues)."""
+    from vs_codeql import continues
     out = set()
     for f, ln in got:
-        if (f, ln) not in truth:
+        mods = p.by_file.get(f) or []
+        if (f, ln) not in truth and continues(mods[0].raw if mods else None, ln):
             above = [l0 for f0, l0 in truth if f0 == f and ln - reach <= l0 < ln and (f, l0) not in got]
             if above:
                 ln = max(above)
@@ -129,7 +133,7 @@ def main() -> None:
     for g, truth in picks:
         mine = {(p.funcs[s].file, ln) for s, es in p.edges.items() if s in p.funcs
                 for d, ln, ex in es if ex and d == g.id}
-        mine = _align_lines(mine, truth)
+        mine = _align_lines(mine, truth, p)
         row = {"seamcheck": _score(mine, truth)}
         if opt("--sg"):
             t = time.time()
