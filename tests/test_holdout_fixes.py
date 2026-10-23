@@ -306,5 +306,6 @@ TS = {
 class TsTypeLiteralFixes(unittest.TestCase):
     def test_object_type_aliases_are_interfaces_with_member_signatures(self):
         p = load(TS)
-        fid = next(k for k in p.edges if k.startswith("test/t.test."))
-        self.assertNotIn("src/other.text", {d for d, _l, _e in p.edges[fid]})
+        got = {d for k, es in p.edges.items() if k.startswith("test/t.test") for d, _l, _e in es}
+        self.assertNotIn("src/other.text", got)
+        self.assertIn("test/t.test.test x", p.funcs)
