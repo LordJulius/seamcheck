@@ -87,9 +87,17 @@ kind = "path"
 why = "request data reaching a command, SQL, a deserializer or the file system is injection"
 fix = "validate the value, use PreparedStatement parameters, or allow-list it"
 from = ["**/*.java:*", "**/*.kt:*"]
-source = '\.(getParameter|getParameterValues|getHeader|getQueryString|getInputStream|getReader|getCookies|getPathInfo)\('
-to = ['(^|\.)exec$', '^(new )?ProcessBuilder$', '\.(executeQuery|executeUpdate|execute|addBatch|createQuery|createNativeQuery)$',
-      '\.readObject$', '^(new )?(File|FileInputStream|FileOutputStream|FileReader)$', '^(Paths|Path)\.(get|of)$', '\.sendRedirect$']
+source = '\.(getParameter|getParameterValues|getHeader|getQueryString|getInputStream|getReader|getCookies|getPathInfo)\(|\bgetCookie\(\s*\w*[rR]eq'
+# Spring / JAX-RS handlers: the framework fills these parameters from the request
+source_entry = '@(Get|Post|Put|Delete|Patch|Request)Mapping\b|@(GET|POST|PUT|DELETE|PATCH|Path)\b'
+source_param = '@(RequestParam|PathVariable|RequestBody|RequestHeader|CookieValue|ModelAttribute|QueryParam|PathParam|FormParam|HeaderParam)\b|^(final\s+)?(String|String\[\]|List<String>|MultipartFile)\s+\w+$|^\w+\s*:\s*String\??$'
+to = ['(^|\.)exec$', '^(new )?ProcessBuilder$', '\.(executeQuery|executeUpdate|execute|addBatch|createQuery|createNativeQuery|prepareStatement|prepareCall)$',
+      '\.readObject$', '\.fromXML$', '^JSON\.(parse|parseObject)$', '(?i)^\w*yaml\w*\.load(All)?$|^y\.load$',
+      '^(new )?(File|FileInputStream|FileOutputStream|FileReader)$', '^(Paths|Path)\.(get|of)$',
+      '\.sendRedirect$', '\.getRequestDispatcher$',
+      '^DriverManager\.getConnection$', '\.(openConnection|openStream)$', '^(new )?Http(Get|Post|Put|Delete|Patch)$',
+      '(?i)resttemplate\w*\.(exchange|getForObject|getForEntity|postForObject|postForEntity)$',
+      '^Velocity\.evaluate$', '(?i)groovyshell\w*\.(evaluate|parse)$', '\.parseExpression$']
 unless = ["escape", "sanitize", "validate", "normalize", "encode", "parseInt", "parseLong", "valueOf"]
 depth = 6
 
@@ -100,8 +108,13 @@ why = "request data reaching a process, SQL or the file system is injection"
 fix = "validate the value, use SqlParameter, or allow-list it"
 from = ["**/*.cs:*"]
 source = '\bRequest\.(Query|Form|QueryString|Headers|Cookies|Body|RouteValues)\b'
-to = ['^Process\.Start$', '^(new )?(SqlCommand|NpgsqlCommand|MySqlCommand|ProcessStartInfo)$', '\.(FromSqlRaw|ExecuteSqlRaw|ExecuteSqlRawAsync)$',
-      '^File\.(ReadAllText|ReadAllBytes|WriteAllText|Open|Delete)$', '^Redirect$']
+# ASP.NET handlers: the model binder fills these parameters from the request
+source_entry = '\[(Http(Get|Post|Put|Delete|Patch)|Route)\b'
+source_param = '\[From(Body|Query|Route|Form|Header)\]|^string\s+\w+$'
+to = ['^Process\.Start$', '^(new )?(SqlCommand|NpgsqlCommand|MySqlCommand|ProcessStartInfo)$', '\.(FromSql|FromSqlRaw|ExecuteSqlCommand|ExecuteSqlCommandAsync|ExecuteSqlRaw|ExecuteSqlRawAsync)$',
+      '^File\.(ReadAllText|ReadAllBytes|WriteAllText|Open|Delete)$', '^Redirect$',
+      '^(new )?(XmlSerializer|DataContractSerializer|NetDataContractSerializer)$',
+      '(?i)(binaryformatter|losformatter|soapformatter|objectstateformatter|netdatacontractserializer)\w*\.Deserialize$']
 unless = ["Escape", "Sanitize", "Validate", "GetFileName", "Encode", "Parse", "TryParse"]
 depth = 6
 

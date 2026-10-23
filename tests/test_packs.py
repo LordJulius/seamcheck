@@ -282,3 +282,62 @@ class SecurityFlowCases(unittest.TestCase):
                  "    dao.byThreshold(req.params.userId, req.query.threshold, (e, r) => res.send(r));\n  };\n}\n"
                  "module.exports = Handler;\n")
         self.assertTrue(any("find()" in m for m in self.found({"app/data/allocations-dao.js": dao, "app/routes/a.js": route})))
+
+
+class JavaAndCSharpHandlers(unittest.TestCase):
+    """Spring / ASP.NET handlers get request values as parameters (java-sec-code, dvcsharp-api)."""
+
+    def found(self, files):
+        return SecurityFlowCases.found(self, files)
+
+    def test_a_spring_handler_parameter_is_request_data(self):
+        src = ("package a;\npublic class Rce {\n    @GetMapping(\"/exec\")\n    public String run(String cmd)\n"
+               "            throws IOException {\n        String[] argv = {\"/bin/sh\", \"-c\", cmd};\n"
+               "        ProcessBuilder pb = new ProcessBuilder(argv);\n        return \"\";\n    }\n"
+               "    public String plain(String cmd) {\n        Runtime.getRuntime().exec(cmd);\n        return \"\";\n    }\n}\n")
+        got = self.found({"src/a/Rce.java": src})
+        self.assertEqual(1, len(got), got)  # the handler, not a method nobody routes to
+        self.assertIn("ProcessBuilder()", got[0])
+
+    def test_a_constant_query_holds_no_value_by_its_text(self):
+        src = ("package a;\npublic class Q {\n    @RequestMapping(\"/q\")\n    public String q(@RequestParam(\"username\") String username) {\n"
+               "        String sql = \"select * from users where username = ?\";\n"
+               "        PreparedStatement st = con.prepareStatement(sql);\n        st.setString(1, username);\n"
+               "        ResultSet rs = st.executeQuery();\n        return \"\";\n    }\n"
+               "    @RequestMapping(\"/v\")\n    public String v(String username) {\n"
+               "        String sql = \"select * from users where username = '\" + username + \"'\";\n"
+               "        PreparedStatement st = con.prepareStatement(sql);\n        ResultSet rs = st.executeQuery();\n"
+               "        return \"\";\n    }\n}\n")
+        got = self.found({"src/a/Q.java": src})
+        self.assertEqual(1, len(got), got)  # v's prepareStatement, once (not again at executeQuery)
+        self.assertIn("Q.java:14: v", got[0])
+
+    def test_a_helper_that_reads_the_request_and_a_condition_assignment(self):
+        util = ("package a;\npublic class WebUtils {\n    public static String body(HttpServletRequest r) throws IOException {\n"
+                "        return IOUtils.toString(r.getInputStream());\n    }\n}\n")
+        ctrl = ("package a;\npublic class X {\n    @PostMapping(\"/x\")\n    public String parse(HttpServletRequest request) {\n"
+                "        String xml = WebUtils.body(request);\n        new XStream().fromXML(xml);\n        return \"\";\n    }\n"
+                "    public void doFilter(ServletRequest req, ServletResponse res) {\n        String cmd;\n"
+                "        if ((cmd = req.getParameter(\"c\")) != null) {\n            Runtime.getRuntime().exec(cmd);\n        }\n    }\n}\n")
+        got = self.found({"src/a/WebUtils.java": util, "src/a/X.java": ctrl})
+        self.assertTrue(any("fromXML()" in m for m in got), got)
+        self.assertTrue(any("exec()" in m for m in got), got)
+
+    def test_an_aspnet_handler_and_a_value_put_into_an_object(self):
+        src = ("public class ProductsController : Controller {\n    [HttpGet(\"search\")]\n"
+               "    public IActionResult Search(string keyword) {\n"
+               "        var query = $\"SELECT * FROM Products WHERE name LIKE '%{keyword}%'\";\n"
+               "        var products = _context.Products\n            .FromSql(query)\n            .ToList();\n        return Ok(products);\n    }\n"
+               "    [HttpPost]\n    public IActionResult Import() {\n        XmlDocument doc = new XmlDocument();\n"
+               "        doc.Load(HttpContext.Request.Body);\n        foreach (XmlElement item in doc.SelectNodes(\"E\")) {\n"
+               "            string typeName = item.GetAttribute(\"Type\");\n"
+               "            var ser = new XmlSerializer(Type.GetType(typeName));\n        }\n        return Ok();\n    }\n}\n")
+        got = self.found({"Controllers/ProductsController.cs": src})
+        self.assertTrue(any(".FromSql()" in m for m in got), got)
+        self.assertTrue(any("XmlSerializer()" in m for m in got), got)
+
+    def test_only_names_a_pack(self):
+        from seamcheck import core
+        self.assertTrue(core.picked("security/java-injection", ["security"]))
+        self.assertFalse(core.picked("securityx/a", ["security"]))
+        self.assertFalse(core.picked("a", None))
