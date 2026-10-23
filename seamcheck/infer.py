@@ -692,6 +692,29 @@ class Types:
         k = names.index(param)
         return type_name(args[k]) if k < len(args) else ""
 
+    def _forwards_to_library(self, g, argi: int, depth: int) -> bool:
+        """JS: g hands its parameter at argi on, whole, to a library call
+        (`function startHTTPServer(handler) { http.createServer(handler) }`)."""
+        from . import lambdas
+        from .chains import expression
+        hm = re.match(r"[^(]*\(", g.code)
+        if not hm:
+            return False
+        close = lambdas.matching(g.code, hm.end() - 1)
+        params = lambdas.split_top(g.code[hm.end():close]) if close > 0 else []
+        if argi >= len(params):
+            return False
+        pm = re.match(r"\s*(?:\.\.\.)?([A-Za-z_$][\w$]*)\s*(?:[?:=,]|$)", params[argi])
+        if not pm:
+            return False
+        pn = re.escape(pm.group(1))
+        gm = self.p.modules.get(g.module)
+        for cm in re.finditer(rf"((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*)\s*\((?:[^()]*?[(,]\s*)?{pn}\s*[,)]", g.code[close:]):
+            ch = expression(cm.group(1) + "()", 0)
+            if gm is not None and ch and len(ch) > 1 and is_ext(self.chain(gm, g, ch[:-1], depth + 1) or (None,)):
+                return True
+        return False
+
     def lambda_param(self, mod, f, spec: str, depth: int):
         """A lambda's parameter: the type the called function's parameter at
         that place hands its callback (`AddPipeline(k, b => ...)` with
@@ -762,6 +785,9 @@ class Types:
                     and not (name[:1].isupper() and self.type_modules(mod, name)[2]):
                 self.cache[key] = EXT  # `withCheckedContinuation { continuation in }`: no project function of that name
                 return EXT
+        if len(hits) == 1 and mod.file.endswith(_JS_EXTS[:-1]) and depth < _MAX and self._forwards_to_library(hits[0], argi, depth):
+            self.cache[key] = EXT  # `startHTTPServer((req, res) => ...)` whose handler goes to http.createServer(handler)
+            return EXT
         cands = []  # (type-parameter count, callee module, the lambda parameter's type)
         for g in hits:
             sh = shift if g.recv and g.file.endswith(".cs") else 0
