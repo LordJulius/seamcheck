@@ -1,7 +1,9 @@
 """Module-level code and the calls a definition makes: JS top-level calls
-a test file's `before(function () { createApp() })`), and bare calls in a
-CommonJS file reaching only what the file defines or requires. Python:
-`sessions.Session()` runs Session.__init__."""
+(`var app = module.exports = express()`, a test file's
+`before(function () { createApp() })`), bare calls in a CommonJS file
+reaching only what the file defines or requires, inline and commented
+requires, Python decorators (`@setupmethod`, `@app.route("/")` and the closure
+route returns), and `sessions.Session()` running Session.__init__."""
 import os
 import sys
 import tempfile
