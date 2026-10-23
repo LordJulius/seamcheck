@@ -1784,6 +1784,9 @@ def _top_calls(top: Func, mods_: list, code: str, lines: list[str], tk: str, fam
                 nm = m.group(2)
                 if re.search(r"\bfunction\s*\*?\s*$", ln[:m.start(2)]):
                     continue  # `function name(`: a declaration
+                if fam == "js" and re.match(rf"\s*(?:(?:async|static|get|set)\s+)*\*?\s*{re.escape(nm)}\s*\([^()]*\)\s*\{{", ln) \
+                        and ln[:m.start(2)].strip() in ("", "async", "static", "get", "set", "*"):
+                    continue  # `set(headerValue) {` in an object literal: a method's definition
                 chain = receiver(text, off + m.start(2))
                 before = ln[:m.start(2)].rstrip()
                 q = m.group(1) or ("." if before.endswith((".", "->")) and not before.endswith("...") else "")
