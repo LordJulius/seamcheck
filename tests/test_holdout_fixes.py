@@ -397,3 +397,27 @@ class JsPropertyFunctionFixes(unittest.TestCase):
         self.assertIn(("lib/axios.create", True), got)
         self.assertIn(("lib/Axios.request", True), got)
         self.assertIn(("lib/isAxiosError.isAxiosError", True), got)
+
+
+CPP3 = {
+    "include/lib/registry.h": "#pragma once\nnamespace lib {\nnamespace details {\nclass registry {\npublic:\n"
+                              "    static registry &instance();\n    void set_level(int n);\n};\n}\n}\n",
+    "include/lib/registry.cpp": "#include \"registry.h\"\nnamespace lib {\nnamespace details {\n"
+                                "registry &registry::instance() { static registry r; return r; }\n"
+                                "void registry::set_level(int n) { }\n}\n}\n",
+    "include/lib/std.h": "#pragma once\nnamespace lib {\nclass logger {\npublic:\n    logger(const char *n) { }\n"
+                         "    void set_level(int n) { }\n    void what() { }\n};\n}\n",
+    "include/lib/api.cpp": "#include \"registry.h\"\n#include \"std.h\"\n#include <system_error>\nnamespace lib {\n"
+                           "void set_level(int n) {\n    details::registry::instance().set_level(n);\n"
+                           "    lib::logger oss_logger(\"oss\");\n    oss_logger.set_level(n);\n"
+                           "    ::std::string s;\n    std::system_error(n).what();\n}\n}\n",
+}
+
+
+class CppHoldoutFixes3(unittest.TestCase):
+    def test_namespace_heads_ctor_declarations_and_std(self):
+        p = load(CPP3)
+        got = {(d, e) for d, _l, e in p.edges.get("include/lib/api.set_level", [])}
+        self.assertTrue(any(d.endswith("registry.set_level") and e for d, e in got), got)
+        self.assertTrue(any(d.endswith("logger.set_level") and e for d, e in got), got)
+        self.assertFalse(any(d.endswith(".what") for d, _ in got), got)

@@ -133,8 +133,10 @@ _CS_KEYWORD_TYPED = re.compile(r"(?:^|[(,])\s*(?:(?:const|final|this|out|ref|in|
                                r"\??\s+([a-z_]\w*)\s*(?=[;=,)])", re.M)
 # C / C++ with any type name (snake_case, `ns::type`, `struct x`): `const details::log_msg &msg`,
 # `memory_buf_t &dest`, `struct node *n`, `buffer b;` (keywords and built-in types aren't types)
-_CPP_ANY_TYPED = re.compile(r"(?<![\w:>.])(?:(?:const|struct|class|union|enum|volatile)\s+)*((?:\w+::)*[A-Za-z_]\w*(?:<[^;=(){}<>]*(?:<[^;=(){}<>]*>)?[^;=(){}<>]*>)?)"
+_CPP_ANY_TYPED = re.compile(r"(?<![\w:>.])(?:(?:const|struct|class|union|enum|volatile)\s+)*(?:::)?((?:\w+::)*[A-Za-z_]\w*(?:<[^;=(){}<>]*(?:<[^;=(){}<>]*>)?[^;=(){}<>]*>)?)"
                             r"(?:\s*[\*&]+\s*|\s+)(?:const\s+)?([a-z_]\w*)\s*(?=[,;=)\[{]|$)", re.M)
+_CPP_CTOR_DECL = re.compile(r"^[ \t]*(?:const[ \t]+)?(?:::)?((?:\w+::)*[A-Za-z_]\w*(?:<[^;=(){}]*>)?)[ \t]+([a-z_]\w*)[ \t]*"
+                            r"\((?:[^;(){}]|\([^;(){}]*\))*\)[ \t]*;", re.M)
 _CPP_NOT_TYPE = {"return", "else", "case", "delete", "new", "throw", "goto", "typedef", "using", "namespace", "sizeof",
                  "co_return", "co_await", "co_yield", "operator", "public", "private", "protected", "template", "typename",
                  "static", "inline", "virtual", "explicit", "friend", "mutable", "register", "extern", "auto", "void", "int",
@@ -145,7 +147,7 @@ _CPP_TYPED = re.compile(r"(?<![\w:>])([A-Z]\w*)\s*[\*&]+\s*([a-z_]\w*)\s*(?=[,;=
 # `Q_PROPERTY(SortFilterRoomTreeModel *model READ model CONSTANT)`: QML's `obj.model`
 _Q_PROPERTY = re.compile(r"^\s*Q_PROPERTY\(\s*(?:const\s+)?((?:[\w:]+)(?:<[^()]*?>)?)\s*[\*&]?\s*([A-Za-z_]\w*)\s+(?:READ|MEMBER|BINDABLE)\b")
 # (any type name: `details::circular_q<filename_t> filenames_q_;`, `memory_buf_t cached_datetime_;`)
-_CPP_FIELD = re.compile(r"^\s*(?:(?:mutable|static|const|inline|volatile)\s+)*((?:\w+::)*[A-Za-z_]\w*(?:<[^;()]*>)?)\s*[\*&]?\s*([a-z_]\w*)\s*(?:=[^;]*|\{[^;]*\})?;")
+_CPP_FIELD = re.compile(r"^\s*(?:(?:mutable|static|const|inline|volatile)\s+)*(?:::)?((?:\w+::)*[A-Za-z_]\w*(?:<[^;()]*>)?)\s*[\*&]?\s*([a-z_]\w*)\s*(?:=[^;]*|\{[^;]*\})?;")
 _KT_RECV = r"\bfun\s+(?:<[^>]*>\s*)?([A-Z]\w*)(?:<[^>]*>)?\??\.%s\s*\("
 _ALLCAPS = re.compile(r"[A-Z0-9_]+$")
 
@@ -221,6 +223,11 @@ def _typed(tk: str, text: str) -> list[tuple[str, str]]:
                for m in pat.finditer(text) if not _ALLCAPS.match(m.group(1))
                and (t := (generic_name(m.group(1)) if tk == "jvm" else type_name(m.group(1))))]
         if tk == "cpp":
+            have = {n for n, _ in out}
+            # `spdlog::logger oss_logger("oss", sink);`: a local built by its constructor
+            out += [(m.group(2), t) for m in _CPP_CTOR_DECL.finditer(text)
+                    if m.group(2) not in have and m.group(1).split("::")[-1].split("<")[0] not in _CPP_NOT_TYPE
+                    and not _ALLCAPS.match(m.group(1)) and (t := type_name(m.group(1))) and t not in _CPP_NOT_TYPE]
             have = {n for n, _ in out}
             out += [(m.group(2), t) for m in _CPP_ANY_TYPED.finditer(text)
                     if m.group(2) not in have and m.group(1).split("::")[-1].split("<")[0] not in _CPP_NOT_TYPE

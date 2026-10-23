@@ -424,6 +424,16 @@ class Types:
                 if held:
                     got = self.held(m, None, held, depth + 1, self_mods=[mn])
                     return UNKNOWN if got is None else got
+        if mods and self.p.modules[mods[0]].file.endswith(_C_EXTS) and depth < _MAX:
+            for mn in mods:  # `FilePath::IsRootDirectory` defined in a .cc: the class its header declares has the fields
+                m = self.p.modules[mn]
+                if not m.owner or not m.decls:
+                    continue
+                for other in self.type_modules(m, m.decls[0].split("`")[0])[0]:
+                    om = self.p.modules[other]
+                    if other != mn and om.file != m.file and name in om.bound:
+                        got = self.held(om, None, om.bound[name], depth + 1, self_mods=[other])
+                        return UNKNOWN if got is None else got
         if mods and self.p.modules[mods[0]].file.endswith(_JS_EXTS) and depth < _MAX:
             for mn in mods:
                 for a in self.ancestors(mn):
@@ -1163,6 +1173,12 @@ class Types:
             prim = self._primary(own[0])
             sup = [b for b in self.ancestors(own[0])[1:] if self._primary(b) != prim][:1]
             return ("inst", tuple(sup), True) if sup else (EXT if self.external_base(own[0]) else None)
+        if fm.file.endswith(_C_EXTS) and not (f is not None and seg in f.bound) and seg not in fm.bound:
+            if seg in ("std", "boost"):
+                return EXT  # (before a project file named std.h)
+            from .core import _cpp_namespaces
+            if seg in _cpp_namespaces(p) and seg not in self.by_type:
+                return ("ns", (), True)  # `details::registry::instance()`: a project namespace, then its class
         if seg == "typeof()" and fm.file.endswith(".cs"):
             return ("ext", ("Type",), True)  # `typeof(X).ShouldBeThrownBy(...)`: a System.Type (its extension methods)
         if seg.startswith("new "):
@@ -1349,6 +1365,9 @@ class Types:
             return EXT  # a name no project QML file declares: the window's / framework's
         if fm.file.endswith(".rs") and seg in self._rs_external():
             return EXT  # `std::...`, `serde_json::from_str`: a crate the project depends on, not one of its own
+        if fm.file.endswith(_C_EXTS) and seg not in self.by_type and self._cpp_aliases() is not None \
+                and seg in self.cache.get("\0cppstd", ()):
+            return EXT  # `log_clock::now()` with `using log_clock = std::chrono::system_clock;`
         if seg in ("std", "boost") and fm.file.endswith((".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".c")):
             return EXT  # `std::unique_ptr<X509>(...)`: the standard library's
         if fm.file.endswith(".cs") and seg in _CS_KEYWORD_TYPES and not (f is not None and seg in f.bound):
@@ -1645,6 +1664,10 @@ class Types:
             return None
         if kind == "ns":  # a QML module's namespace: `KDEConnect.Type`
             name = seg[:-2] if seg.endswith("()") else seg
+            if mod.file.endswith(_C_EXTS):
+                from .core import _cpp_namespaces
+                if name in _cpp_namespaces(self.p) and name not in self.by_type and not seg.endswith("()"):
+                    return cur  # `fmt::detail::`: a namespace inside a namespace
             mods_, ex, declared = self.type_modules(mod, name)
             return ("static", tuple(mods_), ex) if declared else EXT
         if kind == "pkg":
