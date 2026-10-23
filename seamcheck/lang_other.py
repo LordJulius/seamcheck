@@ -623,13 +623,25 @@ _CJS_REQUIRE = re.compile(r"""(?:\b(?:const|let|var)\s+|,\s*)([A-Za-z_$][\w$]*|\
 _CJS_EXPORT = re.compile(r"""^[ \t]*(?:exports[ \t]*=[ \t]*)?module\.exports[ \t]*=[ \t]*(?:exports[ \t]*=[ \t]*)?(?:require\(\s*['"]([^'"]+)['"]\s*\)|([A-Za-z_$][\w$]*)[ \t]*;?[ \t]*$)""", re.M)
 
 
-def _cjs(mod: Module, rel: str, text: str) -> None:
+def _code_at(lines: list[str], text: str, pos: int, word: str) -> bool:
+    """text[pos:] starts `word` as code (the blanked line keeps it), not in a comment or string."""
+    ln = text.count("\n", 0, pos)
+    col = pos - (text.rfind("\n", 0, pos) + 1)
+    return ln < len(lines) and lines[ln][col:col + len(word)] == word
+
+
+def _cjs(mod: Module, rel: str, text: str, lines: list[str]) -> None:
     """CommonJS: `const x = require("./x")` (the module, and calling it calls
-    what it exports), `const { a, b: c } = require("./x")`, and what a file
+    what it exports), `const { a, b: c } = require("./x")`, a require inside
+    an expression (`app.use(require("./api"))`: a dependency), and what a file
     exports (`module.exports = createApplication`, `= require("./lib/x")`)."""
     d = rel.rsplit("/", 1)[0] if "/" in rel else ""
     base = os.path.basename(rel)
+    seen = set()
     for m in _CJS_REQUIRE.finditer(text):
+        if not _code_at(lines, text, text.index("require", m.start()), "require"):
+            continue  # (a doc comment's `var express = require('express')`)
+        seen.add(text.index("require", m.start()))
         where = f"js:{d}\0{m.group(2)}"
         local = m.group(1)
         if local.startswith("{"):
@@ -642,6 +654,9 @@ def _cjs(mod: Module, rel: str, text: str) -> None:
         else:
             mod.aliases.setdefault(local, where)
             mod.imported.setdefault(local, (where, "default"))
+    for m in re.finditer(r"""\brequire\(\s*['"](\.[^'"]*)['"]\s*\)""", text):
+        if m.start() not in seen and _code_at(lines, text, m.start(), "require"):
+            mod.imported.setdefault(f"\0require:{m.group(1)}", (f"js:{d}\0{m.group(1)}", "default"))
     for m in _CJS_EXPORT.finditer(text):
         if m.group(1):
             mod.imported["default"] = (f"js:{d}\0{m.group(1)}", "default")
@@ -1571,7 +1586,7 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 mod.bound.setdefault(em.group(1), "reexport:" + em.group(2))
         _js_reexports(mod, rel, text, lines)
         if "require(" in text or "module.exports" in text:
-            _cjs(mod, rel, text)
+            _cjs(mod, rel, text, lines)
     elif fam == "kotlin" or ext == ".java":
         _kt_imports(mod, text, lines)
     elif ext == ".cs":
