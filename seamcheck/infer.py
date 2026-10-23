@@ -286,18 +286,29 @@ class Types:
                 return True
         return False
 
-    def method(self, mods: list[str], name: str) -> tuple[list, bool]:
+    def method(self, mods: list[str], name: str, argc: int | None = None) -> tuple[list, bool]:
         """`name` on an instance of these modules' type: the definition on the
         type or its nearest supertype; else (an interface, an abstract
-        method) every subtype's implementation. (funcs, found on the type)."""
+        method) every subtype's implementation. (funcs, found on the type).
+        `argc`: the call's argument count, where overloads are by arity (Java,
+        C#, Kotlin, C++): a class whose `name`s all take another count is
+        passed over for its supertype's (Element's `attr(k, v)` overrides leave
+        `attr(k)` to Node)."""
         found = []
         for mn in mods:
+            first = None
             for a in self.ancestors(mn):
                 g = self.p.funcs.get(f"{a}.{name}")
                 if g:
+                    first = first or g
+                    if argc is not None and not self._takes(g, name, argc):
+                        continue
                     if g not in found:
                         found.append(g)
+                    first = None
                     break
+            if first is not None and first not in found:
+                found.append(first)  # (no class's overloads take that count as read: the nearest)
         if found:
             return found, True
         impls = []
@@ -319,6 +330,15 @@ class Types:
             if impls:
                 return impls, False  # (extensions: the receiver's type is sure, each overload may be the one)
         return impls, False
+
+    def _takes(self, g, name: str, argc: int) -> bool:
+        """Some overload of `name` in g's class takes `argc` arguments (or the
+        overloads can't be read: assume so)."""
+        key = ("\0arity", g.module, name)
+        spans = self.cache.get(key)
+        if spans is None:
+            spans = self.cache[key] = _arities(self.p.modules[g.module], name)
+        return not spans or any(lo <= argc <= hi for lo, hi in spans)
 
     def one_type(self, funcs) -> bool:
         """These functions are one type's (overloads, or its parts)."""
@@ -1386,6 +1406,84 @@ _ELEMENT_ACCESS = {"[]", "at()", "first()", "last()", "value()", "get()", "front
                    "constLast()", "elementAt()", "getFirst()", "getLast()", "peek()", "poll()", "pop()", "find()",
                    "detect()"}
 _RB_EXTS = (".rb", ".rake", ".ru")
+
+
+_OVERLOADED = (".java", ".cs", ".kt", ".kts", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh")
+_DECL_MODS = r"(?:(?:public|protected|private|static|final|abstract|synchronized|native|default|override|virtual|" \
+             r"open|internal|suspend|inline|operator|async|sealed|new|extern|unsafe|partial|readonly|const|fun)\s+)*"
+
+
+def _arities(m, name: str) -> list[tuple[int, int]]:
+    """The argument counts each declaration of `name` in m's file takes:
+    [(fewest, most)], `...` / `params` / `vararg` taking any more. [] when
+    none can be read (then nothing is ruled out)."""
+    if not m.file.endswith(_OVERLOADED):
+        return []
+    text = _JOINED.get(id(m.code))
+    if text is None or text[0] is not m.code:
+        text = (m.code, "\n".join(m.code) if isinstance(m.code, list) else "")
+        _JOINED[id(m.code)] = text
+    text = text[1]
+    out = []
+    for dm in re.finditer(rf"\b{re.escape(name)}\s*(?:<[^()<>]*>)?\s*\(", text):
+        ls = text.rfind("\n", 0, dm.start()) + 1
+        head = text[ls:dm.start()]
+        if not _DECL_HEAD.match(head) or not head.strip():
+            continue  # (a call: `x.name(`, `return name(`, `= name(`)
+        close = _paren_close(text, dm.end() - 1)
+        if close < 0:
+            continue
+        after = text[close + 1:close + 120].lstrip()
+        if not re.match(r"(?:const\s*)?(?:throws\b[^{;]*)?(?:noexcept\s*)?(?:override\s*)?(?:\{|;|:|=|->|where\b|$)", after):
+            continue
+        params = text[dm.end():close]
+        if not params.strip():
+            out.append((0, 0))
+            continue
+        parts = _top_split(params)
+        n = len(parts)
+        if any("..." in p or re.match(r"\s*(?:params|vararg)\b", p) for p in parts):
+            out.append((n - 1, 1 << 20))
+            continue
+        defaults = sum(1 for p in parts if "=" in p)
+        out.append((n - defaults, n))
+    return out
+
+
+_JOINED: dict = {}
+# what may stand before a declared name on its line: annotations, modifiers, a return type
+_DECL_HEAD = re.compile(r"^(?!\s*(?:return|throw|new|else|case|yield|await|assert|if|while|for|switch|do|try|"
+                        r"catch|delete|goto|co_return|co_await|sizeof|typeof)\b)\s*(?:@\w+(?:\([^()]*\))?\s*)*" + _DECL_MODS +
+                        r"(?:<[^<>]*>\s*)?(?:[A-Za-z_][\w.:]*(?:<[^()]*>)?[\[\]?*& ]*\s+)?(?:[A-Za-z_][\w:]*::)?$")
+
+
+def _paren_close(text: str, k: int) -> int:
+    depth = 0
+    for j in range(k, min(len(text), k + 2000)):
+        if text[j] in "([{":
+            depth += 1
+        elif text[j] in ")]}":
+            depth -= 1
+            if depth == 0:
+                return j
+    return -1
+
+
+def _top_split(s: str) -> list[str]:
+    """Split on the commas at depth 0 (generics `<A, B>` included)."""
+    out, depth, cur = [], 0, ""
+    for ch in s:
+        if ch in "([{<":
+            depth += 1
+        elif ch in ")]}>":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    out.append(cur)
+    return out
 
 
 def _bare_reaches_nothing(p, fm, name: str) -> bool:

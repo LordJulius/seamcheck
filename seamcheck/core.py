@@ -1250,6 +1250,26 @@ def _family(rel: str) -> set[str]:
 _EXPLICIT_RECEIVER = (".go", ".rs", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".php")
 
 
+def _argc(mod, c) -> int | None:
+    """How many arguments a call passes, where overloads go by count (Java, C#,
+    Kotlin, C++); None elsewhere or when it can't be read."""
+    if mod is None or not mod.file.endswith(infer_mod._OVERLOADED) or not (0 < c.line <= len(mod.code)):
+        return None
+    lines = mod.code
+    text = "\n".join(lines[c.line - 1:c.line + 30])
+    k = text.find("(", c.col if c.col >= 0 else 0)
+    if k < 0 or text[c.col:k].strip(" \t") not in ("",) and not re.fullmatch(r"\w*\s*(?:<[^()]*>)?\s*", text[c.col:k]):
+        return None
+    close = infer_mod._paren_close(text, k)
+    if close < 0:
+        return None
+    inner = text[k + 1:close]
+    if not inner.strip():
+        return 0
+    inner = re.sub(r"(?<=\w)\s*<[\w\s,.?<>\[\]]*>(?=\s*[(\[{>),]|\s*$)", "", inner)  # `new HashMap<A, B>()`
+    return len(infer_mod._top_split(inner.replace("<", " ").replace(">", " ")))
+
+
 def _needs_receiver(project: Project, g: Func) -> bool:
     """`g` is a method a call reaches only through a receiver (Go's `func (c *Command) X`,
     Rust's `fn x(&self)`, a JS / TS / PHP class's method), not a free function."""
@@ -1714,9 +1734,9 @@ def _build_edges(project: Project) -> None:
                         hits = [h for mn in mods_ for h in _in_scope(project, mn, c.name)]
                         on_type = True
                         if not hits:
-                            hits, on_type = types.method(list(mods_), c.name)
+                            hits, on_type = types.method(list(mods_), c.name, _argc(mod, c))
                     else:
-                        hits, on_type = types.method(list(mods_), c.name)
+                        hits, on_type = types.method(list(mods_), c.name, _argc(mod, c))
                         if kind == "inst":  # (`super.x()` runs the parent's x itself: no subtype's)
                             recv = ("\0super",) if c.chain[-1] in ("super", "base", "parent") else tuple(mods_)
                     if len(hits) > 1 and c.targs >= 0:  # C#: `NoOp()` is not `NoOp<T>()`
@@ -2009,11 +2029,12 @@ def _build_edges(project: Project) -> None:
             for t, exact in targets:
                 if t.name in _CTOR_NAMES or (t.name[:1].isupper() and c.name == t.name):
                     continue  # a constructor builds that type, not a subclass
+                n_args = _argc(mod, c)
                 for sub in project.children.get(t.module, ()):
                     if below is not None and sub not in below:
                         continue  # a sibling's override: not this receiver's
                     o = project.funcs.get(f"{sub}.{t.name}")
-                    if o:
+                    if o and (n_args is None or types._takes(o, o.name, n_args)):  # (an override of another overload: not this call's)
                         more.append((o, exact))
             if not q and f.file.endswith(_PARAM_FLOW_EXTS) and not any(e for _, e in targets) and c.name in _param_names(f):
                 pending.append((f, c))  # `checkFn(x)` on a parameter: what the callers pass (after this pass)
