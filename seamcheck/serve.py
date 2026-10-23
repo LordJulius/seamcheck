@@ -50,7 +50,8 @@ def _gate(p, args, extra):
 
 def _walk(reverse: bool):
     def run(p, args):
-        got = queries.walk(p, args["name"], args.get("depth", 2), reverse, args.get("fuzzy", False))
+        got = queries.walk(p, args["name"], args.get("depth", 2), reverse, args.get("fuzzy", False),
+                           wide=reverse and args.get("wide", False))
         if not got:
             raise ToolError(f"no function matches {args['name']!r}")
         return got
@@ -90,10 +91,13 @@ TOOLS = {
              "Returns {blocked, changed_files, findings}.",
              _schema({"since": {"type": "string", "description": "compare against this git ref (default HEAD)"},
                       "staged": {"type": "boolean", "description": "only what is staged"}}), _gate),
-    "callers": ("Who calls a function, transitively. Each match: its exact and name-guess caller counts, and the "
-                "callers reached with their depth.",
+    "callers": ("Who calls a function, transitively. Each match: its exact and name-guess caller counts, the count of "
+                "possible callers (calls by that name on a library-typed value), and the callers reached with their depth.",
                 _schema({"name": {"type": "string", "description": "`name` (glob ok), `Module.name` or `path/glob:func`"},
-                         "depth": _DEPTH, "fuzzy": _FUZZY}, ("name",)), _walk(True)),
+                         "depth": _DEPTH, "fuzzy": _FUZZY,
+                         "wide": {"type": "boolean", "description": "also list the possible callers (`possible_sites`) and "
+                                  "follow name-guess edges: everything that may call it, ranked by tier"}},
+                        ("name",)), _walk(True)),
     "callees": ("What a function calls, transitively (same shape as callers).",
                 _schema({"name": {"type": "string", "description": "`name` (glob ok), `Module.name` or `path/glob:func`"},
                          "depth": _DEPTH, "fuzzy": _FUZZY}, ("name",)), _walk(False)),

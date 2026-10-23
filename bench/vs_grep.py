@@ -31,7 +31,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from seamcheck import core  # noqa: E402
+from seamcheck import core, queries  # noqa: E402
 
 _SG_LANG = {"python": "python", "javascript": "javascript", "ruby": "ruby", "java": "java", "go": "go",
             "csharp": "csharp", "typescript": "typescript"}
@@ -248,7 +248,7 @@ def main() -> None:
     picks = [(g, set().union(t, *(sites for (tf, tl, name), sites in callers.items()
                                   if tf == g.file and name == g.name and func_at(tf, tl, name) in (None, g))))
              for g, t in picks]
-    tools = {"seamcheck": [0, 0, 0], "ast-grep": [0, 0, 0], "semgrep": [0, 0, 0], "scip": [0, 0, 0]}
+    tools = {"seamcheck": [0, 0, 0], "seamcheck --wide": [0, 0, 0], "ast-grep": [0, 0, 0], "semgrep": [0, 0, 0], "scip": [0, 0, 0]}
     docs = _scip(opt("--scip"), opt("--scip-prefix", "")) if opt("--scip") else None
     if docs is not None:  # (every tool scored on the files both CodeQL and the SCIP indexer read)
         seen &= set(docs)
@@ -261,6 +261,11 @@ def main() -> None:
                 for d, ln, ex in es if ex and d == g.id}
         mine = _align_lines(mine, truth, p)
         row = {"seamcheck": _score({x for x in mine if x[0] in seen}, truth)}
+        # `callers --wide`: exact, then name guesses, then calls by that name on a library-typed value
+        wide = mine | {(p.funcs[s].file, ln) for s, es in p.edges.items() if s in p.funcs
+                       for d, ln, ex in es if not ex and d == g.id}
+        wide |= {(p.funcs[fid].file, ln) for fid, ln in queries.possible_callers(p, g)}
+        row["seamcheck --wide"] = _score(_align_lines({x for x in wide if x[0] in seen}, truth, p), truth)
         if opt("--sg"):
             t = time.time()
             row["ast-grep"] = _score({x for x in _sg(opt("--sg"), root, lang, g.name) if x[0] in seen}, truth)
@@ -280,7 +285,7 @@ def main() -> None:
           f"semgrep {times['semgrep']:.1f}s for these {len(picks)})")
     for tool, (hit, got, tr) in tools.items():
         if got or tool == "seamcheck":
-            print(f"  {tool:10s} precision {100 * hit / max(got, 1):5.1f}%  recall {100 * hit / max(tr, 1):5.1f}%")
+            print(f"  {tool:16s} precision {100 * hit / max(got, 1):5.1f}%  recall {100 * hit / max(tr, 1):5.1f}%")
 
 
 if __name__ == "__main__":

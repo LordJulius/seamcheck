@@ -786,3 +786,16 @@ class TsPropertyArrowFixes(unittest.TestCase):
         got = {(d, e) for k, es in p.edges.items() if k.startswith("test/t") for d, _l, e in es}
         self.assertIn(("source/index.create", True), got)
         self.assertNotIn("source/other.Queue.close", {d for d, _ in got})
+
+
+class PossibleCallersTier(unittest.TestCase):
+    def test_a_library_typed_call_is_a_possible_caller_not_an_edge(self):
+        from seamcheck import queries
+        p = load({"Wrapped.cs": "using System.Data;\nnamespace D {\n  public class Wrapped : IDataReader {\n"
+                                "    public bool Read() { return true; }\n  }\n  public static class Use {\n"
+                                "    public static void Run(IDataReader reader) {\n      reader.Read();\n    }\n  }\n}\n"})
+        g = p.find("Wrapped.Read")[0]
+        self.assertFalse(any(d == g.id for es in p.edges.values() for d, _l, _e in es))  # no edge
+        got = queries.walk(p, "Wrapped.Read", 1, True, wide=True)[0]
+        self.assertEqual(1, got["possible"])
+        self.assertEqual(8, got["possible_sites"][0]["line"])
