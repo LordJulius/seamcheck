@@ -2022,12 +2022,34 @@ def _build_edges(project: Project) -> None:
                 if _TRACE is not None:
                     _TRACE.append((f.file, c.line, c.name, c.chain, "exact" if any(e for _, e in targets) else "guess",
                                    tuple(t.id for t, _ in targets[:4])))
+            if f.file.endswith(".py") and mod is not None and 0 < c.line <= len(mod.raw) \
+                    and mod.raw[c.line - 1].lstrip().startswith("@") and len(targets) == 1 and targets[0][1]:
+                # `@app.route("/")`: route() runs, then the function it returns gets the decorated one
+                inner = _py_returned_closure(project, targets[0][0])
+                if inner is not None:
+                    more.append((inner, True))
             seen_t = {t.id for t, _ in targets}
             more = [(o, e) for o, e in more if o.id not in seen_t and not seen_t.add(o.id)]
             for t, exact in targets + more:
                 project.edges[f.id].append((t.id, c.line, exact))
                 project.redges[t.id].append((f.id, c.line, exact))
     _param_flow(project, types, pending)
+
+
+def _py_returned_closure(project: Project, g: Func):
+    """The function a Python decorator factory returns: `def route(...): def decorator(f): ...;
+    return decorator` gives route's `decorator`, or None."""
+    rets = list(re.finditer(r"^([ \t]*)return\s+([A-Za-z_]\w*)\s*$", g.code, re.M))
+    if not rets:
+        return None
+    m = min(rets, key=lambda r: len(r.group(1).expandtabs(4)))  # (the function's own return, not its closure's)
+    name = m.group(2)
+    same_file = [h for h in project.by_name.get(name, ()) if h.file == g.file]
+    for h in same_file:
+        if g.start < h.start <= g.end:
+            return h
+    # (a file's closures of one name are one function: `decorator` in route, in errorhandler, ...)
+    return same_file[0] if len(same_file) == 1 and re.search(rf"^\s*def\s+{name}\s*\(", g.code, re.M) else None
 
 
 def _passed(project: Project, types, f: Func, k: int, depth: int):

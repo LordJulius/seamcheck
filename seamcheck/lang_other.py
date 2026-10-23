@@ -538,6 +538,11 @@ def _py_collect(f: Func, lines: list[str], a: int, b: int, first: bool, skip: se
             if chain and q != ".":
                 q = chain[-1] if re.match(r"^\w+$", chain[-1]) else "."
             f.calls.append(Call(name, q, i + 1, chain, cut + m.start(2)))
+        dm = re.match(r"^\s*@((?:[A-Za-z_]\w*\.)*)([A-Za-z_]\w*)\s*(?:#.*)?$", t)
+        if dm and dm.group(2) not in _PY_SKIP:  # `@setupmethod`, `@app.before_request`: called with the def
+            q = dm.group(1).rstrip(".").rsplit(".", 1)[-1] if dm.group(1) else ""
+            chain = receiver(body, off + cut + dm.start(2)) if q else ()
+            f.calls.append(Call(dm.group(2), q, i + 1, chain, cut + dm.start(2)))
         if f.kind != "top":
             for m in _PY_NEW.finditer(t):
                 f.bound[m.group(1)] = "type:" + m.group(2)

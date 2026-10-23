@@ -1,4 +1,4 @@
-"""JS: a module's own top-level calls (`var app = module.exports = express()`,
+"""Module-level code and the calls a definition makes: JS top-level calls
 a test file's `before(function () { createApp() })`), and bare calls in a
 CommonJS file reaching only what the file defines or requires. Python:
 `sessions.Session()` runs Session.__init__."""
@@ -31,6 +31,31 @@ function createApp() {
     "pkg/sessions.py": "class Session:\n    def __init__(self):\n        self.a = 1\n",
     "pkg/api.py": "from . import sessions\n\n\ndef request():\n    with sessions.Session() as s:\n        return s\n",
     "pkg/__init__.py": "",
+    "pkg/scaffold.py": """def setupmethod(f):
+    return f
+
+
+class Scaffold:
+    @setupmethod
+    def route(self, rule):
+        def decorator(f):
+            self.add(rule, f)
+            return f
+
+        return decorator
+
+    def add(self, rule, f):
+        pass
+""",
+    "pkg/views.py": """from .scaffold import Scaffold
+
+app = Scaffold()
+
+
+@app.route("/")
+def index():
+    return "hi"
+""",
 }
 
 
@@ -65,6 +90,12 @@ class JsTop(unittest.TestCase):
         deps = {w for w, _n in self.p.modules["examples/app"].imported.values()}
         self.assertIn("examples/api", deps)
         self.assertNotIn("lib/express", {w for w, _n in self.p.modules["examples/api"].imported.values()})
+
+    def test_python_decorators_are_calls(self):
+        self.assertIn(("pkg/scaffold.setupmethod", True), self._edges("pkg/scaffold.<top>"))
+        got = self._edges("pkg/views.<top>")
+        self.assertIn(("pkg/scaffold.Scaffold.route", True), got)
+        self.assertIn(("pkg/scaffold.decorator", True), got)  # (the closure route returns gets index)
 
     def test_python_constructor_through_its_module(self):
         self.assertIn(("pkg/sessions.Session.__init__", True), self._edges("pkg/api.request"))
