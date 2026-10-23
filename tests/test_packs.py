@@ -51,7 +51,13 @@ GOOD = {
                                                          "    @user = User.where(id: params[:id]).first\n"
                                                          "    redirect_to :login\n  end\nend\n"),
                  "tests/test_app.py": "import subprocess\nfrom flask import request\n\n\ndef test_x():\n"
-                                      "    subprocess.run(request.args[\"c\"], shell=True)\n"},
+                                      "    subprocess.run(request.args[\"c\"], shell=True, verify=False)\n",
+                 # a slow hash, a verified token, debug from the environment, a file digest
+                 "auth.py": ("import bcrypt, hashlib, jwt, os\n\n\ndef store(password):\n"
+                             "    return bcrypt.hashpw(password, bcrypt.gensalt())\n\n\ndef user(token, key):\n"
+                             "    return jwt.decode(token, key, algorithms=['HS256'])\n\n\ndef digest(data):\n"
+                             "    return hashlib.sha256(data).hexdigest()\n\n\n"
+                             "def main(app):\n    app.run(debug=os.environ.get('DEBUG') == '1')\n")},
     "compose": {"app/src/main/java/LauncherViewModel.kt": VM_AFTER,
                 "app/src/main/java/Sync.kt": "class Sync(val vm: VM) {\n  fun start() {\n    vm.viewModelScope.launch { run() }\n  }\n}\n",
                 "app/src/test/java/SyncTest.kt": "fun go() {\n  GlobalScope.launch { }\n}\n"},
@@ -91,6 +97,13 @@ BAD = {
         "java-injection": {"src/Ping.java": ("public class Ping {\n    public void doGet(HttpServletRequest request) throws Exception {\n"
                                              "        String host = request.getParameter(\"host\");\n"
                                              "        Runtime.getRuntime().exec(\"ping \" + host);\n    }\n}\n")},
+        "tls-verification-off": {"client.py": "import requests\n\n\ndef get(u):\n    return requests.get(u, verify=False)\n"},
+        "flask-debug": {"app.py": "from flask import Flask\napp = Flask(__name__)\napp.run(host='0.0.0.0', debug=True)\n"},
+        "xml-external-entities": {"x.js": "const libxmljs = require('libxmljs');\n"
+                                          "function load(s) {\n  return libxmljs.parseXmlString(s, {noent: true});\n}\n"},
+        "weak-password-hash": {"users.py": "import hashlib\n\n\ndef store(password):\n"
+                                           "    return hashlib.md5(password.encode()).hexdigest()\n"},
+        "jwt-unverified": {"auth.py": "import jwt\n\n\ndef user(token):\n    return jwt.decode(token, verify=False)\n"},
         "csharp-injection": {"PingController.cs": ("public class PingController {\n    public void Get() {\n"
                                                    "        var host = Request.Query[\"host\"];\n"
                                                    "        Process.Start(\"cmd.exe\", \"/c ping \" + host);\n    }\n}\n")}},
