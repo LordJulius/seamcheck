@@ -116,6 +116,9 @@ _KT_TYPED = re.compile(r"(?:\b(?:val|var)\s+|[(,{]\s*|^\s*)([a-z_]\w*)\s*:\s*([A
 _KT_FIELD = re.compile(r"\b(?:val|var)\s+([a-z_]\w*)\s*:\s*([A-Z]\w*(?:\.[A-Z]\w*)*)(?![\w.])")
 # built by its constructor: `val prefs = OsaPrefs(ctx)`, `const hub = new HubClient(url)`
 _KT_NEW = re.compile(r"\b(?:val|var)\s+([a-z_]\w*)\s*=\s*([A-Z]\w*)\s*\(")
+_TS_PRIM = {"string": "String", "number": "Number", "boolean": "Boolean", "bigint": "BigInt", "symbol": "Symbol"}
+_TS_PRIM_TYPED = re.compile(r"(?:\b(?:const|let|var)\s+|[(,]\s*)([A-Za-z_$][\w$]*)\s*\??\s*:\s*(string|number|boolean|bigint|symbol|[A-Z][\w$.]*(?=\[\]))"
+                            r"(\[\])?(?=\s*[,)=;]|\s*$)", re.M)
 _TS_NEW = re.compile(r"(?:\b(?:const|let|var)\s+|^\s*(?:(?:private|public|protected|readonly|static)\s+)*)"
                      r"([A-Za-z_$][\w$]*)\s*=\s*new\s+([A-Z][\w$]*)\s*[(<]", re.M)
 _TS_TYPED = re.compile(r"(?:\b(?:const|let|var)\s+|[(,]\s*|^\s*)([A-Za-z_$][\w$]*)\s*\??\s*:\s*([A-Z][\w$]*(?:<[^<>\n]*(?:<[^<>\n]*>[^<>\n]*)*>)?)(?![\w$.<\[])", re.M)
@@ -218,8 +221,13 @@ def _typed(tk: str, text: str) -> list[tuple[str, str]]:
     if tk == "kotlin":
         return [(m.group(1), m.group(2)) for pat in (_KT_TYPED, _KT_NEW) for m in pat.finditer(text)]
     if tk == "js":
-        return [(m.group(1), t) for pat in (_TS_TYPED, _TS_NEW) for m in pat.finditer(text)
-                if (t := type_name(m.group(2)) if "<" in m.group(2) else m.group(2))]  # (`Router<string>`: a Router)
+        out = [(m.group(1), t) for pat in (_TS_TYPED, _TS_NEW) for m in pat.finditer(text)
+               if (t := type_name(m.group(2)) if "<" in m.group(2) else m.group(2))]  # (`Router<string>`: a Router)
+        have = {n for n, _ in out}
+        # `(s: string)`, `cells: string[]`, `n?: number`: the runtime's String / Array / Number
+        out += [(m.group(1), "Array" if m.group(3) else _TS_PRIM[m.group(2)]) for m in _TS_PRIM_TYPED.finditer(text)
+                if m.group(1) not in have]
+        return out
     if tk in ("cpp", "jvm"):
         out = [(m.group(2), t) for pat in ((_CPP_TYPED, _CPP_VALUE) if tk == "cpp" else (_CPP_VALUE,))
                for m in pat.finditer(text) if not _ALLCAPS.match(m.group(1))
