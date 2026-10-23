@@ -567,3 +567,21 @@ class SwiftHoldoutFixes(unittest.TestCase):
         got = {d for es in p.edges.values() for d, _l, _e in es}
         self.assertNotIn("Sources/Net/Task.SessionTask.resume", got)
         self.assertNotIn("Sources/Net/Task.SessionTask.stop", got)
+
+
+GD2 = {
+    "project.godot": "[application]\nconfig/name=\"x\"\n",
+    "src/PixelCel.gd": "class_name PixelCel\nextends RefCounted\n\nfunc get_image() -> Image:\n\treturn null\n",
+    "src/AudioCel.gd": "class_name AudioCel\nextends RefCounted\n\nfunc get_image() -> Image:\n\treturn null\n",
+    "src/Project.gd": "class_name Project\nextends RefCounted\n\nfunc get_all_pixel_cels() -> Array[PixelCel]:\n\treturn []\n",
+    "src/Algos.gd": "extends Node\n\nfunc crop(project := Project.new()) -> void:\n\tfor cel in project.get_all_pixel_cels():\n"
+                    "\t\tcel.get_image()\n",
+}
+
+
+class GdHoldoutFixes(unittest.TestCase):
+    def test_inferred_defaults_and_typed_array_returns_in_loops(self):
+        p = load(GD2)
+        got = {(d, e) for d, _l, e in p.edges.get("Algos.crop", [])}
+        self.assertIn(("PixelCel.get_image", True), got)
+        self.assertNotIn("AudioCel.get_image", {d for d, _ in got})
