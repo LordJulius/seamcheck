@@ -25,8 +25,18 @@ the project writes down about how its parts fit together.
   98-100% of the time (Java and Go: 84%, plus the overrides the declared type
   allows), and wrong at 0-0.3% of sites (Ruby's sinatra: 2.4%). It needs no
   build and no database: 0.5-9 s where CodeQL takes 25 s to 5 min (see "How
-  it compares"). Its `path` rule found every injection CodeQL's
-  security-extended queries found in a deliberately vulnerable Flask app.
+  it compares").
+- **Finds injections with no config.** In a repo with no `seamcheck.toml`,
+  `seamcheck check` runs the built-in security pack: request data reaching a
+  shell, `eval`, SQL, a deserializer, a file path, a redirect or an outbound
+  request, in Python, JS/TS, PHP, Ruby, Go, Java and C#. On six deliberately
+  vulnerable apps it found 31 of the 38 injections CodeQL's security-extended
+  suites report there, plus 3 real ones CodeQL doesn't, in under 4 s per app;
+  on the 37 ordinary benchmark repos it reports nothing.
+- **Many repos, one graph.** Put several checkouts (or symlinks to them) in one
+  folder and run seamcheck there: a service's call into a library repo is an
+  exact edge, and `seamcheck search REGEX` answers with each hit's function
+  and its callers, across all of them.
 - **Every check came from a real bug.** Each rule and lint was written after a
   bug it would have caught, and its test reproduces that bug (cut down) and
   its fix.
@@ -40,7 +50,9 @@ rules run in about 24 s, most of it the project's own command rules.
 ## Quick start
 
 Nothing to configure: in any repo, `seamcheck callers NAME`, `context NAME`,
-`impact FILE` and `stats` work on first run. Pick how to get it:
+`impact FILE`, `search REGEX` and `stats` work on first run, and `check` runs
+the security pack until the repo has a `seamcheck.toml` of its own. Pick how
+to get it:
 
 ```sh
 pipx install git+https://github.com/LordJulius/seamcheck      # installed: `seamcheck ...`
@@ -214,30 +226,82 @@ minutes a question here against seamcheck's one loaded graph.
   seamcheck reads the source (3.6 s), and the same rule works on a Python,
   Go, Rust or C# repo.
 
-### Security paths, against CodeQL's security queries
+### Security, against CodeQL's security queries
 
-A `kind = "path"` rule with a `source` (below, under Rules) asks: can a
-request value reach a dangerous call? It follows exact calls from the
-entry points and, in each function, names assigned from the source (or from
-such a name, or from a parameter below the entry). Against CodeQL's
-`python-security-extended` suite on two deliberately vulnerable apps, with
-one rule (sinks: `subprocess.*`, `os.system`, `eval` / `exec`, `.execute`,
-`pickle.loads`, `yaml.load`, `render_template_string`, `ImageMath.eval`,
-`open`; sources: `request.args|form|files|url|...`):
+The `security` pack (`seamcheck/packs/security.toml`, on by default with no
+config, and written into every `seamcheck init`) is one `kind = "path"` rule
+per language with a `source`: a function that reads the request is an entry
+point, and a sink counts only when its arguments carry that value, through
+assignments in order (`x = escape(x)` cleans x for the rest of its block),
+into the parameters a call passes it to, and across files by exact call
+edges. A constant first argument (a parameterized query, a same-site
+redirect) is clean.
 
-| app | CodeQL injection findings | seamcheck found | seamcheck only |
-|---|---|---|---|
-| Vulnerable-Flask-App | 2 (SQL, template injection) | both | none |
-| pygoat | 9 (SQL, command, code, 3 deserialization, 3 path) | 7 | 1: `ImageMath.eval(request value)`, code injection CodeQL has no sink for |
+Against CodeQL 2.23's `*-security-extended` suites on six deliberately
+vulnerable apps, counting CodeQL's findings of the kinds both look for
+(command, code, SQL / NoSQL, deserialization, path, redirect, SSRF, template
+injection):
 
-The two seamcheck misses are path-injection sinks the rule didn't name
-(`os.path.isfile` in a lab-build helper, `os.path.exists` in a management
-command). seamcheck took 0.2-0.4 s per app. This is
-reachability plus a light local taint, not CodeQL's data flow: a value
-through a container, a `with open(...) as f` handle or another object's
-field is not followed, so CodeQL stays the tool for a security audit. The
-rule's use is a cheap gate a project writes for its own sinks and runs on
-every change.
+| app | language | CodeQL | seamcheck found | only seamcheck (real) | CodeQL: database + analysis | seamcheck |
+|---|---|---|---|---|---|---|
+| Vulnerable-Flask-App | Python | 2 | 2 | 0 | not timed | 0.4 s |
+| pygoat | Python | 13 | 10 | 1: `ImageMath.eval(request value)` | not timed | 0.3 s |
+| NodeGoat | JavaScript | 8 | 5 | 0 | 12 s + 50 s | 0.4 s |
+| dvna | JavaScript | 4 | 4 | 0 | 10 s + 39 s | 0.2 s |
+| railsgoat | Ruby | 9 | 8 | 2: `send_file` of a request path, an open redirect | 6 s + 28 s | 2.3 s |
+| govwa | Go | 2 | 2 | 0 | 19 s + 18 s | 3.9 s |
+| **total** | | **38** | **31 (82%)** | **3** | | |
+
+What seamcheck misses: a NoSQL query object built from the request and
+passed on (NodeGoat's `{$where: ...}`, `findOne({userName})`), sinks the pack
+doesn't name (pygoat's `os.path.isfile` / `os.path.exists`), and a Rails
+`scope` lambda. govwa's template XSS is reported where `template.HTML(...)`
+is called on the value, CodeQL reports it at the wrapper.
+
+PHP, which CodeQL doesn't read, against DVWA's own labels (each lab has low,
+medium and high levels that are vulnerable by design and an "impossible" one
+that isn't): 27 findings, about 21 real (command injection at every level,
+open redirect at every level, SQL injection in the low labs, path and code
+injection in its help and source viewers). The rest pass a guard the taint
+doesn't read: `is_numeric` on each octet, `preg_match('/^\d+$/')`, an
+`array_key_exists` allow-list. It misses SQL injection behind
+`mysqli_real_escape_string` in a numeric context and a value read back from
+the session.
+
+On the 37 benchmark repos (none written to be vulnerable) the pack reports
+nothing; running it there found and fixed its false positives (a request's
+own `query()` method, Express's `res.download(path, { root })`, Rails'
+`where(id: params[:id])`, a Go prepared statement's `QueryRow`, values
+through `int()` / `.to_i`). Test code is never an entry point.
+
+This is not CodeQL's data flow: a value inside a container or an object's
+field, or a guard that validates it, isn't followed, so CodeQL stays the tool
+for a security audit. The pack is the cheap version that needs no build and
+runs on every change; a project extends it by overriding a rule by its id
+(`security/python-injection`) with its own `from`, `to` and `unless`.
+
+### Many repositories, against Sourcegraph
+
+Sourcegraph searches many repositories from a server, with precise
+navigation where a SCIP indexer has been run per language. seamcheck has no
+server: a folder of checkouts, or of symlinks to them, is one project, and
+its call graph crosses repository lines like any other. With `requests` and
+an app that uses it side by side (`ws/app`, `ws/requests`):
+
+```
+$ seamcheck -C ws callees app/svc/client.fetch
+app/svc/client.fetch  (app/svc/client.py:5)  [1 exact, 0 name-guess callees, walking exact]
+  -> requests/src/requests/api.get  (requests/src/requests/api.py:74)
+    -> requests/src/requests/api.request  (requests/src/requests/api.py:24)
+$ seamcheck -C ws search 'timeout=' 'app/**'
+app/svc/client.py:6: return requests.get(url, timeout=3)  [app/svc/client.fetch: 0 exact, 0 name-guess callers]
+```
+
+`callers` of `Session.get` lists the app's `fetch_many` beside requests' own
+tests. What Sourcegraph has and seamcheck doesn't: a web UI, search across
+thousands of repositories it keeps cloned and indexed, and commit / diff
+search. seamcheck's `search` is a regex over the files it loaded, with the
+graph attached to each hit, for an agent or a terminal.
 
 ### What each tool is for
 
@@ -247,14 +311,16 @@ every change.
 | needs | Python 3.11 | a database per language; C#/C++/Java/Kotlin/Swift builds | itself | itself | a server and an indexer per language | a JVM test build | Node |
 | languages in one graph | 16, across language and process seams (HTTP, D-Bus, QML↔C++) | one per database | n/a | n/a | per indexer | Java | JS/TS |
 | call graph | yes, exact or marked guess | yes, most precise | no (Pro: some) | no | via indexers | classes, not calls | modules only |
-| security | reachability + local taint to the sinks a rule names | full data flow, large query suites | large rule registry | patterns | no | no | no |
+| security | a built-in injection pack (7 languages), on with no config; taint along calls | full data flow, large query suites | large rule registry | patterns | no | no | no |
+| many repos | a folder of checkouts is one graph; `search` | one database each | per run | per run | yes, at scale, in a browser | no | no |
 | for an agent | MCP server, `context`, JSON | CLI, SARIF | CLI, SARIF | CLI | API | tests | CLI |
 
 Where the others are the better tool: CodeQL for a security audit (data
-flow through containers, fields and libraries, and hundreds of maintained
-queries) and for the precise runtime callee of a virtual call;
-Semgrep for its large registry of security rules; Sourcegraph for search
-across many repositories in a browser; ArchUnit when the architecture rules
+flow through containers, fields and guards, and hundreds of maintained
+queries beyond injection) and for the precise runtime callee of a virtual
+call; Semgrep for its large registry of rules (style, misconfiguration,
+secrets) beyond injection; Sourcegraph for search across thousands of
+repositories in a browser; ArchUnit when the architecture rules
 should be Java tests over real types; dependency-cruiser for rich JS
 dependency reports. seamcheck is for the question an agent or a reviewer
 asks before every change, in any repo with nothing set up: what calls this,
@@ -281,6 +347,8 @@ The call graph
   seamcheck find NAME                  where functions are defined (+ caller counts)
   seamcheck context NAME [--json]      before editing it: source, each caller, where its calls land, tests to run
   seamcheck refs NAME...               defined / called / mentioned anywhere (scripts and config too)
+  seamcheck search REGEX [GLOB...] [--code]
+                                       code search: each hit with its function and that function's callers
   seamcheck impact TARGET... [--depth N] [--since REF]
                                        what a change could break: callers + bridged views, by area
   seamcheck dead                       functions nothing calls or references (a hint, not proof)
@@ -751,11 +819,15 @@ level = "dir"                          # file (default) | dir: packages / folder
 **Paths to a sink** (`kind = "path"`): no chain of exact calls from `from`
 may reach a call matching `to` (regexes over the call as written) within
 `depth` calls, unless it passes a function named in `unless`. With `source`,
-a sink counts only when its arguments come from the source: the source
-itself, a name assigned from it (transitively) in that function, or, below
-the entry, a parameter; a value through a call named like an `unless` entry
-(`_sanitize_username(u)`) is clean. One finding per entry and sink, with the
-chain:
+it is a taint check: the entry points are the functions that read the
+source (not tests), and a sink counts only when its arguments carry the
+value: the source itself, a name assigned from it (assignments read in order,
+so `x = escape(x)` cleans x for the rest of its block), or a parameter a
+caller passed a tainted argument to. A value through a call named like an
+`unless` entry (`_sanitize_username(u)`, `params[:id].to_i`) is clean, and so
+is a constant first argument (a parameterized query) unless it names a shell.
+Each sink is reported once, with its shortest chain. The built-in `security`
+pack is this rule for seven languages:
 
 ```toml
 [[rule]]
@@ -966,6 +1038,7 @@ severity = "error"
 | `compose` | `init-order` (`kotlin-init-order`), `inert-control` (Kotlin); `no-global-scope` (warn: a `GlobalScope` coroutine outlives its screen) |
 | `express` | (type knowledge only, below) |
 | `hono` | (type knowledge only, below) |
+| `security` | `python-injection`, `js-injection`, `php-injection`, `ruby-injection`, `go-injection`, `java-injection`, `csharp-injection`: request data into a shell, eval, SQL, a deserializer, a file path, a redirect or an outbound request (see "Security, against CodeQL"). On with no `seamcheck.toml`; `init` lists it for every repo |
 
 A pack also says what its framework hands the code, so the call graph can type
 it. That knowledge applies whenever package.json shows the framework, listed

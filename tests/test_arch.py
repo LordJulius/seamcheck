@@ -178,3 +178,65 @@ class Arch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+TAINT = {
+    "web/views.py": """import subprocess
+from flask import request
+
+
+def handler():
+    host = request.args.get("host")
+    page = load("index")             # a constant: load's parameter is clean here
+    run(host)
+    if request.args.get("level") == "high":
+        host = escape(host)          # sanitized in one branch only
+    subprocess.run("ping " + host, shell=True)
+
+
+def careful():
+    name = request.args.get("name")
+    name = escape(name)              # sanitized for the rest of the function
+    subprocess.run("echo " + name, shell=True)
+
+
+def load(name):
+    return open("pages/" + name).read()
+
+
+def run(h):
+    subprocess.call("dig " + h, shell=True)
+
+
+def escape(s):
+    return s
+""",
+}
+
+TAINT_RULES = """[project]
+name = "t"
+
+[[rule]]
+id = "taint"
+kind = "path"
+from = ["web/**:*"]
+to = ['^subprocess\\.(run|call)$', '^open$']
+source = 'request\\.args'
+unless = ["escape"]
+"""
+
+
+class Taint(unittest.TestCase):
+    def test_follows_arguments_branches_and_sanitizers(self):
+        with tempfile.TemporaryDirectory() as d:
+            for name, body in TAINT.items():
+                os.makedirs(os.path.dirname(os.path.join(d, name)), exist_ok=True)
+                with open(os.path.join(d, name), "w") as fh:
+                    fh.write(body)
+            with open(os.path.join(d, "seamcheck.toml"), "w") as fh:
+                fh.write(TAINT_RULES)
+            p = core.load(d, os.path.join(d, "seamcheck.toml"), use_cache=False)
+            got = sorted(f.message.split(" at ")[1].split(":")[1] for f in core.run_rules(p) if f.rule == "taint")
+        # line 11: the branch that escapes doesn't clean the other; 25: run's `h` is the request value.
+        # Not 17 (escaped first), not 21 (load is only ever passed a constant)
+        self.assertEqual(got, ["11", "25"])

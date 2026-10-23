@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import collections
 import os
+import re
 
 from . import core, exactness
 
@@ -67,6 +68,31 @@ def find(p: core.Project, spec: str) -> list[dict]:
         ex, guess = core.edge_split(p, f.id)
         out.append({"id": f.id, "file": f.file, "start": f.start, "end": f.end, "calls": len(f.calls),
                     "exact_callers": ex, "guess_callers": guess})
+    return out
+
+
+def search(p: core.Project, pattern: str, globs: list[str] | None = None, code: bool = False,
+           limit: int = 200) -> list[dict]:
+    """Lines matching a regex (`code`: comments and string contents left out), each
+    with the function it is in and that function's exact / name-guess callers: a
+    code search that knows the call graph, over every repo the project holds."""
+    rx = re.compile(pattern)
+    out = []
+    for rel in sorted(p.by_file):
+        if globs and not core.match_any(rel, globs):
+            continue
+        m = p.by_file[rel][0]
+        lines = m.code if code else m.raw
+        for i, ln in enumerate(lines, 1):
+            if not rx.search(ln):
+                continue
+            f = next((g for mod in p.by_file[rel] if (g := mod.func_at(i)) and g.kind != "top"), None)
+            row = {"file": rel, "line": i, "text": m.raw[i - 1].strip()[:200], "func": f.id if f else None}
+            if f:
+                row["exact_callers"], row["guess_callers"] = core.edge_split(p, f.id)
+            out.append(row)
+            if len(out) >= limit:
+                return out
     return out
 
 

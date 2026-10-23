@@ -114,7 +114,7 @@ def _main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="seamcheck", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"seamcheck {__version__}")
     ap.add_argument("cmd", choices=["init", "serve", "check", "map", "callers", "callees", "path", "find", "context", "dead", "stats", "deps", "matrix", "tidy", "tests", "test-only", "unused", "dups", "split", "hotspots", "remove", "refs", "impact", "gate",
-                                    "trace", "run", "fuzz", "tighten", "graph"])
+                                    "trace", "run", "fuzz", "tighten", "graph", "search"])
     ap.add_argument("args", nargs="*")
     ap.add_argument("-C", dest="root", default=".")
     ap.add_argument("--config", action="append", default=[])
@@ -147,6 +147,7 @@ def _main(argv=None) -> int:
     ap.add_argument("--ids", action="store_true", help="tidy reports: only ids, one per line")
     ap.add_argument("--apply", action="store_true", help="remove: write the files (default: show what would go)")
     ap.add_argument("--all", action="store_true", help="deps: every dependency, not only the actionable ones")
+    ap.add_argument("--code", action="store_true", help="search: leave out comments and string contents")
     ap.add_argument("--strict", action="store_true", help="runtime: also flag rules that never had anything to check")
     # `run -- CMD...`: the command after `--` is ours to split off (Python
     # 3.11's argparse refuses a `--` after a positional that already matched)
@@ -292,6 +293,18 @@ def _main(argv=None) -> int:
             for t in c["tests"][:25]:
                 print(f"   {t['id']}  ({t['file']}:{t['line']})")
         return 0
+
+    if a.cmd == "search":
+        if not a.args:
+            ap.error("search needs a regex (then optional file globs)")
+        rows = queries.search(p, a.args[0], a.args[1:], a.code, max(a.limit, 200) if a.limit == 20 else a.limit)
+        if a.json:
+            print(json.dumps(rows, indent=1))
+            return 0 if rows else 1
+        for r in rows:
+            where = f"  [{r['func']}: {r['exact_callers']} exact, {r['guess_callers']} name-guess callers]" if r["func"] else ""
+            print(f"{r['file']}:{r['line']}: {r['text']}{where}")
+        return 0 if rows else 1
 
     if a.cmd == "find":
         for f in queries.find(p, a.args[0] if a.args else "*"):

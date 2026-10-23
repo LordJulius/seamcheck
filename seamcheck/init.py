@@ -131,7 +131,7 @@ def render(root: str) -> tuple[str, list[str]]:
     name = os.path.basename(os.path.abspath(root))
     lines = ["# seamcheck config (https://github.com/LordJulius/seamcheck). Written by `seamcheck init`;",
              "# everything here is yours to change.", "", "[project]", f'name = "{name}"']
-    packs = detect_packs(root, files)
+    packs = detect_packs(root, files) + ["security"]  # (request data into a shell / SQL / eval: any web code)
     if packs:
         lines.append("# rules true for any project on these frameworks (seamcheck/packs; override one by its id)")
         lines.append("packs = [" + ", ".join(f'"{p}"' for p in packs) + "]")

@@ -286,89 +286,282 @@ def path(project, r: dict) -> list:
     """[[rule]] kind = "path": no call chain from `from` (function specs) may reach a
     call matching `to` (regexes over `qual.name` as written: `os\\.system`, `\\.execute$`,
     `^eval$`) within `depth` exact calls, unless it passes a function named in `unless`
-    (a sanitizer, an auth check). With `source` (a regex: `request\\.`), a sink counts
-    only when its arguments come from it: a variable assigned from the source (or from
-    such a variable) in the sink's function, the source itself, or, below the entry
-    point, a parameter. One finding per entry point and sink, with the chain."""
+    (a sanitizer, an auth check). One finding per entry point and sink, with the chain.
+
+    With `source` (a regex: `request\\.args`), it is a taint check: the entry points are
+    the functions that read the source (tests aside), and a sink counts only when its
+    arguments carry the value: the source itself, a name assigned from it (or from such
+    a name), or, below the entry, a parameter the caller passed a tainted argument to.
+    A value through a call named like an `unless` entry is clean, and so is a constant
+    first argument (a parameterized query, a fixed redirect), unless it names a shell.
+    Each sink is reported once, by its shortest chain."""
     from .core import Finding
     sinks = [re.compile(p) for p in (r["to"] if isinstance(r["to"], list) else [r["to"]])]
     source = re.compile(r["source"]) if r.get("source") else None
     unless = set(r.get("unless", []))
+    # a call whose name holds an `unless` entry (`mysqli_real_escape_string(`, `_sanitize_username(`;
+    # a short one, `int`, only as the whole name), or a method of that name (`params[:id].to_i`)
+    names = "|".join(rf"\w*{re.escape(u)}\w*" if len(u) > 3 else rf"(?<![\w.]){re.escape(u)}" for u in unless)
+    clean = (re.compile(rf"(?:{names})\s*\("), re.compile(rf"\.(?:{'|'.join(map(re.escape, unless))})\b")) if unless else None
     depth = int(r.get("depth", 6))
     fuzzy = bool(r.get("fuzzy", False))
     starts = []
     for spec in (r["from"] if isinstance(r["from"], list) else [r["from"]]):
         starts.extend(project.find(spec))
-    out = []
-    for s in {f.id: f for f in starts}.values():
+    if source is not None:  # taint starts where the source is read
+        from . import tidy
+        # (raw text: `"#{params[:id]}"` reads the source inside a string)
+        starts = [f for f in starts if not tidy.is_test(project, f.file) and source.search(_own_code(project, f, raw=True))]
+    out, best = [], {}
+    for s in sorted({f.id: f for f in starts}.values(), key=lambda f: f.id):
         if s.name in unless:
             continue
         prev = {s.id: None}
+        given = {s.id: frozenset()}  # (taint) the parameters each function was passed a tainted value in
         frontier, hits = [s.id], {}
         for _ in range(depth + 1):
             nxt = []
             for fid in frontier:
                 f = project.funcs[fid]
+                taint = _Taint(project, f, source, clean, given[fid]) if source is not None else None
                 for c in f.calls:
-                    text = (f"{c.qual}." if c.qual and c.qual != "." else "") + c.name
+                    text = (f"{c.qual}." if c.qual and c.qual not in (".", "self") else "") + c.name  # (Ruby's bare `system`)
                     if any(p.search(text) for p in sinks) and (f.file, c.line) not in hits \
-                            and (source is None or _tainted_args(project, f, c, source, unless, entry=fid == s.id)):
+                            and (source is None or _carries(project, f, c, source, clean, taint.at(c.line), sink=True)):
                         hits[(f.file, c.line)] = (fid, text)
-                for dst, _ln, exact in project.edges.get(fid, []):
-                    if (exact or fuzzy) and dst not in prev and dst in project.funcs and project.funcs[dst].name not in unless:
-                        prev[dst] = fid
-                        nxt.append(dst)
+                for dst, ln, exact in project.edges.get(fid, []):
+                    if not (exact or fuzzy) or dst in prev or dst not in project.funcs or project.funcs[dst].name in unless:
+                        continue
+                    if source is not None:
+                        g = project.funcs[dst]
+                        params = _params(project, g)
+                        got = set()
+                        for c in (c for c in f.calls if c.line == ln and c.name == g.name):
+                            got |= _passed(project, f, c, g, params, source, clean, taint.at(c.line))
+                        if not got:
+                            continue  # nothing tainted goes in
+                        given[dst] = frozenset(got)
+                    prev[dst] = fid
+                    nxt.append(dst)
             frontier = nxt
         for (file, line), (fid, text) in sorted(hits.items()):
             chain, k = [], fid
             while k is not None:
                 chain.append(project.funcs[k].name)
                 k = prev[k]
-            out.append(Finding(r["id"], r.get("severity", "error"), s.file, s.start, s.name,
-                               r.get("message", f"reaches {text}() at {file}:{line}: ") + " -> ".join(reversed(chain))))
-    return out
+            f = Finding(r["id"], r.get("severity", "error"), s.file, s.start, s.name,
+                        r.get("message", f"reaches {text}() at {file}:{line}: ") + " -> ".join(reversed(chain)))
+            if source is None:
+                out.append(f)
+            elif (file, line) not in best or len(chain) < best[(file, line)][0]:
+                best[(file, line)] = (len(chain), f)
+    return out + [f for _, f in sorted(best.values(), key=lambda x: (x[1].file, x[1].line))]
 
 
-def _tainted_args(project, f, c, source, unless: set, entry: bool) -> bool:
-    """The sink call's argument text mentions the source, a name assigned (transitively,
-    in f) from it, or, when f is below the entry point, one of f's parameters; a value
-    passed through a call named like an `unless` entry (`_sanitize_username(u)`) is clean."""
-    clean = re.compile(rf"\w*(?:{'|'.join(map(re.escape, unless))})\w*\s*\(") if unless else None
+def _own_code(project, f, raw: bool = False) -> str:
+    """f's code (comments and strings blanked, or `raw`, at the same offsets); a file's
+    `<top>`: its lines outside functions."""
+    m = project.modules.get(f.module)
+    if m is None:
+        return ""
+    lines = (m.raw if raw else m.code)[f.start - 1:f.end]
+    if f.kind == "top":  # (blanked, not dropped: line numbers hold)
+        inner = {n for mod in project.by_file.get(f.file, []) for g in mod.funcs if g.kind != "top"
+                 for n in range(g.start, g.end + 1)}
+        lines = ["" if i in inner else ln for i, ln in enumerate(lines, f.start)]
+    return "\n".join(lines)
+
+
+class _Taint:
+    """Which names in a function hold the source's value at a line: the parameters
+    it was passed a tainted value in, then each assignment in source order (`x =
+    request.args[...]` taints x, `x = escape(x)` cleans it again: the last assignment
+    before the line decides; branches and loops are read top to bottom)."""
+
+    def __init__(self, project, f, source, clean, given: frozenset):
+        code, raw = _own_code(project, f), _own_code(project, f, raw=True)  # (f"dig {domain}": the raw text has the name)
+        self.steps = []  # (line, name, dirty, indent)
+        self.given = set(given)
+        self.start, self.lines = f.start, code.split("\n")
+        # `x = `, `$x = ` (PHP), `@x = ` (Ruby), `const x = ` / `String x = ` (declared), `x := ` (Go)
+        for am in re.finditer(r"^([ \t]*)(?:(?:let|const|var|val|my|final|auto|[\w<>\[\],.?]+)[ \t]+)*([$@]?[A-Za-z_]\w*)"
+                              r"[ \t]*(?::[^=\n]+)?:?=(?!=)\s*(.+)$", code, re.M):
+            # the whole statement: up to the next line that starts at its indentation or less
+            # (a continuation is deeper, closes a bracket or string, or is inside a string)
+            nxt = re.compile(rf"^(?!{am.group(1)}[\s)\]}}'\"])(?=[ \t]*\S)", re.M).search(code, am.end() + 1)
+            name, rhs = am.group(2), raw[am.start(3):nxt.start() if nxt else len(code)]
+            ln = f.start + code.count("\n", 0, am.start())
+            dirty = _dirty(rhs, source, clean, self.at(ln))
+            self.steps.append((ln, name, dirty, len(am.group(1).expandtabs(4))))
+
+    def _inside(self, a: int, b: int, indent: int) -> bool:
+        """Line b is still in the block line a opened at `indent` (no line between dedents below it)."""
+        for t in self.lines[a - self.start + 1:b - self.start + 1]:
+            if t.strip() and len(t[:len(t) - len(t.lstrip())].expandtabs(4)) < indent and not t.lstrip()[:1] in ")]}":
+                return False
+        return True
+
+    def at(self, line: int) -> set:
+        state = {n: 0 for n in self.given}  # name -> the indentation it was tainted at
+        for ln, name, dirty, indent in self.steps:
+            if ln >= line:
+                break
+            if dirty:
+                state.setdefault(name, indent)
+            elif name in state and (indent <= state[name] or self._inside(ln, line, indent)):
+                # a clean value: from here on, or (deeper, in one branch) for the rest of that branch
+                del state[name]
+        return set(state)
+
+
+_SHELLS = re.compile(r"""^\s*[fbru]*["'`](?:/bin/|/usr/bin/)?(?:sh|bash|zsh|cmd(?:\.exe)?|powershell|pwsh)["'`]""")
+# a constant string (not Ruby's "#{x}", PHP's "$x", a JS `${x}` or a Python f-string)
+_LITERAL = re.compile(r"""^\s*(?:[bru]*"(?:[^"\\$#]|\\.|#(?!\{)|\$(?![A-Za-z_{]))*"|[bru]*'(?:[^'\\]|\\.)*'|`[^`$]*`)\s*$""")
+
+
+def _call_args(project, f, c) -> list[str]:
+    """The call's arguments as written (raw text, split at top-level commas)."""
     m = project.modules.get(f.module)
     if m is None or not (0 < c.line <= len(m.raw)):
-        return True
-    text = "\n".join(m.raw[c.line - 1:c.line + 8])
-    k = text.find(c.name)
-    k = text.find("(", k) if k >= 0 else -1
-    depth_, j, args = 0, k, ""
+        return []
+    # bounds from the blanked code (a `,` or `)` in a string is no boundary), text from the raw lines
+    text = "\n".join(m.code[c.line - 1:c.line + 60])  # (a callback argument spans lines)
+    raw = "\n".join(m.raw[c.line - 1:c.line + 60])
+    nm = re.search(rf"(?<![\w$]){re.escape(c.name)}(?!\w)\s*", text)
+    if nm is None:
+        return []
+    k = nm.end()
+    if text[k:k + 1] != "(":
+        if not f.file.endswith(".rb"):
+            return []
+        # Ruby without parentheses: `redirect_to :login`, `system "cp #{x}" if y`
+        end = text.find("\n", k)
+        rest = text[k:end if end >= 0 else len(text)]
+        rest = re.split(r"\s+(?:if|unless|while|until|do)\b|\s*\{\s*\|", rest)[0]
+        text = text[:k - 1] + "(" + rest + ")"
+        raw = raw[:k - 1] + "(" + raw[k:k + len(rest)] + ")"
+        k -= 1
+    depth_, j = 0, k
     while 0 <= j < len(text):
         depth_ += text[j] in "([{"
         depth_ -= text[j] in ")]}"
         if depth_ == 0:
-            args = text[k + 1:j]
             break
         j += 1
-    if clean and clean.search(args):
-        return False
-    if source.search(args):
+    if k < 0 or j >= len(text):
+        return []
+    args, start, d = [], k + 1, 0
+    for i in range(k + 1, j):
+        d += text[i] in "([{"
+        d -= text[i] in ")]}"
+        if text[i] == "," and d == 0:
+            args.append(raw[start:i])
+            start = i + 1
+    return [a for a in args + [raw[start:j]] if a.strip()]
+
+
+def _dirty(arg: str, source, clean, tainted: set) -> bool:
+    """The text carries the value: the source or a tainted name, outside the sanitizer
+    calls in it (`request.referrer or url_for("index")` is still the referrer); a
+    sanitizing method (`params[:id].to_i`) cleans the whole expression."""
+    if clean:
+        call, method = clean
+        if method.search(arg):
+            return False
+        for m in reversed(list(call.finditer(arg))):
+            d, j = 0, m.end() - 1
+            while j < len(arg):
+                d += arg[j] in "([{"
+                d -= arg[j] in ")]}"
+                if d == 0:
+                    break
+                j += 1
+            arg = arg[:m.start()] + arg[j + 1:]
+    return bool(source.search(arg)) or any(_names(t, arg) for t in tainted)
+
+
+def _carries(project, f, c, source, clean, tainted: set, sink: bool = False) -> bool:
+    """A sink call's arguments carry the value. A constant first argument (a
+    parameterized query, a fixed or same-site redirect) is clean, unless it names a shell."""
+    args = _call_args(project, f, c)
+    m = project.modules.get(f.module)
+    line = m.raw[c.line - 1] if m is not None and 0 < c.line <= len(m.raw) else ""
+    # the receiver: `params[:class].classify.constantize`, `user_input.to_sym.send`
+    recv = re.search(rf"([\w@$:.\[\]'\"()]+?)\s*\.\s*{re.escape(c.name)}\b", line)
+    if recv and sink and _dirty(recv.group(1), source, clean, tainted):
         return True
-    body = "\n".join(m.raw[f.start - 1:f.end])
-    tainted = set()
-    if not entry:
-        head = body[:body.find(")") + 1] if ")" in body else ""
-        tainted |= {n for n in re.findall(r"[A-Za-z_]\w*", head[head.find("(") + 1:]) if n not in ("self", "cls")}
-    assigns = []
-    code = "\n".join(m.code[f.start - 1:f.end])  # (string contents blanked, offsets kept)
-    for am in re.finditer(r"^([ \t]*)([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)\s*(.+)$", code, re.M):
-        # the whole statement: up to the next line that starts at its indentation or less
-        # (a continuation is deeper, closes a bracket or string, or is inside a string)
-        nxt = re.compile(rf"^(?!{am.group(1)}[\s)\]}}'\"])(?=[ \t]*\S)", re.M).search(code, am.end() + 1)
-        assigns.append((am.group(2), body[am.start(3):nxt.start() if nxt else len(body)]))
-    changed = True
-    while changed:
-        changed = False
-        for name, rhs in assigns:
-            if name not in tainted and not (clean and clean.search(rhs)) and (source.search(rhs) or any(re.search(rf"\b{re.escape(t)}\b", rhs) for t in tainted)):
-                tainted.add(name)
-                changed = True
-    return any(re.search(rf"\b{re.escape(t)}\b", args) for t in tainted)
+    if not args:
+        return False
+    first = args[0].strip()
+    if sink and f.file.endswith(".rb") and re.match(r":?\w+\s*(?::(?!:)|=>)", first):
+        return False  # Rails: `where(id: params[:id])`, a bound value
+    if sink and not _SHELLS.match(first) and (_LITERAL.match(first) or re.match(r"""^[fbru]*["'`]/(?!/)""", first)
+                                              and "redirect" in c.name.lower()):
+        return False
+    if sink and c.name in ("sendFile", "download") and any(re.search(r"\broot\s*:", a) for a in args[1:]):
+        return False  # Express: a path under `{ root }` can't leave it
+    return any(_dirty(a, source, clean, tainted) for a in args)
+
+
+def _params(project, g) -> list[str]:
+    """g's parameter names, in order (`self` / `cls` / `this` left out)."""
+    m = project.modules.get(g.module)
+    if m is None:
+        return []
+    head = "\n".join(m.code[g.start - 1:min(g.end, g.start + 12)])
+    k = head.find("(", head.find(g.name) if g.name in head else 0)
+    if k < 0:
+        return []
+    d, j = 0, k
+    while j < len(head):
+        d += head[j] in "([{<"
+        d -= head[j] in ")]}>"
+        if d == 0:
+            break
+        j += 1
+    ext = os.path.splitext(g.file)[1]
+    out = []
+    parts, cur, d = [], "", 0
+    for ch in head[k + 1:j]:
+        d += ch in "([{<"
+        d -= ch in ")]}>"
+        if ch == "," and d == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    for p in parts + [cur]:
+        p = p.split("=")[0]
+        if ext not in (".go",) and ":" in p.replace("::", ""):
+            p = p.replace("::", "").split(":")[0]
+        names = re.findall(r"[$@]?[A-Za-z_]\w*", p)
+        names = [n for n in names if n not in ("self", "cls", "this", "final", "const", "mut", "ref", "out", "in",
+                                               "params", "readonly", "public", "private", "protected", "val", "var")]
+        if not names:
+            continue
+        dollar = [n for n in names if n.startswith("$")]
+        out.append(dollar[0] if dollar else names[0] if ext in (".go", ".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".rb",
+                                                                     ".kt", ".rs", ".swift", ".ex", ".exs") else names[-1])
+    return [n.lstrip("*&") for n in out]
+
+
+def _passed(project, f, c, g, params: list[str], source, clean, tainted: set) -> set:
+    """The parameters of g that call c (in f) passes a tainted value to."""
+    got = set()
+    pos = 0
+    for a in _call_args(project, f, c):
+        kw = re.match(r"\s*([A-Za-z_]\w*)\s*[=:](?!=)", a)
+        dirty = _dirty(a, source, clean, tainted)
+        if kw and kw.group(1) in params:
+            if dirty:
+                got.add(kw.group(1))
+            continue
+        if dirty and pos < len(params):
+            got.add(params[pos])
+        pos += 1
+    return got
+
+
+def _names(name: str, text: str) -> bool:
+    """`name` (`$x`, `@x` or `x`) occurs in text as a whole name."""
+    return re.search(rf"(?<![\w$@]){re.escape(name)}(?!\w)", text) is not None

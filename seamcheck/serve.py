@@ -107,6 +107,13 @@ TOOLS = {
                 "(exact first, then name guesses), what each of its calls reaches, and the tests that reach it.",
                 _schema({"name": {"type": "string", "description": "`name` (glob ok), `Module.name` or `path/glob:func`"}},
                         ("name",)), lambda p, a: queries.context(p, a["name"])),
+    "search": ("Code search: lines matching a regex, each with the function it is in and that function's exact "
+               "and name-guess caller counts. Over a workspace folder of several checkouts, it searches them all.",
+               _schema({"pattern": {"type": "string", "description": "a Python regex"},
+                        "globs": {"type": "array", "items": {"type": "string"}, "description": "only these files"},
+                        "code": {"type": "boolean", "description": "leave out comments and string contents"},
+                        "limit": {"type": "integer", "minimum": 1, "description": "default 200"}}, ("pattern",)),
+               lambda p, a: queries.search(p, a["pattern"], a.get("globs"), bool(a.get("code")), int(a.get("limit", 200)))),
     "refs": ("Where a name is defined, called and mentioned anywhere (scripts and config too).",
              _schema({"name": {"type": "string"}}, ("name",)), lambda p, a: tidy.refs(p, a["name"], tidy.Corpus(p))),
     "impact": ("What a change could break: the callers and bridged views of the targets (or of the functions "
