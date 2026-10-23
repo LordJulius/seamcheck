@@ -599,3 +599,20 @@ class JsForwardedCallbackFixes(unittest.TestCase):
         p = load(JS5)
         got = {d for es in p.edges.values() for d, _l, _e in es}
         self.assertNotIn("lib/response.Response.end", got)
+
+
+JS6 = {
+    "package.json": "{\"name\": \"koa\", \"main\": \"lib/application.js\"}\n",
+    "lib/application.js": "module.exports = class Application {\n  constructor () {\n    this.x = 1\n  }\n\n  use (fn) {\n    return this\n  }\n\n"
+                          "  static get default () {\n    return Application\n  }\n}\n",
+    "test/app.test.js": "const Koa = require('..')\n\nit('x', () => {\n  const app = new Koa()\n  app.use(() => 1)\n})\n",
+}
+
+
+class JsPackageMainFixes(unittest.TestCase):
+    def test_require_of_a_folder_reads_its_package_main(self):
+        p = load(JS6)
+        got = {(d, e) for k, es in p.edges.items() if k.startswith("test/app.test") for d, _l, e in es}
+        self.assertIn(("lib/application.constructor", True), got)
+        self.assertIn(("lib/application.use", True), got)
+        self.assertNotIn("lib/application.default", {d for d, _ in got})

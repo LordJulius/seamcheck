@@ -554,7 +554,36 @@ def _resolve_where(project: Project, where: str, cache: dict) -> str:
     for cand in ((base, base + "/index", base + "/src/index") if base else ("index", "src/index")):
         if cand in project.modules:
             return cand
-    return ""
+    main = _package_main(project, base, cache)  # `require('../..')`: the folder's package.json "main"
+    return main if main in project.modules else ""
+
+
+def _package_main(project: Project, d: str, cache: dict) -> str:
+    """The module a folder's package.json names as its entry ("main", or the
+    "." export's require / import / default), "" if none."""
+    key = ("\0pkgmain", d)
+    if key not in cache:
+        got = ""
+        try:
+            with open(os.path.join(project.root, d, "package.json"), encoding="utf-8") as fh:
+                pkg = json.load(fh)
+        except (OSError, ValueError):
+            pkg = None
+        if isinstance(pkg, dict):
+            ent = [pkg.get("main"), pkg.get("module")]
+            ex = pkg.get("exports")
+            ex = ex.get(".", ex) if isinstance(ex, dict) else ex
+            while isinstance(ex, dict):  # conditions: the first plain target
+                ex = next((ex[k] for k in ("require", "import", "node", "default") if k in ex), None)
+            ent.append(ex)
+            for e in ent:
+                if isinstance(e, str):
+                    m = re.sub(r"\.(?:[mc]?[jt]sx?)$", "", os.path.normpath(os.path.join(d, e)).replace(os.sep, "/"))
+                    if m in project.modules:
+                        got = m
+                        break
+        cache[key] = got
+    return cache[key]
 
 
 def _manifests(project: Project, name: str) -> list[str]:
@@ -1094,6 +1123,11 @@ def _in_scope(project: Project, where: str, name: str, depth: int = 0) -> list[F
         return [t for t in (_lookup(project, mn, name) for mn in project.packages.get(where[4:], [])) if t]
     if where.startswith("type:"):
         return []  # a type is only a scope for method names (see _scope)
+    dm_ = project.modules.get(where) if name == "default" else None
+    if dm_ is not None and dm_.imported.get("default", ("", "default"))[1] != "default" and depth < 4:
+        # `module.exports = class Application` beside a `static get default()`: the export, not that getter
+        w, n = dm_.imported["default"]
+        return _in_scope(project, w, n, depth + 1)
     t = _lookup(project, where, name)
     if t:
         return [t]
@@ -2011,6 +2045,11 @@ def _build_edges(project: Project) -> None:
                     targets = [(hits[0], True)]
                 elif c.name[:1].isupper() and not _in_scope(project, (project.modules.get(mod.owner, mod) if mod.owner else mod).name, c.name):
                     tmods, ex, declared = types.type_modules(mod, c.name)
+                    fm_i = project.modules.get(mod.owner, mod) if mod.owner else mod
+                    if not declared and f.file.endswith(infer._JS_EXTS) and c.name in fm_i.imported:
+                        dm_ = _defining_module(project, *fm_i.imported[c.name])  # `const Koa = require('..')`; `new Koa()`
+                        if dm_ and (project.modules[dm_].decls or project.modules[dm_].kind == "class"):
+                            tmods, ex, declared = [dm_], True, True
                     if declared and not _is_test_file(project, f.file):
                         # product code never builds a test's type (a test target's `extension URL`)
                         tmods = [m for m in tmods if not _is_test_file(project, project.modules[m].file)]
