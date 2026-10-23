@@ -192,6 +192,34 @@ def _scip_callers(docs: dict, root: str, g) -> set:
     return out
 
 
+def _semgrep_all(semgrep: str, root: str, lang: str, names: list[str]) -> dict:
+    """Semgrep's name matches for several names in one scan (one rule per name): {name: sites}."""
+    hits = {n: set() for n in names}
+    ignore = os.path.join(root, ".semgrepignore")
+    made = not os.path.exists(ignore)
+    if made:
+        open(ignore, "w").close()
+    rule = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"seamcheck-vs-grep-{os.getpid()}.yml")
+    with open(rule, "w") as fh:
+        fh.write("rules:\n")
+        for i, name in enumerate(names):
+            fh.write(f"- id: n{i}\n  languages: [{_SEMGREP_LANG[lang]}]\n  severity: INFO\n  message: call\n"
+                     f"  pattern-either:\n  - pattern: $R.{name}(...)\n  - pattern: {name}(...)\n")
+    try:
+        out = subprocess.run([semgrep, "--metrics=off", "--quiet", "--json", "--no-git-ignore", "--config", rule, "."],
+                             capture_output=True, text=True, cwd=root).stdout or "{}"
+    finally:
+        os.remove(rule)
+        if made:
+            os.remove(ignore)
+    for r in json.loads(out).get("results", []):
+        rid = r.get("check_id", "").rsplit(".", 1)[-1]
+        rel = os.path.normpath(r["path"])
+        if rid.startswith("n") and rid[1:].isdigit() and int(rid[1:]) < len(names) and not rel.startswith(_SKIP_DIRS):
+            hits[names[int(rid[1:])]].add((rel, r["start"]["line"]))
+    return hits
+
+
 def _align_lines(got: set, truth: set, p, reach: int = 20, name: str = "") -> set:
     """A site on the line of the call's name moves to the line CodeQL gives the
     whole call expression (a builder chain's start), when that is the nearest
@@ -238,6 +266,8 @@ def main() -> None:
         return None
     picks = []
     for (tf, tl, name), sites in sorted(callers.items(), key=lambda kv: -len(kv[1])):
+        if tf.endswith((".d.ts", ".d.cts", ".d.mts")):
+            continue  # (a type declaration: no code runs there, for any tool)
         if name in ("exports", "constructor", "<init>", "__init__", "default"):
             continue  # (called as `new X` / by the importer's name: no tool asks by this name)
         if names[name] > 1 and not name.startswith("__") and (g := func_at(tf, tl, name)) is not None:
@@ -263,6 +293,11 @@ def main() -> None:
         picks = [(g, truth) for g, truth in picks if truth]
     times = collections.Counter()
     print(f"{os.path.basename(root)}: {len(picks)} functions with shared names, scored against CodeQL's callers")
+    sg_all = None
+    if opt("--semgrep") and opt("--semgrep-n") == "all":  # (one scan answers every question)
+        t = time.time()
+        sg_all = _semgrep_all(opt("--semgrep"), root, lang, sorted({g.name for g, _ in picks}))
+        times["semgrep"] += time.time() - t
     for g, truth in picks:
         mine = {(p.funcs[s].file, ln) for s, es in p.edges.items() if s in p.funcs
                 for d, ln, ex in es if ex and d == g.id}
@@ -297,7 +332,9 @@ def main() -> None:
             times["ast-grep"] += time.time() - t
         if docs is not None:
             row["scip"] = _score(_align_lines({x for x in _scip_callers(docs, root, g) if x[0] in seen}, truth, p, name=g.name), truth)
-        if opt("--semgrep") and picks.index((g, truth)) < int(opt("--semgrep-n", 3)):
+        if sg_all is not None:
+            row["semgrep"] = _score({x for x in sg_all[g.name] if x[0] in seen}, truth)
+        elif opt("--semgrep") and picks.index((g, truth)) < int(opt("--semgrep-n", 3)):
             t = time.time()
             row["semgrep"] = _score({x for x in _semgrep(opt("--semgrep"), root, lang, g.name) if x[0] in seen}, truth)
             times["semgrep"] += time.time() - t

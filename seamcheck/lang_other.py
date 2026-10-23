@@ -74,7 +74,7 @@ _JAVA = [re.compile(rf"^[ \t]*(?:@\w+(?:\([^)\n]*\))?[ \t]+)*{_STMT}(?:(?:@[\w.]
 _CS = [re.compile(rf"^[ \t]*(?:\[[^\]\n]*\][ \t]*)*{_STMT}(?:(?:[\w.]+<[^<>\n]*(?:<[^<>\n]*(?:<[^<>\n]*>[^<>\n]*)*>[^<>\n]*)*>[?\[\]]*|[\w<>\[\],.?]+|[\w.]*<?\((?:[^()\n;{{}}=]|\([^()\n]*\))*\)[>?\[\]]*)[ \t]+){{1,6}}([A-Za-z_]\w*)[ \t]*(?:<[^>\n]*>)?[ \t]*"
                   r"\((?:[^;{}()]|\([^()]*\))*\)[ \t]*(?::[ \t]*(?:base|this)[ \t]*\((?:[^;{}()]|\([^()]*\))*\))?"
                   r"(?:\s*where[^{;=]*)?\s*(?:\{|=>)", re.M)]
-_GO = [re.compile(r"^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(", re.M)]
+_GO = [re.compile(r"^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*(?:\[[^\]\n]*\]\s*)?\(", re.M)]  # (`func getTyped[T any](`)
 # C++: a definition line has at least one type word before the name, is not a
 # statement (return / delete / emit...), and has a body (a declaration or a
 # `QString s(x);` constructor call ends in `;` and is dropped). `Class::name`
@@ -2648,8 +2648,9 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     f.bound[nm_] = "type:" + ty
                 for m in _CALL.finditer(ln):
                     nm = m.group(2)
-                    if i == sa and (nm == name and m.start(2) <= name_col or m.start(2) < name_col) \
-                            or line_start[i] + m.start(2) in decl_pos:  # (`Read() => _reader.Read();`: the second is a call)
+                    if i == sa and (nm == name and m.start(2) <= name_col or m.start(2) < name_col and fam != "js") \
+                            or line_start[i] + m.start(2) in decl_pos:  # (`Read() => _reader.Read();`: the second is a call;
+                        # JS: `utils.forEach([...], function each(m) {` before the name is a call, no return type)
                         continue
                     chain = receiver(body, off + m.start(2))
                     before = ln[:m.start(2)].rstrip()
