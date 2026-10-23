@@ -272,7 +272,13 @@ What the columns say:
   for Semgrep). Its recall falls where a call goes through a library
   interface: Dapper's `reader.Read()` on an `IDataReader`, which CodeQL counts
   as reaching Dapper's own wrapping readers; gin's `w.Write(...)` on an
-  `http.ResponseWriter` parameter.
+  `http.ResponseWriter` parameter. Linking such calls to the project classes
+  that declare the library interface was tried and dropped: a class can
+  implement it through a library base class (Dapper's `DisposedReader :
+  DbDataReader`, and `DbDataReader` implements `IDataReader`), which only the
+  library's own metadata shows, so the "exact" set came out incomplete and
+  CodeQL's disagreements on Dapper went from 5 to 12. A call on a library
+  value stays the library's.
 - sidekiq's ast-grep row is zero because the pattern `$R.name($$$A)`
   matches a Ruby call only when it is written with parentheses, and the
   targets' calls there aren't (`@config.redis do |conn|`).
