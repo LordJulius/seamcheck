@@ -24,6 +24,12 @@ _JS = [
     re.compile(rf"^[ \t]*(?:{_ID}\.)+({_ID})[ \t]*=[ \t]*(?:async[ \t]+)?function[ \t]*\*?[ \t]*\(", re.M),
     # `res.set = res.header = function header(`: each name in the chain is the function
     re.compile(rf"^[ \t]*(?:{_ID}\.)+({_ID})[ \t]*=\s*(?:(?:{_ID}\.)+{_ID}[ \t]*=\s*)+(?:async[ \t]+)?function\b[^(\n]*\(", re.M),
+    # `module.exports = (req, res) => {`, `export default function (`: the module's default export
+    # (anonymous: called by whatever name the importer gives it)
+    re.compile(r"(?P<dflt>)^[ \t]*(?:module\.(exports)|export[ \t]+(default))[ \t]*=?[ \t]*(?:async[ \t]+)?"
+               rf"(?:function[ \t]*\*?[ \t]*\(|\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=\n]+?)?=>|{_ID}[ \t]*=>)", re.M),
+    # `module.exports.request = (req) =>`, `exports.parse = s =>`: an export's arrow function
+    re.compile(rf"^[ \t]*(?:module\.)?exports\.({_ID})[ \t]*=[ \t]*(?:async[ \t]+)?(?:\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=\n]+?)?=>|{_ID}[ \t]*=>)", re.M),
     # `this.use = (arg, ...handlers) => {` in a constructor: a member of the class
     re.compile(rf"^[ \t]*this\.({_ID})[ \t]*=[ \t]*(?:async[ \t]+)?(?:\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=\n]+?)?=>|{_ID}[ \t]*=>)", re.M),
     # (the annotation may be a function type: `const mergePath: (...p: string[]) => string = (`; parameters
@@ -697,7 +703,7 @@ def _real(lines: list[str], text: str, pos: int) -> bool:
 
 
 _CJS_REQUIRE = re.compile(r"""(?:\b(?:const|let|var)\s+|,\s*)([A-Za-z_$][\w$]*|\{[^}]*\})\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)\s*(\.\s*([A-Za-z_$][\w$]*))?""")
-_CJS_EXPORT = re.compile(r"""^[ \t]*(?:exports[ \t]*=[ \t]*)?module\.exports[ \t]*=[ \t]*(?:exports[ \t]*=[ \t]*)?(?:require\(\s*['"]([^'"]+)['"]\s*\)|([A-Za-z_$][\w$]*)[ \t]*;?[ \t]*$)""", re.M)
+_CJS_EXPORT = re.compile(r"""^[ \t]*(?:exports[ \t]*=[ \t]*)?module\.exports[ \t]*=[ \t]*(?:exports[ \t]*=[ \t]*)?(?:require\(\s*['"]([^'"]+)['"]\s*\)|([A-Za-z_$][\w$]*)[ \t]*;?[ \t]*$|class[ \t]+([A-Za-z_$][\w$]*))""", re.M)
 
 
 def _code_at(lines: list[str], text: str, pos: int, word: str) -> bool:
@@ -737,8 +743,8 @@ def _cjs(mod: Module, rel: str, text: str, lines: list[str]) -> None:
     for m in _CJS_EXPORT.finditer(text):
         if m.group(1):
             mod.imported["default"] = (f"js:{d}\0{m.group(1)}", "default")
-        elif m.group(2):
-            mod.imported["default"] = (f"js:{d}\0./{base}", m.group(2))
+        elif m.group(2) or m.group(3):  # `module.exports = Router`, `= class Application extends Emitter {`
+            mod.imported["default"] = (f"js:{d}\0./{base}", m.group(2) or m.group(3))
 
 
 def _js_imports(mod: Module, rel: str, text: str, lines: list[str]) -> None:
@@ -1356,6 +1362,11 @@ def _assignments(tk: str, text: str) -> list[tuple[str, str]]:
             continue  # `$stats = null;`: no type yet; a later assignment says it
         if ch:
             out.append((m.group(1), "expr:" + "\x1f".join(ch)))
+    if tk == "js":  # `app = app || new Koa()`, `opts ??= {}`: a parameter's default, the value when none came
+        for m in re.finditer(r"^[ \t]*([A-Za-z_$][\w$]*)[ \t]*(?:=[ \t]*\1[ \t]*(?:\|\||\?\?)|\|\|=|\?\?=)[ \t]*", text, re.M):
+            ch = expression(text, m.end())
+            if ch and not (len(ch) == 1 and ch[0] in ("null", "undefined")):
+                out.append((m.group(1), "expr:" + "\x1f".join(ch)))
     if tk == "js":  # `const template = <p>Hello</p>`: an element of the JSX runtime
         for m in re.finditer(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]+)?=\s*\(?\s*<[A-Za-z>]", text):
             out.append((m.group(1), "jsx:"))
@@ -1743,6 +1754,12 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             if not em.group(3):  # `exports.Router = Router`: whatever that name is here (`require('router')`: the package's)
                 mod.bound.setdefault(em.group(1), "reexport:" + em.group(2))
         _js_reexports(mod, rel, text, lines)
+        # the `delegates` package: `delegate(proto, 'response').method('redirect').access('body')`:
+        # those members of proto are its `response` property's
+        for dm in re.finditer(r"\bdelegate\(\s*[\w$.]+\s*,\s*['\"]([\w$]+)['\"]\s*\)((?:\s*\.\s*(?:method|access|getter|setter|fluent)"
+                              r"\(\s*['\"][\w$]+['\"]\s*\))+)", text):
+            for nm_ in re.findall(r"\(\s*['\"]([\w$]+)['\"]", dm.group(2)):
+                mod.bound.setdefault(nm_, "deleg:" + dm.group(1))
         if "require(" in text or "module.exports" in text:
             _cjs(mod, rel, text, lines)
     elif fam == "kotlin" or ext == ".java":
@@ -1791,6 +1808,8 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         ts_start = "tsstart" in pat.groupindex
         for m in pat.finditer(code):
             name = m.group(2) if ts_start else m.group(1)
+            if "dflt" in pat.groupindex:
+                name = "default"
             if name in _NOT_FUNC and not (fam == "rust" and name == "new"):  # (`fn new` is every constructor)
                 continue
             npos_ = m.start(2) if ts_start else m.start(1)
@@ -2105,6 +2124,13 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 for nm_, held in _assignments("js", ln if ln.rstrip().endswith(";") else ln + ";"):
                     if held.startswith("expr:") and len(held.split("\x1f")) > 1:
                         expr_fields.setdefault(home.name, {}).setdefault(nm_, tuple(held[5:].split("\x1f")))
+            if fam == "js" and inside[i] and "this." in ln:  # `this.context = Object.create(context)` in the constructor
+                fn = next((f_ for f_ in found if f_[0] <= i <= f_[1] and f_[2] == "constructor"), None)
+                for m in re.finditer(r"^[ \t]*this\.([A-Za-z_$][\w$]*)[ \t]*=(?![=>])", ln) if fn else ():
+                    ch = expression(code, line_start[i] + m.end())
+                    if ch and (ch[0] == "this" or ch[0][:1].isupper() or ch[0].startswith("new ") or
+                               ch[0] in mod.imported or ch[0] in mod.aliases) and ch[0] not in ("require()", "import()"):
+                        expr_fields.setdefault(home.name, {}).setdefault(m.group(1), ch)
             pats_ = []
             if fam == "kotlin":
                 pats_ = [] if inside[i] else [_KT_FIELD, _KT_NEW]

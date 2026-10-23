@@ -237,3 +237,29 @@ class GoHoldoutFixes(unittest.TestCase):
         got = {(d, e) for d, _l, e in p.edges.get("gin_test.TestX", [])}
         self.assertIn(("routergroup.RouterGroup.GET", True), got)
         self.assertIn(("gin.Engine.Run", True), got)
+
+
+JS = {
+    "package.json": '{"name": "app", "dependencies": {"delegates": "1"}}',
+    "lib/response.js": "module.exports = {\n  back (alt) {\n    return alt\n  },\n  get body () {\n    return 1\n  }\n}\n",
+    "lib/context.js": "const delegate = require('delegates')\nconst proto = module.exports = {\n  throw (s) {\n    return s\n  }\n}\n"
+                      "delegate(proto, 'response')\n  .method('back')\n  .access('body')\n",
+    "lib/application.js": "const context = require('./context')\nconst response = require('./response')\n"
+                          "module.exports = class Application {\n  constructor () {\n    this.context = Object.create(context)\n"
+                          "    this.response = Object.create(response)\n  }\n\n  createContext (req) {\n"
+                          "    const context = Object.create(this.context)\n    context.response = Object.create(this.response)\n"
+                          "    return context\n  }\n}\n",
+    "test-helpers/context.js": "const Koa = require('../lib/application')\n\nmodule.exports = (req, app) => {\n"
+                               "  app = app || new Koa()\n  return app.createContext(req)\n}\n",
+    "test/back.test.js": "const context = require('../test-helpers/context')\n\nit('goes back', () => {\n"
+                         "  const ctx = context({})\n  ctx.back()\n  ctx.throw(400)\n})\n",
+}
+
+
+class JsHoldoutFixes(unittest.TestCase):
+    def test_object_create_expando_properties_and_delegates(self):
+        p = load(JS)
+        fid = next(k for k in p.edges if k.startswith("test/back.test."))
+        got = {(d, e) for d, _l, e in p.edges[fid]}
+        self.assertIn(("lib/response.back", True), got)
+        self.assertIn(("lib/context.throw", True), got)

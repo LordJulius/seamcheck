@@ -1130,6 +1130,8 @@ def _defining_module(project: Project, where: str, name: str, depth: int = 0) ->
         hit = _defining_module(project, w, name, depth + 1)
         if hit:
             return hit
+    if name == "default" and m.file.endswith((".js", ".cjs", ".mjs")) and not m.owner:
+        return where  # `require('./context')` of `module.exports = { inspect() {...} }`: the module's own object
     return ""
 
 
@@ -1881,6 +1883,8 @@ def _build_edges(project: Project) -> None:
                     own_ = tuple(mn for mn in v[1] if project.modules[mn].file.startswith(root_)) if root_ else ()
                     if len(own_) == 1:
                         v = ("static", own_, True)
+                if v is not None and v[0] in ("static", "inst") and f.file.endswith(infer._JS_EXTS):
+                    v = types.forward(mod, v, c.name) or v  # `ctx.redirect()`: delegated to ctx.response
                 if v is not None:
                     kind, mods_, ex = v
                     if kind == "ns":
