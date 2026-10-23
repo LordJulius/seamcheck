@@ -964,7 +964,9 @@ class Types:
             own = self.own_class(mod, f)
             if not own:
                 return None
-            sup = [b for b in self.ancestors(own[0])[1:2]]
+            # (the next ancestor that isn't another part of the same type: a C# partial class's other file)
+            prim = self._primary(own[0])
+            sup = [b for b in self.ancestors(own[0])[1:] if self._primary(b) != prim][:1]
             return ("inst", tuple(sup), True) if sup else (EXT if self.external_base(own[0]) else None)
         if seg.startswith("new "):
             return self.instance(mod, seg[4:-2], self_mods)

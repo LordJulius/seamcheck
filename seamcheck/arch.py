@@ -383,16 +383,21 @@ class _Taint:
         self.steps = []  # (line, name, dirty, indent)
         self.given = set(given)
         self.start, self.lines = f.start, code.split("\n")
+        found = []  # (offset, indent, names, the value's offset)
         # `x = `, `$x = ` (PHP), `@x = ` (Ruby), `const x = ` / `String x = ` (declared), `x := ` (Go)
         for am in re.finditer(r"^([ \t]*)(?:(?:let|const|var|val|my|final|auto|[\w<>\[\],.?]+)[ \t]+)*([$@]?[A-Za-z_]\w*)"
                               r"[ \t]*(?::[^=\n]+)?:?=(?!=)\s*(.+)$", code, re.M):
-            # the whole statement: up to the next line that starts at its indentation or less
-            # (a continuation is deeper, closes a bracket or string, or is inside a string)
-            nxt = re.compile(rf"^(?!{am.group(1)}[\s)\]}}'\"])(?=[ \t]*\S)", re.M).search(code, am.end() + 1)
-            name, rhs = am.group(2), raw[am.start(3):nxt.start() if nxt else len(code)]
-            ln = f.start + code.count("\n", 0, am.start())
+            found.append((am.start(), am.group(1), [am.group(2)], am.start(3)))
+        # destructuring: `const { a, b: c } = req.body`, `[x, y] = ...`, Python's `a, b = ...`
+        for am in re.finditer(r"^([ \t]*)(?:(?:const|let|var)[ \t]+)?(\{[^{}=;]*\}|\[[^\[\]=;]*\]|[A-Za-z_]\w*(?:[ \t]*,[ \t]*[A-Za-z_]\w*)+)"
+                              r"\s*=(?!=)\s*(.+)$", code, re.M):
+            names = [re.findall(r"[$\w]+", part.split(":")[-1].split("=")[0])[-1:] for part in am.group(2).strip("{}[]").split(",")]
+            found.append((am.start(), am.group(1), [n[0] for n in names if n], am.start(3)))
+        for start, indent, names, val in sorted(found):
+            rhs = raw[val:_statement_end(code, val, len(indent.expandtabs(4)))]
+            ln = f.start + code.count("\n", 0, start)
             dirty = _dirty(rhs, source, clean, self.at(ln))
-            self.steps.append((ln, name, dirty, len(am.group(1).expandtabs(4))))
+            self.steps += [(ln, name, dirty, len(indent.expandtabs(4))) for name in names]
 
     def _inside(self, a: int, b: int, indent: int) -> bool:
         """Line b is still in the block line a opened at `indent` (no line between dedents below it)."""
@@ -412,6 +417,20 @@ class _Taint:
                 # a clean value: from here on, or (deeper, in one branch) for the rest of that branch
                 del state[name]
         return set(state)
+
+
+def _statement_end(code: str, val: int, width: int) -> int:
+    """Where the statement whose value starts at `val` ends: before the next line that
+    starts at its indentation or less. A continuation is deeper, closes a bracket or a
+    string, or is inside one (blanked to spaces)."""
+    k = code.find("\n", val)
+    while k >= 0:
+        line = code[k + 1:code.find("\n", k + 1) if code.find("\n", k + 1) >= 0 else len(code)]
+        body = line.lstrip()
+        if body and len(line[:len(line) - len(body)].expandtabs(4)) <= width and body[0] not in ")]}'\"`":
+            return k + 1
+        k = code.find("\n", k + 1)
+    return len(code)
 
 
 _SHELLS = re.compile(r"""^\s*[fbru]*["'`](?:/bin/|/usr/bin/)?(?:sh|bash|zsh|cmd(?:\.exe)?|powershell|pwsh)["'`]""")
@@ -460,10 +479,16 @@ def _call_args(project, f, c) -> list[str]:
     return [a for a in args + [raw[start:j]] if a.strip()]
 
 
+_FUNCTION_LITERAL = re.compile(r"\s*(?:async\s+)?(?:function\b|(?:\([^()]*\)|[\w$]+)\s*=>|lambda\b|func\s*\(|proc\b|->)")
+
+
 def _dirty(arg: str, source, clean, tainted: set) -> bool:
     """The text carries the value: the source or a tainted name, outside the sanitizer
     calls in it (`request.referrer or url_for("index")` is still the referrer); a
-    sanitizing method (`params[:id].to_i`) cleans the whole expression."""
+    sanitizing method (`params[:id].to_i`) cleans the whole expression. A callback
+    (`(err, rows) => {...}`) is code, not the value, whatever names its body uses."""
+    if _FUNCTION_LITERAL.match(arg):
+        return False
     if clean:
         call, method = clean
         if method.search(arg):
@@ -498,6 +523,9 @@ def _carries(project, f, c, source, clean, tainted: set, sink: bool = False) -> 
     if sink and not _SHELLS.match(first) and (_LITERAL.match(first) or re.match(r"""^[fbru]*["'`]/(?!/)""", first)
                                               and "redirect" in c.name.lower()):
         return False
+    if sink and re.fullmatch(r"find\w*|update\w+|delete\w+|remove|count\w*|aggregate", c.name) \
+            and f.file.endswith((".js", ".mjs", ".cjs", ".ts", ".mts", ".jsx", ".tsx")) and not first.startswith(("{", "[")):
+        return False  # a MongoDB query is an object (`{ user: id }`); `rows.find(r => ...)` is an array's
     if sink and c.name in ("sendFile", "download") and any(re.search(r"\broot\s*:", a) for a in args[1:]):
         return False  # Express: a path under `{ root }` can't leave it
     return any(_dirty(a, source, clean, tainted) for a in args)

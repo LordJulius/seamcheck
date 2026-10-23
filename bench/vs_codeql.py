@@ -45,6 +45,9 @@ def _codeql(path: str) -> dict:
         rows = csv.reader(fh)
         next(rows, None)
         for f, ln, name, tf, tl in rows:
+            name = re.sub(r"<.*>$", "", name)  # (C#: a constructed generic is `Timeout<ResultPrimitive>`)
+            if f.endswith(".cs") and re.match(r"(?:get|set|add|remove|init)_[A-Z_]|op_", name):
+                continue  # C#: a property / event accessor or an operator, which no call syntax names
             if name not in _SYNTHETIC:
                 sites[(f, int(ln), name)].add((tf, int(tl)))
     return sites
@@ -153,7 +156,15 @@ def main() -> None:
         if t[0] not in raws:
             mods = p.by_file.get(t[0]) or []
             raws[t[0]] = mods[0].raw if mods else None
-        return _same(g, t, raws[t[0]])
+        if _same(g, t, raws[t[0]]):
+            return True
+        # C#: one class's overloads split over its partial files (`partial class Policy` in
+        # RetrySyntax.cs and RetryTResultSyntax.cs) are one function, as overloads in one file are
+        raw = raws[t[0]]
+        cls = g.module.rsplit(".", 1)[-1].split("`")[0]
+        return bool(g.file.endswith(".cs") and raw and 0 < t[1] <= len(raw)
+                    and re.search(rf"\b{re.escape(g.name)}\s*[(<]", raw[t[1] - 1])
+                    and re.search(rf"\bpartial\s+(?:class|struct|record|interface)\s+{re.escape(cls)}\b", "\n".join(raw)))
     agree = disagree = covered = wider = 0
     bad, only = [], []
     for site, targets in cq.items():

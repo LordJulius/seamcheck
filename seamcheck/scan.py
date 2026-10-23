@@ -142,6 +142,22 @@ def blank(text: str, lang: str, keep_strings: bool = False) -> tuple[str, list[t
                     wipe(i + 1, j)
                 i = j + 1
                 continue
+        if lang == "c" and (c == '"' and i and (text[i - 1] == "@" or text[i - 2:i] in ("@$", "$@")) or c == "`"):
+            # C#'s verbatim `@"..."` (lines, `""` for a quote, no `\` escapes); Go's raw `...`
+            j = i + 1
+            while j < n:
+                if text[j] == c:
+                    if c == '"' and text[j + 1:j + 2] == '"':
+                        j += 2
+                        continue
+                    break
+                j += 1
+            strings.append((line, text[i + 1:j]))
+            if not keep_strings:
+                wipe(i + 1, j)
+            line += text.count("\n", i, j)
+            i = min(n, j + 1)
+            continue
         if c in "\"'" or (lang == "js" and c == "`"):
             triple = text[i:i + 3] == c * 3
             q = c * 3 if triple else c
