@@ -2159,6 +2159,25 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             got_fields = fields.setdefault(home.name, {})
             if fpat and not inside[i] and i not in ts_enum_lines:  # `private val client = rule.newClient()`: a property's value says its type
                 for m in fpat.finditer(ln):
+                    o_ = line_start[i] + m.end()
+                    o_ += len(code[o_:o_ + 40]) - len(code[o_:o_ + 40].lstrip())
+                    if fam == "js" and home is mod and code[o_:o_ + 1] == "{" and re.match(r"\s*(?:export\s+)?(?:const|let|var)\b", ln) \
+                            and (e_ := lambdas.matching(code, o_)) > 0 and f"{mod.name}.{m.group(1)}" not in mods:
+                        # `export const coerce = { string: (arg) => ZodString.create(arg), ... }`: an object of those
+                        # members; calling one gives its arrow's value (the arrow itself is no named function)
+                        sub = f"{mod.name}.{m.group(1)}"
+                        om_ = Module(sub, rel, len(raw), raw, lines, owner=mod.name, decls=[],
+                                     aliases=mod.aliases, uses=mod.uses, imported=mod.imported)
+                        om_.kind = "interface"
+                        for part in lambdas.split_top(code[o_ + 1:e_]):
+                            km = re.match(r"\s*([A-Za-z_$][\w$]*)\s*:\s*\(*\s*(?:async\s+)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*", part)
+                            if km and (ch_ := expression(part, km.end())):
+                                om_.methods.append(km.group(1))
+                                om_.bound[km.group(1) + "()"] = "expr:" + "\x1f".join(ch_)
+                        if om_.methods:
+                            mods[sub] = om_
+                            got_fields.setdefault(m.group(1), set()).add("\0mod:" + sub)
+                            continue
                     ch = expression(code, line_start[i] + m.end())
                     if ch and fam == "js" and ch[0] in ("require()", "import()"):
                         continue  # `var express = require('..')`: the import handling knows what that is
@@ -2327,7 +2346,10 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         cpp_ns.append((bm_.end(), em_.start() if em_ else len(code), bm_.group(1).lower()))
     cpp_ns.sort()
     for (hname, name), ss in sorted(spans.items(), key=lambda kv: kv[1][0]):
-        a_, b_, npos, bpos = max(ss, key=lambda s_: s_[1] - s_[0])
+        # (several definitions merged: a top-level one over one nested in another function's body,
+        # zod's `export function ipv6(): ZodIPv6` over an object's `ipv6(params) { return this.check(...) }`)
+        a_, b_, npos, bpos = max(ss, key=lambda s_: (fam == "js" and len(ss) > 1 and not lines[s_[0]][:1].isspace(),
+                                                     s_[1] - s_[0]))
         home, cls = owners[(hname, name)]
         recv = home.decls[0] if (go or (cpp and home.kind == "ext")) and home is not mod else ""
         # JUnit / kotlin.test `@Test`, xUnit / NUnit / MSTest `[Fact]`, Rust `#[test]`
