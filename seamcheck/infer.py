@@ -920,6 +920,12 @@ class Types:
                 if el is not None:
                     before, cur = cur, el
                     continue
+            if seg in _ELEMENT_ACCESS and seg != "[]" and cur is not None and not is_ext(cur) and cur is not UNKNOWN \
+                    and cur[0] == "inst" and not self.method(list(cur[1]), seg[:-2])[0] \
+                    and (el_t := self._collection_element(cur[1])):
+                # `els.get(0)` on `class Elements extends Nodes<Element>`: an Element
+                before, cur = cur, self.instance(self.p.modules[el_t[0]], el_t[1])
+                continue
             before = cur
             if cur is None and seg in _DOM_QUERIES and seg.endswith("()") and mod.file.endswith(_JS_EXTS[:-1]) \
                     and not self.p.by_name.get(seg[:-2]):
@@ -1204,6 +1210,46 @@ class Types:
             return None if got is UNKNOWN else got
         return None
 
+    def _collection_element(self, mods) -> tuple | None:
+        """The element of a project class that is a generic collection
+        (`class Elements extends Nodes<Element>`, `class Nodes<T> extends
+        ArrayList<T>`: an Element): (module the type is named in, type name)."""
+        for mn in mods:
+            key = ("\0coll", mn)
+            if key not in self.cache:
+                self.cache[key] = None
+                self.cache[key] = self._coll_walk(mn, {}, 0)
+            if self.cache[key]:
+                return self.cache[key]
+        return None
+
+    def _coll_walk(self, mn: str, subst: dict, depth: int):
+        m = self.p.modules.get(mn)
+        if m is None or depth > 6 or not m.file.endswith((".java", ".kt", ".kts", ".cs", ".scala")):
+            return None
+        cls = (m.decls or [""])[0].split("`")[0]
+        hm = re.search(rf"\b(?:class|interface)\s+{re.escape(cls)}\s*(<(?:[^<>{{]|<[^<>{{]*>)*>)?\s*"
+                       r"(?:\([^)]*\)\s*)?(?:extends|:)\s*([\w.]+)\s*<((?:[^<>{]|<[^<>{]*>)*)>", "\n".join(m.raw)) if cls else None
+        if not hm:
+            return None
+        own = [p.split()[0].split(":")[0].strip() for p in _top_split(hm.group(1)[1:-1])] if hm.group(1) else []
+        base, args = hm.group(2).split(".")[-1], [a.strip() for a in _top_split(hm.group(3))]
+        args = [subst.get(a, a) for a in args]
+        if base in _COLLECTIONS:
+            el = args[-1] if base in ("HashMap", "Map", "TreeMap", "LinkedHashMap", "Dictionary", "MutableMap") else args[0]
+            el = re.sub(r"^(?:\?\s*extends\s+|out\s+|in\s+)", "", el).split("<")[0].strip()
+            return (mn, el) if el and el[:1].isupper() and el not in own else None
+        bmods, _, declared = self.type_modules(m, base)
+        for bm in (bmods if declared else []):
+            bmod = self.p.modules[bm]
+            bcls = (bmod.decls or [""])[0]
+            pm = re.search(rf"\b(?:class|interface)\s+{re.escape(bcls)}\s*<((?:[^<>{{]|<[^<>{{]*>)*)>", "\n".join(bmod.raw))
+            params = [p.split()[0].split(":")[0].strip() for p in _top_split(pm.group(1))] if pm else []
+            got = self._coll_walk(bm, dict(zip(params, args)), depth + 1)
+            if got:
+                return (mn, got[1]) if got[1] in args or not got[1] in params else got
+        return None
+
     def _getter(self, mods: list[str], name: str, depth: int):
         """`c.req` read through a getter (`get req(): HonoRequest`, Python's
         `@property`, Kotlin's `val x get()`): what the getter returns."""
@@ -1389,6 +1435,11 @@ class Types:
 _SWIFT_SEQ_OPS = {"map()", "filter()", "compactMap()", "flatMap()", "sorted()", "reversed()", "enumerated()",
                   "joined()", "split()", "dropFirst()", "dropLast()", "prefix()", "suffix()", "lowercased()",
                   "uppercased()", "trimmingCharacters()", "components()", "replacingOccurrences()"}
+# library collections a project class may extend: `extends ArrayList<Element>` holds Elements
+_COLLECTIONS = {"ArrayList", "List", "AbstractList", "LinkedList", "Vector", "Collection", "AbstractCollection", "Iterable",
+                "HashSet", "Set", "TreeSet", "LinkedHashSet", "ArrayDeque", "Deque", "Queue", "CopyOnWriteArrayList",
+                "MutableList", "MutableCollection", "Collection", "ObservableCollection", "IList", "ICollection",
+                "IEnumerable", "IReadOnlyList", "HashMap", "Map", "TreeMap", "LinkedHashMap", "Dictionary", "MutableMap"}
 _ELEMENT_HOFS = {n: 0 for n in ("map", "filter", "all", "any", "for_each", "find", "position", "flat_map", "filter_map",
                                 "take_while", "skip_while", "inspect", "max_by_key", "min_by_key", "sort_by_key",
                                 "partition", "find_map", "forEach", "some", "every", "findIndex", "findLast", "flatMap",

@@ -1,7 +1,8 @@
 """Java, cut down from jsoup: `public @Nullable Document ownerDocument()` is a
 method (a type-use annotation among the modifiers hid it), and an override of
 some overloads leaves the others to the supertype (`Element` overrides
-`attr(k, v)`, so `el.attr(k)` is `Node.attr(k)`)."""
+`attr(k, v)`, so `el.attr(k)` is `Node.attr(k)`), and a project class that
+extends a generic collection holds its type argument (`els.get(0)`)."""
 import os
 import sys
 import tempfile
@@ -47,6 +48,21 @@ public class Document extends Element {
     }
 }
 """,
+    "src/main/java/org/x/Nodes.java": """package org.x;
+
+import java.util.ArrayList;
+
+public class Nodes<T extends Node> extends ArrayList<T> {
+    public String text() {
+        return "";
+    }
+}
+""",
+    "src/main/java/org/x/Elements.java": """package org.x;
+
+public class Elements extends Nodes<Element> {
+}
+""",
     "src/main/java/org/x/Use.java": """package org.x;
 
 public class Use {
@@ -56,6 +72,11 @@ public class Use {
 
     public void two(Element el) {
         el.attr("id", "x");
+    }
+
+    public String first(Elements els) {
+        els.text();
+        return els.get(0).attr("id");
     }
 
     public String html(Document doc) {
@@ -89,6 +110,11 @@ class JavaOverloads(unittest.TestCase):
         self.assertIn("src/main/java/org/x/Node.ownerDocument", self.p.funcs)
         self.assertEqual(self._to("src/main/java/org/x/Use.html", "ownerDocument"),
                          {("src/main/java/org/x/Node.ownerDocument", True)})
+
+    def test_element_of_a_project_collection(self):
+        # `Elements extends Nodes<Element>`, `Nodes<T> extends ArrayList<T>`: get(0) is an Element
+        self.assertEqual(self._to("src/main/java/org/x/Use.first", "attr"), {("src/main/java/org/x/Node.attr", True)})
+        self.assertEqual(self._to("src/main/java/org/x/Use.first", "text"), {("src/main/java/org/x/Nodes.text", True)})
 
     def test_overload_by_argument_count(self):
         self.assertEqual(self._to("src/main/java/org/x/Use.one", "attr"), {("src/main/java/org/x/Node.attr", True)})
