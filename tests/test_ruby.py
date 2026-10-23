@@ -140,8 +140,66 @@ class RubyBlocksTest(unittest.TestCase):
         tests = {f.name for m in mods for f in m.funcs if f.kind == "test"}
         self.assertEqual(tests, {"test does a thing", "test_bar", "test baz works", "test qux"})
         calls = {c.name for m in mods for f in m.funcs for c in f.calls}
-        self.assertNotIn("context", calls)  # the framework's grouping, not a project call
-        self.assertNotIn("it", calls)
+        self.assertTrue({"run_it", "bar", "baz", "qux"} <= calls)
+        # `context` / `it` are recorded too: the framework's (no edge), or a project's own
+        # DSL when it defines one (sinatra's test/contest.rb; see RubyProjectDslTest)
+
+    def test_a_constant_alias_in_a_class_body(self):
+        d, p = load({
+            "lib/helpers.rb": """\
+                module Helpers
+                  class Stream
+                    def initialize(&block)
+                      @block = block
+                    end
+                  end
+                end
+                """,
+            "examples/stream.rb": """\
+                class Stream
+                  def initialize
+                  end
+                end
+                """,
+            "test/stream_test.rb": """\
+                class StreamTest
+                  Stream = Helpers::Stream
+
+                  def test_new
+                    Stream.new { }
+                  end
+                end
+                """,
+        })
+        try:
+            got = {dst for dst, _l, e in p.edges.get("test/stream_test.StreamTest.test_new", []) if e}
+            self.assertEqual(got, {"lib/helpers.Helpers::Stream.initialize"})
+        finally:
+            d.cleanup()
+
+    def test_a_project_defined_test_dsl_is_called(self):
+        d, p = load({
+            "test/contest.rb": """\
+                class Minitest::Test
+                  def self.context(name, &block)
+                    block
+                  end
+                end
+                """,
+            "test/foo_test.rb": """\
+                require_relative "contest"
+
+                class FooTest < Minitest::Test
+                  context "with x" do
+                  end
+                end
+                """,
+        })
+        try:
+            got = {dst for src, es in p.edges.items() if src.startswith("test/foo_test") for dst, _l, e in es if e}
+            self.assertIn("test/contest.Minitest::Test.context", got)
+        finally:
+            d.cleanup()
 
 
 class RubyCallsTest(unittest.TestCase):
