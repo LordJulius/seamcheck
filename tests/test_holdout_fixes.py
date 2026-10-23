@@ -550,3 +550,20 @@ class RubyMultiAssignFixes(unittest.TestCase):
         p = load(RB)
         got = {d for es in p.edges.values() for d, _l, _e in es}
         self.assertNotIn("lib/rack/response.Rack::Response.write", got)
+
+
+SW = {
+    "Sources/Net/Task.swift": "class SessionTask {\n    func resume() {}\n    func stop() {}\n}\n",
+    "Tests/Dependency/Nocilla/LSNocilla.h": "@interface LSNocilla : NSObject\n+ (LSNocilla *)sharedInstance;\n- (void)stop;\n@end\n",
+    "Sources/Cache/Cache.swift": "class Cache {\n    func store() async throws {\n        try await withCheckedThrowingContinuation { continuation in\n"
+                                 "            continuation.resume(returning: 1)\n        }\n    }\n    func tearDown() {\n"
+                                 "        LSNocilla.sharedInstance().stop()\n    }\n}\n",
+}
+
+
+class SwiftHoldoutFixes(unittest.TestCase):
+    def test_library_closures_and_types_named_like_other_languages_files(self):
+        p = load(SW)
+        got = {d for es in p.edges.values() for d, _l, _e in es}
+        self.assertNotIn("Sources/Net/Task.SessionTask.resume", got)
+        self.assertNotIn("Sources/Net/Task.SessionTask.stop", got)

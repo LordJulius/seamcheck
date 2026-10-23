@@ -2565,7 +2565,7 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                                 # (a call with only a trailing lambda is a call: `lock.withLock { }`; Swift's
                                 # are still only read for their closure's parameters)
                                 f.calls.append(Call(tm.group(2), tch[-1] if re.match(r"^[\w$]+$", tch[-1]) else ".", i + 1, tch, tm.start(2)))
-                        elif not re.search(r"[\w)\]>?]\s*$", re.sub(r"\b(?:await|try[?!]?|return|throw)\s*$", "", ln[:tm.start(2)])):
+                        elif not re.search(r"[\w)\]>?]\s*$", re.sub(r"(?:\b(?:await|try[?!]?|return|throw)\s*)+$", "", ln[:tm.start(2)])):
                             # `performEvent { $0... }`, `await withCheckedContinuation { c in }`: a bare call
                             _bind_closure(f, fam, body, off + tm.end() - 1, tm.group(2), (), sa)
                             if tk == "kotlin" and not (i == sa and tm.start(2) < name_col):
