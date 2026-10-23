@@ -910,6 +910,8 @@ def _jvm_member_home(project: Project, path: str) -> str:
 def _resolve_imports(project: Project) -> None:
     cache: dict = {}
     lang_ruby.link(project)  # Ruby: requires, constants and supertypes, across files (lang_ruby.py)
+    lang_other.qt_dbus_interfaces(project)  # Qt: a generated D-Bus proxy stands for the class it calls
+    lang_other.qml_page_props(project)  # QML: what each page's untyped properties are handed
 
     def res(v):
         return _resolve_where(project, v, cache)
