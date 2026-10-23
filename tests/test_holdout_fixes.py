@@ -552,6 +552,33 @@ class RubyMultiAssignFixes(unittest.TestCase):
         self.assertNotIn("lib/rack/response.Rack::Response.write", got)
 
 
+RB2 = {
+    "lib/sq/config.rb": "module Sq\n  class Config\n    def redis\n      redis_pool.with do |conn|\n        yield conn\n      end\n    end\n"
+                        "    def redis_pool\n      Thread.current[:pool] || local_pool\n    end\n"
+                        "    def local_pool\n      @pool ||= ConnectionPool.new { 1 }\n    end\n    def logger\n      1\n    end\n  end\nend\n",
+    "lib/sq/web/config.rb": "module Sq\n  class Web\n    class Config\n      def logger\n        2\n      end\n    end\n  end\nend\n",
+    "lib/sq/web.rb": "module Sq\n  class Web\n    def show(config)\n      config.logger\n    end\n  end\nend\n",
+    "lib/sq/job.rb": "module Sq\n  class Job\n    def set(k)\n      k\n    end\n    def run(config)\n      config.logger\n"
+                     "      config.redis { |conn| conn.set(1) }\n    end\n  end\nend\n",
+    "lib/sq/stats.rb": "module Sq\n  class Stats\n    def processed\n      1\n    end\n  end\nend\n",
+    "lib/sq/app.rb": "module Sq\n  class App\n    get '/stats' do\n      stats = Sq::Stats.new\n      stats.processed\n    end\n  end\nend\n",
+}
+
+
+class RubyNamedReceiverAndBlockFixes(unittest.TestCase):
+    def test_lexical_constant_lookup_yielded_values_and_top_level_locals(self):
+        p = load(RB2)
+        def got(k):
+            return {(d, e) for d, _l, e in p.edges.get(k, [])}
+        self.assertIn(("lib/sq/web/config.Sq::Web::Config.logger", True), got("lib/sq/web.Sq::Web.show"))
+        run = got("lib/sq/job.Sq::Job.run")
+        self.assertIn(("lib/sq/config.Sq::Config.logger", True), run)
+        self.assertIn(("lib/sq/config.Sq::Config.redis", True), run)
+        self.assertNotIn("lib/sq/job.Sq::Job.set", {d for d, _ in run})  # conn is the library's connection
+        app = {(d, e) for k, es in p.edges.items() if k.startswith("lib/sq/app") for d, _l, e in es}
+        self.assertIn(("lib/sq/stats.Sq::Stats.processed", True), app)
+
+
 SW = {
     "Sources/Net/Task.swift": "class SessionTask {\n    func resume() {}\n    func stop() {}\n}\n",
     "Tests/Dependency/Nocilla/LSNocilla.h": "@interface LSNocilla : NSObject\n+ (LSNocilla *)sharedInstance;\n- (void)stop;\n@end\n",

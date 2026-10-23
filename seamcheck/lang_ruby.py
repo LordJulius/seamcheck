@@ -64,6 +64,10 @@ _ITER_BLOCK = re.compile(r"((?:@{0,2}[a-z_]\w*|[A-Z][\w:]*)(?:\[[^\]\n]*\])?(?:\
                          r"filter_map|count|min_by|max_by|group_by|partition|sum|find_all|none\?|map!|select!|reject!|"
                          r"collect|find_index)\b(?:\([^()\n]*\))?\s*(?:\bdo|\{)\s*\|([^|\n]*)\|")
 _BLOCK_PARAMS = re.compile(r"(?:\bdo|\{)\s*\|([^|\n]*)\|")
+# `redis do |conn|`, `@config.on(:exit) { |x| }`: a block given to a method, its first parameter what
+# that method yields
+_CALL_BLOCK = re.compile(r"(?<![\w@$:])([a-z_]\w*[?!]?)(?:(?:\([^()\n]*\))?\s*\{|(?:\([^()\n]*\)|[ \t]+[^\n{|=]*?)?\s*\bdo)"
+                         r"\s*\|\s*([a-z_]\w*)")  # (`assert x, pool.with { |c| }`: a brace block is the nearest call's)
 # `Benchmark.ips do |x|`, `File.open(p) { |f| }`: a block given to a constant's method
 _CONST_BLOCK = re.compile(rf"(?<![\w.:])({_CONST})\s*\.\s*\w+[?!]?(?:\s*\(([^()\n]*)\)|[ \t]+([^\n{{|]*?))?\s*(?:\bdo|\{{)\s*\|([^|\n]*)\|")
 # Ruby's own constants whose blocks get Ruby's objects (`File.open(path) do |f|`);
@@ -820,6 +824,7 @@ def _collect(f: Func, b, code: str, starts: list[int], idx: list[int], lines: li
         p = loc.get(name)
         return p is not None and p <= pos  # (`output, warnings = ...`: the target itself is no call)
 
+    top_seen: set[str] = set(f.bound)  # (a top-level local's binding: see below)
     skip: tuple[int, int] = (-1, -1)
     if b is not None and b["kind"] == "def" and b.get("name_span"):
         skip = (b["pos"], b["name_span"][1])  # `def site.process`: neither name is a call
@@ -879,6 +884,22 @@ def _collect(f: Func, b, code: str, starts: list[int], idx: list[int], lines: li
                 continue  # it was handed a value of ours: what it yields may be ours
             for nm in re.findall(r"[a-z_]\w*", cb.group(4)):
                 f.bound.setdefault(nm, "lib:" + const)  # link() keeps it if the constant is a library's
+        for yb in _CALL_BLOCK.finditer(ln):
+            meth, nm = yb.group(1), yb.group(2)
+            if meth in _ITERS or meth in _KEYWORDS or meth in _SAME_ELEMENTS or is_local(meth, a + yb.start(1)):
+                continue
+            src = receiver(code, a + yb.start(1), is_local) or ("self",)
+            if "[]" in src or "(...)" in src:
+                continue
+            spec = "expr:" + "\x1f".join((*src, meth + "{}"))
+            held = f.bound.get(nm)
+            if src[0][:1].isupper():
+                if held == "lib:" + src[0].lstrip(":"):  # (kept if the constant is the project's, see _rewrite_constants)
+                    f.bound[nm] = held + "\x1e" + spec
+            elif held is None:
+                f.bound[nm] = spec
+            elif held != spec and held.endswith("{}"):
+                f.bound[nm] = "lam:?"  # (one name, two blocks)
         for im_ in _ITER_BLOCK.finditer(ln):  # `docs.sort.each do |doc|`: doc is an element of docs
             src = list(expression(code, a + im_.start(1), is_local))
             if not src or src[-1][:-2] not in _ITERS:
@@ -913,12 +934,22 @@ def _collect(f: Func, b, code: str, starts: list[int], idx: list[int], lines: li
         if mm_:  # `rd, wr = IO.pipe`: each an element of a constant's value (kept if the constant is a library's)
             for nm in re.findall(r"[a-z_]\w*", mm_.group(1)):
                 f.bound.setdefault(nm, "lib:" + mm_.group(2).lstrip(":"))
-        if f.kind != "top":
-            am = _ASSIGN.match(ln, len(ln) - len(lead))
-            if am and not re.match(r"\s*(?:\|\||&&|\*\*|<<|>>|[-+*/%|&^])=", ln[am.end(1):]):
-                ch = expression(code, a + am.end(), is_local)
+        am = _ASSIGN.match(ln, len(ln) - len(lead))
+        if am and not re.match(r"\s*(?:\|\||&&|\*\*|<<|>>|[-+*/%|&^])=", ln[am.end(1):]):
+            ch = expression(code, a + am.end(), is_local)
+            if f.kind != "top":
                 if ch and ch[0] != am.group(1) + "()":
                     f.bound.setdefault(am.group(1), "expr:" + "\x1f".join(ch))
+            elif am.group(1) not in top_seen:
+                # a script's or a class body's local (`get "/stats" do  stats = Stats.new`): one name
+                # assigned one way; assigned again otherwise, unknown
+                spec = "expr:" + "\x1f".join(ch) if ch and ch[0][:1].isupper() and ch[-1] == "new()" else None
+                if spec is None or f.bound.get(am.group(1), spec) != spec:
+                    top_seen.add(am.group(1))
+                    if f.bound.get(am.group(1), "").startswith("expr:"):
+                        del f.bound[am.group(1)]
+                else:
+                    f.bound[am.group(1)] = spec
     if b is not None and b["kind"] == "def" and f.name != "<top>":
         _declared(f, b, code, raw, is_local, ends)
 
@@ -1019,6 +1050,9 @@ def _declared(f: Func, b, code: str, raw: list[str], is_local, ends: dict) -> No
         if am:
             st += am.end()  # `@x ||= Foo.new(...)`, `cache[k] ||= build(k)`: the value assigned
         ch = expression(code, st, is_local)
+        if not ch and not am and re.fullmatch(r"[^(){}\n]*\|\|\s*@{0,2}[a-z_][\w.]*[?!]?(?:\([^()\n]*\))?", code[st:k].strip()):
+            # `Thread.current[:pool] || local_pool`: a value cached elsewhere, else the default built here
+            ch = expression(code, code.rfind("||", st, k) + 2, is_local)
     if not ch:
         return
     if ch == ("self",) or ch == ("new()",):
@@ -1037,8 +1071,8 @@ def _setup_fields(blocks, func_of_blk, code: str, starts: list[int]) -> None:
     if not setups:
         return
     for bi, f in func_of_blk.items():
-        if f.kind != "test":
-            continue
+        if f.kind not in ("test", "func"):
+            continue  # (a test, or a helper `def` in the describe block: an instance method of the same test class)
         p = blocks[bi]["parent"]
         while p >= 0:
             for s in setups.get(p, ()):
@@ -1265,10 +1299,14 @@ def _rewrite_constants(rb: list, r: "_Resolver") -> None:
                 f.returns = r.rewrite_held(nest, f.returns)
             for k, v in list(f.bound.items()):
                 if v.startswith("lib:"):
-                    if r.resolve(nest, v[4:]):
-                        del f.bound[k]  # a project constant's block: we don't know what it yields
+                    const, _, ours = v[4:].partition("\x1e")
+                    if r.resolve(nest, const):
+                        if ours:  # `Sidekiq.redis { |conn| }`: what the project's method yields
+                            f.bound[k] = r.rewrite_held(nest, ours)
+                        else:
+                            del f.bound[k]  # a project constant's block: we don't know what it yields
                     else:
-                        f.bound[k] = f"expr:{v[4:]}\x1fyield()"  # what a library yields is the library's
+                        f.bound[k] = f"expr:{const}\x1fyield()"  # what a library yields is the library's
                     continue
                 f.bound[k] = r.rewrite_held(nest, v)
             for c in f.calls:
@@ -1702,6 +1740,8 @@ def _block_forwarders(rb: list) -> None:
         for f in m.funcs:
             for cm in pat.finditer(f.code):
                 for nm in re.findall(r"[a-z_]\w*", cm.group(2)):
+                    if f.bound.get(nm, "").endswith("{}"):
+                        del f.bound[nm]  # (rather than what the method yields, read in infer)
                     f.bound.setdefault(nm, "lib:" + names[cm.group(1)])
 
 
