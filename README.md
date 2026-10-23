@@ -1409,6 +1409,18 @@ judged as old. Debt already in a file you touched doesn't block you; new debt
 can't land. A `seamcheck: allow gate` comment on (or just above) a declaration
 or line waives it; give the reason in the comment.
 
+With the [pre-commit](https://pre-commit.com) framework:
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/LordJulius/seamcheck
+    rev: main
+    hooks: [{ id: seamcheck }]
+```
+
+Or by hand:
+
 ```sh
 # .git/hooks/pre-commit
 seamcheck gate --staged || { echo "fix the above, or waive a line with 'seamcheck: allow'"; exit 1; }
@@ -1427,8 +1439,26 @@ cache, so a gate after a small edit takes seconds.
 
 ### In CI
 
+The repo is a GitHub Action (Python 3.11+ on the runner; `ubuntu-latest` has it):
+
 ```yaml
 # .github/workflows/seamcheck.yml
+on: [pull_request]
+jobs:
+  seamcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      # annotations on the diff, and a red check when the change may not land
+      - uses: LordJulius/seamcheck@main
+```
+
+`with: { mode: check, format: sarif }` runs every rule instead and gives the
+SARIF file as `steps.<id>.outputs.sarif-file` for `upload-sarif`; `args`
+passes extra flags (`--only security`). Without the action:
+
+```yaml
 on: [pull_request]
 jobs:
   seamcheck:
