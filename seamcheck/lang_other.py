@@ -2176,7 +2176,7 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                             if km and (ch_ := expression(part, km.end())):
                                 om_.methods.append(km.group(1))
                                 om_.bound[km.group(1) + "()"] = "expr:" + "\x1f".join(ch_)
-                        if om_.methods:
+                        if om_.methods or not code[o_ + 1:e_].strip():  # (`const validators = {};`: filled in by assignments)
                             mods[sub] = om_
                             got_fields.setdefault(m.group(1), set()).add("\0mod:" + sub)
                             continue

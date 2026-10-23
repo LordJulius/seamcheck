@@ -1955,6 +1955,8 @@ def _build_edges(project: Project) -> None:
                         on_type = True
                         if not hits and f.file.endswith(infer._JS_EXTS) and (g_ := types.func_ref(mods_, c.name)) is not None:
                             hits = [g_]  # `z.string()` with `export { stringType as string }`, `stringType = ZodString.create`
+                        if not hits and f.file.endswith(infer._JS_EXTS) and (g_ := types.expando_fn(mods_, c.name)) is not None:
+                            hits = [g_]  # `validators.transitional()`: `validators.transitional = function transitional(...)`
                         if not hits:
                             hits, on_type = types.method(list(mods_), c.name, _argc(mod, c))
                     else:
