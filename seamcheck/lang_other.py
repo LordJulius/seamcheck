@@ -2413,6 +2413,17 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             g.bound = {**{k: v for k, v in inner.bound.items() if not v.startswith("fixture:")}, **g.bound}
     if qml:
         _qml_types(mod, code, stem)
+    if go:  # `type Engine struct { RouterGroup ... }`: an embedded type's methods are promoted (a base)
+        for sm in re.finditer(r"^type\s+([A-Za-z_]\w*)(?:\[[^\]]*\])?\s+struct\s*\{", code, re.M):
+            e_ = lambdas.matching(code, sm.end() - 1)
+            emb = [em.group(1).split(".")[-1] for em in re.finditer(r"^[ \t]*\*?((?:[A-Za-z_]\w*\.)?[A-Z]\w*)[ \t]*(?:`[^`\n]*`)?[ \t]*$",
+                                                                     code[sm.end():e_ if e_ > 0 else len(code)], re.M)]
+            if emb:
+                tname = f"{mod.name}.{sm.group(1)}"
+                tm = mods.get(tname) or Module(tname, rel, len(raw), raw, lines, owner=mod.name, decls=[sm.group(1)],
+                                               aliases=mod.aliases, uses=mod.uses, imported=mod.imported)
+                mods[tname] = tm
+                tm.bases = list(dict.fromkeys([*tm.bases, *emb]))
     if go:  # `type Window interface { Top() int ... }`: a module listing the methods
         for im in re.finditer(r"^type\s+([A-Za-z_]\w*)(?:\[[^\]]*\])?\s+interface\s*\{", code, re.M):
             k, d = im.end(), 1

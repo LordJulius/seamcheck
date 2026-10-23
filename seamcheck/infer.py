@@ -1750,6 +1750,8 @@ def resolve_bases(project) -> None:
                 lib.append(b)
                 continue
             mods, _, declared = t.type_modules(m, b)
+            if m.file.endswith(".go"):  # (Go: a type's methods are in `<file>.<Type>`, not the file's module)
+                mods = [f"{x}.{b.split('.')[-1]}" if f"{x}.{b.split('.')[-1]}" in project.modules else x for x in mods]
             mods = [x for x in mods if x != m.name and project.modules[x].kind != "ext"] or [x for x in mods if x != m.name]
             if mods:
                 got.append(mods[0])

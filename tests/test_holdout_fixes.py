@@ -221,3 +221,19 @@ class RustHoldoutFixes(unittest.TestCase):
         self.assertNotIn("tests/derive/utils.assert_output", {d for d, _ in got})
         self.assertIn(("src/arg.action", True), got)
         self.assertIn(("src/filter.TimeFilter.applies_to", True), got)
+
+
+GO = {
+    "go.mod": "module example.com/app\n\ngo 1.22\n",
+    "routergroup.go": "package gin\n\ntype RouterGroup struct {\n\tbase string\n}\n\nfunc (g *RouterGroup) GET(p string) {\n}\n",
+    "gin.go": "package gin\n\ntype Engine struct {\n\tRouterGroup\n\ttrees int\n}\n\nfunc New() *Engine {\n\treturn &Engine{}\n}\n\nfunc (e *Engine) Run() error {\n\treturn nil\n}\n",
+    "gin_test.go": "package gin\n\nfunc TestX(t *testing.T) {\n\trouter := New()\n\trouter.GET(\"/\")\n\t(&Engine{}).Run()\n}\n",
+}
+
+
+class GoHoldoutFixes(unittest.TestCase):
+    def test_embedded_struct_methods_and_composite_literal_receivers(self):
+        p = load(GO)
+        got = {(d, e) for d, _l, e in p.edges.get("gin_test.TestX", [])}
+        self.assertIn(("routergroup.RouterGroup.GET", True), got)
+        self.assertIn(("gin.Engine.Run", True), got)
