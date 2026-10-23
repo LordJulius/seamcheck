@@ -48,9 +48,39 @@ def _codeql(path: str) -> dict:
             name = re.sub(r"<.*>$", "", name)  # (C#: a constructed generic is `Timeout<ResultPrimitive>`)
             if f.endswith(".cs") and re.match(r"(?:get|set|add|remove|init)_[A-Z_]|op_", name):
                 continue  # C#: a property / event accessor or an operator, which no call syntax names
+            if f.endswith((".kt", ".kts")):
+                name = name.split("$", 1)[0]  # (Kotlin: `getSink$private`, `getTaskRunner$main`: name mangling)
+                if _kt_accessor(tf, int(tl), name):
+                    continue  # a property's getter / setter: reading `.sink` is no call syntax
             if name not in _SYNTHETIC:
                 sites[(f, int(ln), name)].add((tf, int(tl)))
     return sites
+
+
+_KT_LINES: dict = {}
+
+
+def _kt_accessor(path: str, line: int, name: str) -> bool:
+    """CodeQL's Kotlin call to a property accessor (`getSocket` for `.socket`) or a
+    constructor-like `<init>`: the target line declares a `val` / `var`, not a `fun`."""
+    if name in ("init", "invoke", "<init>", "<clinit>"):
+        return True  # an `init { }` block, a lambda's invoke: no call by that name in the source
+    if not ROOT:
+        return False
+    if path not in _KT_LINES:
+        try:
+            with open(os.path.join(ROOT, path), encoding="utf-8", errors="replace") as fh:
+                _KT_LINES[path] = fh.read().split("\n")
+        except OSError:
+            _KT_LINES[path] = []
+    src = _KT_LINES[path][line - 1] if 0 < line <= len(_KT_LINES[path]) else ""
+    if re.search(rf"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?{re.escape(name)}\b", src):
+        return False
+    # a property (`val url: HttpUrl`, `@get:JvmName("url") val url`), read without call syntax
+    return bool(re.match(r"(?:get|set|is)[A-Z]", name)) or bool(re.search(r"\b(?:val|var)\s|^\s*(?:@(?:get|set):|get\(\)|set\()", src))
+
+
+ROOT = ""
 
 
 def continues(raw, ln: int) -> bool:
@@ -130,6 +160,8 @@ def main() -> None:
         work = opt("--work", os.path.join(os.environ.get("TMPDIR", "/tmp"), "seamcheck-vs-codeql"))
         path, t_db, t_q = _run_codeql(root, opt("--lang"), opt("--codeql", "codeql"), work)
         timing = f"CodeQL database {t_db:.0f}s + query {t_q:.0f}s"
+    global ROOT
+    ROOT = root
     cq = _codeql(path)
     t0 = time.time()
     p = core.load(root, use_cache=False)
