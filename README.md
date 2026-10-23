@@ -215,29 +215,66 @@ went from 18% to 71%. The C++ run added methods a macro defines
 body: 83 of the sites missed) and calls on a temporary
 (`ConfigHandler().setShowHelp(x)`); coverage went from 74% to 90%.
 
-### "Who calls X?", against grep-style tools
+### "Who calls X?", against grep-style tools and Sourcegraph's precise references
 
 `bench/vs_grep.py` takes the ten project functions CodeQL sees called most
-whose name more than one function has (`get`, `send`, `prepare`), and scores
-each tool's answer against CodeQL's callers (only files CodeQL analysed count):
+whose name more than one function has (`get`, `send`, `set`), and scores each
+tool's answer against CodeQL's callers of that one function (only files CodeQL
+analysed count; a function's overloads count as one). `--scip INDEX` adds
+Sourcegraph's precise "find references", read from the SCIP index
+`scip-python` / `scip-typescript` write (a reference written as a call counts;
+every tool is then scored on the files both CodeQL and the indexer read).
 
-| repo | seamcheck precision / recall | ast-grep precision / recall |
-|---|---|---|
-| requests | 98.8% / 100% | 28.4% / 100% |
-| httpx | 96.4% / 96.8% | 40.0% / 100% |
-| jsoup | 95.5% / 99.1% | 86.0% / 100% |
-| gson | 92.2% / 81.0% | 78.1% / 99.3% |
-| cobra | 100% / 100% | 77.8% / 77.8% |
-| express | 65.7%* / 100% | 9.1% / 100% |
-| flask | 46.5%* / 93.8% | 18.3% / 47.9% |
-| jekyll | 74.7%* / 98.3% | 87.2% / 39.5% |
+Precision / recall, October 2026:
 
-\* below the true figure: the sites CodeQL misses count against seamcheck
-(the hand-check above found them right). A name match finds every call by
-that name, of any object, and nothing called another way (a decorator, a
-call through a variable); Semgrep's OSS matching gave ast-grep's answers on
-the targets it was run on (requests: 59.4% / 100% on two), at about three
-minutes a question here against seamcheck's one loaded graph.
+| repo | lang | seamcheck | SCIP (Sourcegraph) | ast-grep | Semgrep† |
+|---|---|---|---|---|---|
+| requests | Python | 100% / 100% | 100% / 95.5% | 51.2% / 100% | 52.6% / 100% |
+| httpx | Python | 96.4% / 96.8% | 96.1% / 98.8% | 40.0% / 100% | 33.7% / 100% |
+| flask | Python | 46.5%* / 93.8% | 66.7% / 0.8% | 18.3% / 47.9% | 96.2% / 28.9% |
+| click (held out) | Python | 97.4% / 100% | 100% / 71.1% | 76.0% / 100% | 75.9% / 100% |
+| koa (held out) | JavaScript | 22.1%* / 94.4% | 47.1% / 44.4% | 5.0% / 100% | 9.9% / 100% |
+| axios (held out) | JavaScript | 94.3% / 90.2% | 100% / 65.6% | 31.2% / 94.0% | 69.1% / 100% |
+| ky (held out) | TypeScript | 100% / 80.0% | 100% / 80.0% | 57.1% / 80.0% | – |
+| zod (held out) | TypeScript | 100% / 98.4% | 99.1% / 82.5% | 46.2% / 88.6% | 75.6% / 99.0% |
+| javapoet (held out) | Java | 90.1% / 92.3% | – | 28.0% / 100% | 37.7% / 100% |
+| gin (held out) | Go | 100% / 65.4% | – | 100% / 13.6% | 95.2% / 100% |
+| rack (held out) | Ruby | 87.6% / 88.4% | – | 56.4% / 43.1% | 89.0% / 100% |
+| sidekiq (held out) | Ruby | 99.0% / 98.5% | – | 0.0% / 0.0% | – |
+| Dapper (held out) | C# | 87.8% / 50.7% | – | 54.1% / 99.2% | 82.1% / 100% |
+| jsoup | Java | 95.5% / 99.1% | – | 86.0% / 100% | – |
+| gson | Java | 92.2% / 81.0% | – | 78.1% / 99.3% | – |
+| cobra | Go | 100% / 100% | – | 77.8% / 77.8% | – |
+| express | JavaScript | 65.7%* / 100% | – | 9.1% / 100% | – |
+
+\* below the true figure: sites CodeQL misses count against seamcheck. koa's
+`ctx.set(...)` reaches `response.set` through `delegates(proto, 'response')`;
+seamcheck follows it and CodeQL doesn't (10 of 10 sampled were right).
+† Semgrep took about five minutes a question, so it answered only the first one
+or two targets per repo; its figures are over those, not the ten.
+
+What the columns say:
+- A name search (ast-grep, Semgrep) finds every call by that name, of any
+  object: high recall, and precision as low as the name is common. It finds
+  nothing called another way (a decorator, a call through a variable).
+- SCIP is the compiler's answer where the type checker sees the type, and it
+  is as precise as seamcheck there. It needs the project's dependencies
+  installed and a working `tsconfig` (ky's extends a package; zod's monorepo
+  needed one written for it; a plain-JS repo needs `allowJs`). Recall drops
+  where types run out: koa's `module.exports = class Application` gives its
+  methods symbols local to one file, so no caller elsewhere is found; click's
+  decorators and flask's `app.route` are invisible to it.
+- seamcheck reads source as is, no install, and answers every question from
+  one loaded graph (0.5-12 s for the whole repo, against minutes per question
+  for Semgrep). Its recall falls where a call goes through a library
+  interface: Dapper's `reader.Read()` on an `IDataReader`, which CodeQL counts
+  as reaching Dapper's own wrapping readers; gin's `w.Write(...)` on an
+  `http.ResponseWriter` parameter.
+- sidekiq's ast-grep row is zero because the pattern `$R.name($$$A)`
+  matches a Ruby call only when it is written with parentheses, and the
+  targets' calls there aren't (`@config.redis do |conn|`).
+- jsoup, gson, cobra and express are from the earlier run (seamcheck and
+  ast-grep only, before the overload rule above).
 
 ### Architecture rules, against dependency-cruiser and ArchUnit
 
