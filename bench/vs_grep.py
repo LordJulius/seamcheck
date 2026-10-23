@@ -111,6 +111,8 @@ def main() -> None:
     root, path, lang = os.path.abspath(args[0]), args[1], opt("--lang")
     n = int(opt("--n", 10))
     callers = _cq(path)
+    # only files CodeQL analysed count, for every tool (its Go database is `go build`'s: no _test.go)
+    seen = {f for sites in callers.values() for f, _ln in sites}
     t0 = time.time()
     p = core.load(root, use_cache=False)
     t_sc = time.time() - t0
@@ -134,14 +136,14 @@ def main() -> None:
         mine = {(p.funcs[s].file, ln) for s, es in p.edges.items() if s in p.funcs
                 for d, ln, ex in es if ex and d == g.id}
         mine = _align_lines(mine, truth, p)
-        row = {"seamcheck": _score(mine, truth)}
+        row = {"seamcheck": _score({x for x in mine if x[0] in seen}, truth)}
         if opt("--sg"):
             t = time.time()
-            row["ast-grep"] = _score(_sg(opt("--sg"), root, lang, g.name), truth)
+            row["ast-grep"] = _score({x for x in _sg(opt("--sg"), root, lang, g.name) if x[0] in seen}, truth)
             times["ast-grep"] += time.time() - t
         if opt("--semgrep") and picks.index((g, truth)) < int(opt("--semgrep-n", 3)):
             t = time.time()
-            row["semgrep"] = _score(_semgrep(opt("--semgrep"), root, lang, g.name), truth)
+            row["semgrep"] = _score({x for x in _semgrep(opt("--semgrep"), root, lang, g.name) if x[0] in seen}, truth)
             times["semgrep"] += time.time() - t
         cells = []
         for tool, (hit, got, tr) in row.items():
