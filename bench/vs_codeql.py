@@ -176,6 +176,8 @@ def main() -> None:
             if g is None:
                 continue
             (exact if ex else guess)[(f.file, ln, g.name)].add(g.id)
+            if g.name == "default":  # an anonymous `module.exports = (...) =>`: CodeQL names it `exports`
+                (exact if ex else guess)[(f.file, ln, "exports")].add(g.id)
     def raw_of(f):
         mods = p.by_file.get(f) or []
         return mods[0].raw if mods else None

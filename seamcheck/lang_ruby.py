@@ -905,7 +905,8 @@ def _collect(f: Func, b, code: str, starts: list[int], idx: list[int], lines: li
                 f.bound.setdefault(rb_.group(2), f"expr:{classes[0]}\x1fnew()")
         im = _IVAR_SET.match(ln, len(ln) - len(lead))
         if im:
-            ch = expression(code, a + im.end(), is_local)
+            dm_ = re.match(r"\s*[a-z_]\w*\s*\|\|\s*", code[a + im.end():a + im.end() + 80])
+            ch = expression(code, a + im.end() + (dm_.end() if dm_ else 0), is_local)  # (`@pool = pool || default`: the default)
             if ch and not (ch[0][:1].islower() and not ch[0].endswith("()") and ch[0] not in f.bound):
                 f.bound.setdefault(im.group(1), "expr:" + "\x1f".join(ch))
         mm_ = re.match(r"\s*([a-z_]\w*(?:\s*,\s*\*?[a-z_]\w*)+)\s*=\s*((?:::)?[A-Z]\w*(?:::[A-Z]\w*)*)\s*[.(]", ln)
