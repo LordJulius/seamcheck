@@ -57,8 +57,10 @@ def possible_callers(p: core.Project, g) -> list[tuple[str, int]]:
     code types as a library's (`reader.Read()` on an IDataReader) may still be one
     of the project's own. Not edges: a third tier below exact and name guess."""
     fam = core._family(g.file)
-    return sorted({(fid, ln) for fid, ln in p.possible.get(g.name, ())
-                   if fid in p.funcs and fam & core._family(p.funcs[fid].file)})
+    arity = g.targs.split(",") if g.targs and g.file.endswith(".cs") else None
+    return sorted({(fid, ln) for fid, ln, targs in p.possible.get(g.name, ())
+                   if fid in p.funcs and fam & core._family(p.funcs[fid].file)
+                   and not (arity and targs > 0 and str(targs) not in arity)})  # (`Read<int>()`: not `Read()`)
 
 
 def shortest(p: core.Project, a: str, b: str, fuzzy: bool = False) -> tuple[list[str], bool]:

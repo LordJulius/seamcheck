@@ -1876,7 +1876,7 @@ def _nothing(project: Project, f: Func, c) -> None:
     named = any(g.kind != "top" and fam & _family(g.file) for g in project.by_name.get(c.name, ()))
     if named:
         res[3] += 1
-        project.possible[c.name].append((f.id, c.line))
+        project.possible[c.name].append((f.id, c.line, c.targs))
     if _TRACE is not None:
         _TRACE.append((f.file, c.line, c.name, c.chain, "named" if named else "nothing", ()))
 
@@ -2471,6 +2471,8 @@ def _build_edges(project: Project) -> None:
                 in_test = _is_test_file(project, f.file)
                 cands = [g for g in project.by_name.get(c.name, []) if g.kind != "top" and fam & _family(g.file)
                          and (in_test or not _is_test_file(project, g.file))]  # product code never calls a test
+                if f.file.endswith(".cs") and c.targs > 0:  # `multi.Read<int>()` takes a method with one type parameter
+                    cands = [g for g in cands if not g.targs or str(c.targs) in g.targs.split(",")]
                 vague = len(cands) > 8  # (a very common name, before the ones out of reach are dropped)
                 if f.file.endswith(_JS_FILE_EXTS):
                     cands = [g for g in cands if not _js_scoped_patch(project, g, f)]

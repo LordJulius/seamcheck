@@ -192,14 +192,18 @@ def _scip_callers(docs: dict, root: str, g) -> set:
     return out
 
 
-def _align_lines(got: set, truth: set, p, reach: int = 20) -> set:
+def _align_lines(got: set, truth: set, p, reach: int = 20, name: str = "") -> set:
     """A site on the line of the call's name moves to the line CodeQL gives the
     whole call expression (a builder chain's start), when that is the nearest
     above and the line continues it (see vs_codeql.continues)."""
-    from vs_codeql import continues
+    from vs_codeql import continues, expr_start
     out = set()
     for f, ln in got:
         mods = p.by_file.get(f) or []
+        st = expr_start(mods[0].code if mods else None, ln, name) if name else ln  # (comments, strings blanked)
+        if (f, ln) not in truth and (f, st) in truth:
+            out.add((f, st))  # (the line the whole call expression starts on)
+            continue
         if (f, ln) not in truth and continues(mods[0].raw if mods else None, ln):
             above = [l0 for f0, l0 in truth if f0 == f and ln - reach <= l0 < ln and (f, l0) not in got]
             if above:
@@ -245,8 +249,11 @@ def main() -> None:
             break
     # a function's overloads are one function to seamcheck (and one name to a search): CodeQL's
     # callers of each overload in that file count for it
+    # (only where the file has no other function of that name: a nested class's `append` is its own)
+    same = collections.Counter((g.file, g.name) for g in p.funcs.values() if g.kind != "top")
     picks = [(g, set().union(t, *(sites for (tf, tl, name), sites in callers.items()
-                                  if tf == g.file and name == g.name and func_at(tf, tl, name) in (None, g))))
+                                  if tf == g.file and name == g.name and same[(g.file, g.name)] == 1
+                                  and func_at(tf, tl, name) in (None, g))))
              for g, t in picks]
     tools = {"seamcheck": [0, 0, 0], "seamcheck --wide": [0, 0, 0], "ast-grep": [0, 0, 0], "semgrep": [0, 0, 0], "scip": [0, 0, 0]}
     docs = _scip(opt("--scip"), opt("--scip-prefix", "")) if opt("--scip") else None
@@ -259,15 +266,19 @@ def main() -> None:
     for g, truth in picks:
         mine = {(p.funcs[s].file, ln) for s, es in p.edges.items() if s in p.funcs
                 for d, ln, ex in es if ex and d == g.id}
-        mine = _align_lines(mine, truth, p)
+        mine = _align_lines(mine, truth, p, name=g.name)
         row = {"seamcheck": _score({x for x in mine if x[0] in seen}, truth)}
         # `callers --wide`: exact, then name guesses, then calls by that name on a library-typed value
         wide = mine | {(p.funcs[s].file, ln) for s, es in p.edges.items() if s in p.funcs
                        for d, ln, ex in es if not ex and d == g.id}
         wide |= {(p.funcs[fid].file, ln) for fid, ln in queries.possible_callers(p, g)}
-        row["seamcheck --wide"] = _score(_align_lines({x for x in wide if x[0] in seen}, truth, p), truth)
+        row["seamcheck --wide"] = _score(_align_lines({x for x in wide if x[0] in seen}, truth, p, name=g.name), truth)
+        if opt("--not-sg") and opt("--sg"):  # (what --wide reports that a name search doesn't)
+            w_ = _align_lines({x for x in wide if x[0] in seen}, truth, p, name=g.name)
+            for f_, l_ in sorted(w_ - {x for x in _sg(opt("--sg"), root, lang, g.name)})[:int(opt("--not-sg"))]:
+                print(f"    NOT-SG {f_}:{l_} {'(CodeQL has it)' if (f_, l_) in truth else ''}")
         if opt("--misses"):  # (what --wide leaves out, and what it adds that CodeQL hasn't)
-            w_ = _align_lines({x for x in wide if x[0] in seen}, truth, p)
+            w_ = _align_lines({x for x in wide if x[0] in seen}, truth, p, name=g.name)
             for f_, l_ in sorted(truth - w_)[:int(opt("--misses"))]:
                 print(f"    MISS {f_}:{l_}")
             for f_, l_ in sorted(w_ - truth)[:int(opt("--misses"))]:
@@ -277,7 +288,7 @@ def main() -> None:
             row["ast-grep"] = _score({x for x in _sg(opt("--sg"), root, lang, g.name) if x[0] in seen}, truth)
             times["ast-grep"] += time.time() - t
         if docs is not None:
-            row["scip"] = _score(_align_lines({x for x in _scip_callers(docs, root, g) if x[0] in seen}, truth, p), truth)
+            row["scip"] = _score(_align_lines({x for x in _scip_callers(docs, root, g) if x[0] in seen}, truth, p, name=g.name), truth)
         if opt("--semgrep") and picks.index((g, truth)) < int(opt("--semgrep-n", 3)):
             t = time.time()
             row["semgrep"] = _score({x for x in _semgrep(opt("--semgrep"), root, lang, g.name) if x[0] in seen}, truth)
