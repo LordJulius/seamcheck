@@ -1378,6 +1378,10 @@ def _qml_types(mod: Module, code: str, stem: str) -> None:
     generic |= {m.group(1) for m in re.finditer(r"\bproperty[ \t]+(?:var|variant)[ \t]+([a-z_]\w*)", code)}
     for m in re.finditer(r"\bproperty[ \t]+(?:var|variant|QtObject|QObject)[ \t]+([a-z_]\w*)[ \t]*:", code):
         ch = expression(code, m.end())  # `property var iface: Factory.create(id)`: what it is bound to
+        if not ch:  # `cond ? Factory.create(id) : null`: the one branch that holds an object
+            line_end = code.find("\n", m.end())
+            tm = re.match(r"[^?\n]*\?\s*([^:\n]+?)\s*:\s*(?:null|undefined)\s*$", code[m.end():line_end if line_end > 0 else len(code)])
+            ch = expression(tm.group(1) + "\n", 0) if tm else ()
         if ch and mod.bound.get(m.group(1), "qmlvar:") == "qmlvar:":
             mod.bound[m.group(1)] = "expr:" + "\x1f".join(ch)
     for m in re.finditer(r"(?:^|[;{])[ \t]*([a-z_]\w*)[ \t]*=(?!=)", code, re.M):
@@ -2254,3 +2258,246 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     mod.funcs.append(top)
     mod.decls = sorted(set(mod.decls) - {d for m_ in mods.values() for d in m_.decls if m_.kind != "ext"}) if not go else mod.decls
     return [mod, *mods.values()]
+
+
+# --- QML: what a page's untyped properties are handed ----------------------------
+
+_QML_PUSH = re.compile(r"""\b(?:push|replace|pushDialogLayer|push\w*|setSource|createObject)\s*\(\s*(?:Qt\.resolvedUrl\(\s*)?(?:"([^"]+?)\.qml"|'([^']+?)\.qml'|([A-Za-z_]\w*))\s*\)?\s*,\s*\{""")
+
+
+def _qml_object_props(code: str, brace: int) -> dict[str, str]:
+    """`{ a: x, b: f(y) }` / an object block's own `name: value` lines: name -> value text."""
+    close = lambdas.matching(code, brace)
+    if close < 0:
+        return {}
+    inner, out, depth, start = code[brace + 1:close], {}, 0, 0
+    parts = []
+    for k, ch in enumerate(inner):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and ch in ",;\n":
+            parts.append(inner[start:k])
+            start = k + 1
+    parts.append(inner[start:])
+    for part in parts:
+        pm = re.match(r"\s*([a-z_]\w*)\s*:\s*(.+?)\s*$", part, re.S)
+        if pm:
+            out[pm.group(1)] = pm.group(2)
+    return out
+
+
+def qml_page_props(project) -> None:
+    """`pageStack.push(Qt.resolvedUrl("mpris.qml"), {pluginInterface: obj})`, `push(deviceComp,
+    {currentDevice: device})`, `DevicePage { currentDevice: d }`: a component's untyped
+    property (`property QtObject pluginInterface`) holds what every such site hands it,
+    evaluated where it is handed. A push whose page is the pushing component's own
+    property (PluginItem's `component`) is read per instance (`PluginItem { component:
+    "mpris.qml"; interfaceFactory: MprisDbusInterfaceFactory }`)."""
+    qml = [m for m in project.modules.values() if m.file.endswith(".qml") and not m.owner]
+    text = {m.name: "\n".join(m.code) for m in qml}  # (blanked: strings are spaces)
+    raw = {m.name: "\n".join(m.raw) for m in qml}
+    by_stem = {}
+    for m in qml:
+        by_stem.setdefault(os.path.basename(m.file)[:-4], []).append(m)
+    handed: dict[tuple[str, str], list[str]] = {}
+
+    def enclosing_function(code: str, pos: int) -> int:
+        """Where the innermost function / handler / arrow body holding `pos` starts."""
+        depth = 0
+        for k in range(pos - 1, -1, -1):
+            if code[k] == "}":
+                depth += 1
+            elif code[k] == "{":
+                if depth:
+                    depth -= 1
+                elif re.search(r"(?:\bfunction\b[^{};]*|=>\s*|\)\s*|\bon[A-Z]\w*\s*:\s*)$", code[max(0, k - 200):k]):
+                    return k
+        return 0
+
+    def hand(target: str, props: dict, where, subst: dict, at: int) -> None:
+        tms = by_stem.get(target, [])
+        if len(tms) != 1:
+            return
+        tm = tms[0]
+        for k, v in props.items():
+            if tm.bound.get(k, "qmlvar:") != "qmlvar:" and not handed.get((tm.name, k)):
+                continue  # (a declared type says more)
+            ch = expression(v + "\n", 0)
+            if ch and len(ch) == 1 and not ch[0].endswith("()"):
+                code_ = text[where.name]  # `var obj = f.create(id)` in the function that pushes
+                decls = list(re.finditer(rf"\b(?:var|let|const)\s+{re.escape(ch[0])}\s*=", code_[enclosing_function(code_, at):at]))
+                if decls:
+                    ch = expression(code_, enclosing_function(code_, at) + decls[-1].end()) or ch
+            if ch and len(ch) == 1 and (role := role_at(where.name, at, ch[0])):
+                handed.setdefault((tm.name, k), []).append(f"{where.name}\x1b{role}")  # a delegate's model role
+                continue
+            if ch and ch[0] in subst:  # the instance's own value of that property
+                sub = expression(subst[ch[0]] + "\n", 0)
+                ch = (sub + ch[1:]) if sub else ()
+            handed.setdefault((tm.name, k), []).append(f"{where.name}\x1b" + ("expr:" + "\x1f".join(ch) if ch else "?"))
+
+    delegates = qml_delegate_roles(project)
+
+    def role_at(mn: str, pos: int, name: str) -> str:
+        ln = text[mn].count("\n", 0, pos) + 1
+        for l0, l1, rs in delegates.get(mn, ()):
+            if l0 <= ln <= l1 and name in rs:
+                return rs[name]
+        return ""
+
+    comp_ids: dict[str, dict[str, str]] = {}
+    for m in qml:
+        ids = {}
+        code = text[m.name]
+        for cm in re.finditer(r"\bComponent\s*\{", code):
+            props_ = _qml_object_props(code, cm.end() - 1)
+            inner = re.search(r"\b([A-Z]\w*)\s*\{", code[cm.end():lambdas.matching(code, cm.end() - 1)])
+            if "id" in props_ and inner:
+                ids[props_["id"]] = inner.group(1)
+        comp_ids[m.name] = ids
+    for m in qml:
+        code = text[m.name]
+        own_props = set(re.findall(r"\bproperty\s+[\w.<>]+\s+([a-z_]\w*)", code))
+        for pm in _QML_PUSH.finditer(raw[m.name]):
+            props = _qml_object_props(code, pm.end() - 1)
+            name = pm.group(1) or pm.group(2)
+            if name:
+                hand(os.path.basename(name), props, m, {}, pm.start())
+            elif pm.group(3) in comp_ids[m.name]:
+                hand(comp_ids[m.name][pm.group(3)], props, m, {}, pm.start())
+            elif pm.group(3) in own_props:  # `push(Qt.resolvedUrl(component), {...})`: each instance's page
+                stem = os.path.basename(m.file)[:-4]
+                for im in qml:
+                    for om in re.finditer(rf"(?<![\w.]){re.escape(stem)}\s*\{{", text[im.name]):
+                        inst = _qml_object_props(raw[im.name], om.end() - 1)
+                        page = re.match(r"""["']([^"']+?)\.qml["']$""", inst.get(pm.group(3), ""))
+                        if page:
+                            hand(os.path.basename(page.group(1)), props, m, inst, pm.start())
+        for om in re.finditer(r"(?<![\w.])([A-Z]\w*)\s*\{", code):  # `DevicePage { currentDevice: d }`
+            if om.group(1) in by_stem and om.group(1) != os.path.basename(m.file)[:-4]:
+                inst = {k: v for k, v in _qml_object_props(code, om.end() - 1).items() if k != "id"}
+                hand(om.group(1), inst, m, {}, om.start())
+    for (mn, k), alts in handed.items():
+        project.modules[mn].bound[k] = "oneof:" + "\x1c".join(sorted(set(alts)))
+
+
+def _cpp_model_roles(project) -> dict[str, dict[str, str]]:
+    """A C++ item model's roles as QML sees them: `roleNames()` names each role
+    (`names.insert(DeviceRole, "device")`) and `data()` returns its value
+    (`case DeviceRole: return QVariant::fromValue<QObject *>(device);` with
+    `DeviceDbusInterface *device = ...`): class module -> {role name: "type:T"}."""
+    out: dict[str, dict[str, str]] = {}
+    for g in project.by_name.get("roleNames", ()):
+        if not g.file.endswith((".cpp", ".cc", ".cxx", ".h", ".hpp")):
+            continue
+        src = "\n".join(project.modules[g.module].raw[g.start - 1:g.end])  # (the role names are strings: raw text)
+        names = dict(re.findall(r"\b(\w+Role)\b\s*,\s*(?:QByteArrayLiteral\()?\s*\"(\w+)\"", src))
+        names.update(re.findall(r"\[\s*(\w+Role)\s*\]\s*=\s*(?:QByteArrayLiteral\()?\s*\"(\w+)\"", src))
+        data = project.funcs.get(f"{g.module}.data")
+        if not names or data is None:
+            continue
+        roles = {}
+        for enum, qml_name in names.items():
+            cm = re.search(rf"\bcase\s+(?:\w+::)*{enum}\s*:\s*\{{?\s*return\s+(?:QVariant::fromValue\s*(?:<[^>]*>)?\s*\(\s*)?([a-z_]\w*)\s*\)?\s*;", data.code)
+            if not cm:
+                continue
+            dm = re.search(rf"\b([A-Z][\w:]*)\s*\*\s*{cm.group(1)}\s*=", data.code)
+            if dm:
+                roles[qml_name] = "type:" + dm.group(1)
+        if roles:
+            out[g.module] = roles
+    return out
+
+
+def qml_delegate_roles(project) -> dict[str, list[tuple[int, int, dict]]]:
+    """A delegate's bare role names (`device` in a ListView delegate whose model is
+    `DevicesSortProxyModel { sourceModel: devicesModel }` over a C++ DevicesModel):
+    QML module -> [(first line, last line, {role: held})], also bound on the
+    delegate's own handlers."""
+    roles = _cpp_model_roles(project)
+    if not roles:
+        return {}
+    by_class = {}
+    for mn, rs in roles.items():
+        cls = mn.rsplit("@", 1)[0].rsplit(".", 1)[-1] if "." in mn else os.path.basename(mn)
+        by_class.setdefault(cls, {}).update(rs)
+        m_ = project.modules.get(mn)
+        for d in (m_.decls if m_ else []):
+            by_class.setdefault(d, {}).update(rs)
+    out: dict[str, list] = {}
+    for m in project.modules.values():
+        if not m.file.endswith(".qml") or m.owner:
+            continue
+        code = "\n".join(m.code)
+        for vm in re.finditer(r"\bmodel\s*:\s*", code):
+            k = vm.end()
+            src = ""
+            om = re.match(r"([A-Z][\w.]*)\s*\{", code[k:])
+            if om:  # `model: DevicesSortProxyModel { sourceModel: devicesModel }`
+                props = _qml_object_props(code, k + om.end() - 1)
+                src = props.get("sourceModel", "") or ("" if om.group(1) not in by_class else "")
+                cls = om.group(1) if om.group(1) in by_class and not src else ""
+            else:
+                im = re.match(r"([a-z_]\w*)\s*$", code[k:code.find("\n", k)])
+                src, cls = (im.group(1) if im else ""), ""
+            if src and not cls:
+                held = m.bound.get(src, "")
+                cls = held[5:] if held.startswith("type:") else ""
+            rs = by_class.get(cls.split(".")[-1]) if cls else None
+            if not rs:
+                continue
+            # the delegate of the object holding this `model:` (the view)
+            depth, a = 0, vm.start()
+            while a > 0:
+                a -= 1
+                if code[a] == "}":
+                    depth += 1
+                elif code[a] == "{":
+                    if depth == 0:
+                        break
+                    depth -= 1
+            close = lambdas.matching(code, a)
+            dm = None  # the view's own `delegate:` (not a `section { delegate: ... }` inside it)
+            for cand in (re.finditer(r"\bdelegate\s*:\s*[A-Z][\w.]*\s*\{", code[a:close]) if close > 0 else ()):
+                seg = code[a + 1:a + cand.start()]
+                if seg.count("{") == seg.count("}"):
+                    dm = cand
+                    break
+            if not dm:
+                continue
+            d_open = a + dm.end() - 1
+            d_close = lambdas.matching(code, d_open)
+            l0, l1 = code.count("\n", 0, d_open) + 1, code.count("\n", 0, d_close) + 1
+            out.setdefault(m.name, []).append((l0, l1, rs))
+            for f in m.funcs:
+                if l0 <= f.start and f.end <= l1:
+                    for r, held in rs.items():
+                        f.bound.setdefault(r, held)
+    return out
+
+
+def qt_dbus_interfaces(project) -> None:
+    """Qt D-Bus: `class Device { Q_CLASSINFO("D-Bus Interface", "org.kde.kdeconnect.device") }`
+    is what a proxy generated from that interface (qdbusxml2cpp's
+    `OrgKdeKdeconnectDeviceInterface`, the base of a hand-written `DeviceDbusInterface`)
+    calls across the bus: the generated name stands for the class, so
+    `iface->cancelPairing()` reaches Device::cancelPairing in the daemon."""
+    for m in project.modules.values():
+        if not m.file.endswith((".h", ".hpp", ".hh", ".cpp", ".cc", ".cxx")):
+            continue
+        text = "\n".join(m.raw)
+        if "D-Bus Interface" not in text:
+            continue
+        for cm in re.finditer(r'Q_CLASSINFO\(\s*"D-Bus Interface"\s*,\s*"([\w.]+)"\s*\)', text):
+            cls = re.findall(r"^\s*class\s+(?:\w+_EXPORT\s+)?([A-Za-z_]\w*)\b[^;]*$", text[:cm.start()], re.M)
+            if not cls:
+                continue
+            generated = "".join(p[:1].upper() + p[1:] for p in cm.group(1).split(".")) + "Interface"
+            # (the class's header and its .cpp are both the class)
+            owners = [o for o in project.modules.values() if cls[-1] in o.decls
+                      and o.file.endswith((".h", ".hpp", ".hh", ".cpp", ".cc", ".cxx"))] or [m]
+            for o in owners:
+                if generated not in o.decls:
+                    o.decls.append(generated)

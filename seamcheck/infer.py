@@ -366,6 +366,15 @@ class Types:
             return ("inst", (held[4:],), True) if held[4:] in self.p.modules else None
         if held.startswith("expr:"):
             return self.chain(mod, f, tuple(held[5:].split("\x1f")), depth + 1, self_mods=self_mods)
+        if held.startswith("oneof:"):  # what every site hands a QML property, each read where it is handed
+            got = set()
+            for alt in held[6:].split("\x1c"):
+                mn, _, inner = alt.partition("\x1b")
+                v = self.held(self.p.modules[mn], None, inner, depth + 1) if mn in self.p.modules and inner != "?" else None
+                if v is None or v is UNKNOWN:
+                    return None
+                got.add(v)
+            return got.pop() if len(got) == 1 else None
         if held.startswith("reexport:"):  # `exports.Router = Router`: that name's value in the module
             return EXT if held[9:] in mod.external else None
         if held.startswith("pack:"):
