@@ -91,6 +91,54 @@ def continues(raw, ln: int) -> bool:
     return here.startswith((".", ")", "?.")) or above.endswith((".", "(", ",", "->", "=>"))
 
 
+def expr_start(raw, ln: int, name: str) -> int:
+    """The line the call `name(` on line `ln` starts on as a whole expression, its
+    receiver chain walked back (`MethodSpec.methodBuilder("x")` 20 lines above a
+    `.build()`): where CodeQL and a syntax search place the call."""
+    if raw is None or not (0 < ln <= len(raw)):
+        return ln
+    col = raw[ln - 1].find(name + "(")
+    if col < 0:
+        col = raw[ln - 1].find(name + "<")
+    if col < 0:
+        return ln
+    text = "\n".join(raw)
+    pos = sum(len(x) + 1 for x in raw[:ln - 1]) + col
+    for _ in range(200):
+        j = pos - 1
+        while j >= 0 and text[j] in " \t\n":
+            j -= 1
+        if j < 0 or text[j] != ".":
+            break
+        j -= 1
+        while j >= 0 and text[j] in " \t\n?":
+            j -= 1
+        if j >= 0 and text[j] == ")":  # a call's arguments, back to their `(`
+            d = 0
+            while j >= 0:
+                d += text[j] == ")"
+                d -= text[j] == "("
+                if d == 0:
+                    break
+                j -= 1
+            j -= 1
+            while j >= 0 and text[j] in " \t":
+                j -= 1
+            if j >= 0 and text[j] == ">":  # `Foo.<T>bar(`
+                while j >= 0 and text[j] != "<":
+                    j -= 1
+                j -= 1
+        k = j
+        while k >= 0 and (text[k].isalnum() or text[k] in "_$"):
+            k -= 1
+        if k == j:
+            break
+        pos = k + 1
+        if text[max(0, pos - 4):pos] == "new ":
+            pos -= 4
+    return text.count("\n", 0, pos) + 1
+
+
 def _align(sites: dict, cq: dict, raw_of, reach: int = 20) -> dict:
     """seamcheck places a call on the line of its name (`.create(` in a builder
     chain), CodeQL on the line its whole expression starts (`new GsonBuilder()`):
