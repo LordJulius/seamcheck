@@ -209,6 +209,9 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
     return _bare_first(segs)
 
 
+_CHAINED_ASSIGN = re.compile(r"[ \t]*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*[ \t]*=(?![=>])[ \t]*")
+
+
 def _close(code: str, i: int) -> int:
     """The index of the bracket closing the one at code[i]; -1 when none."""
     depth = 0
@@ -234,6 +237,11 @@ def expression(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
     for kw in ("await ", "try ", "try! ", "try? ", "yield "):
         if code.startswith(kw, i):
             i += len(kw)
+    while True:  # `app = module.exports = express()`: the value is the last one assigned
+        am = _CHAINED_ASSIGN.match(code, i)
+        if not am:
+            break
+        i = am.end()
     while i < n and code[i] in " \t":
         i += 1
     segs: list[str] = []

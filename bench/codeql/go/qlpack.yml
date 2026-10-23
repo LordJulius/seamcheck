@@ -1,0 +1,4 @@
+name: seamcheck-bench/go-calls
+version: 0.0.1
+dependencies:
+  codeql/go-all: "*"

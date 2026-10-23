@@ -1480,6 +1480,46 @@ def _bind_param(f: Func, nm_: str, spec: str, body: str, a: int, b: int, first_l
 _LAM_SIZE: dict = {}  # (function, "name@line") -> the extent of the lambda bound there
 
 
+# TypeScript blocks that only declare types: their `name(...)` lines are signatures, not calls
+_TS_TYPE_BLOCK = re.compile(r"^[ \t]*(?:export\s+)?(?:declare\s+(?:global|module|namespace)\b[^{\n]*|(?:declare\s+)?interface\s+[^{\n]*|"
+                            r"(?:export\s+)?(?:declare\s+)?type\s+\w+[^=\n]*=\s*)\{", re.M)
+_TS_SIGNATURE = re.compile(r"^\s*(?:(?:public|private|protected|static|readonly|abstract|declare|export|async|get|set)\s+)*"
+                           r"[\w$]+\??\s*(?:<[^>]*>)?\s*\([^)]*\)\s*:\s*[^=;{]+;\s*$")
+
+
+def _top_calls(top: Func, mods_: list, code: str, lines: list[str], tk: str, fam: str) -> None:
+    """JS / TS: the calls a module makes outside its functions: `const app = express()`,
+    `app.use(router)`, and a test file's `describe` / `before` callbacks (not
+    functions of their own), so who calls `createApp` counts them."""
+    covered = set()
+    for g in (g for m_ in mods_ for g in m_.funcs):
+        covered.update(range(g.start - 1, g.end))
+    for tm in _TS_TYPE_BLOCK.finditer(code):
+        a = code.count("\n", 0, tm.start())
+        close = lambdas.matching(code, tm.end() - 1)
+        covered.update(range(a, (code.count("\n", 0, close) if close > 0 else a) + 1))
+    keep = [i not in covered for i in range(len(lines))]
+    text = "\n".join(ln if keep[i] else "" for i, ln in enumerate(lines))
+    for nm_, held in _assignments(tk, text):
+        top.bound.setdefault(nm_, held)
+    off = 0
+    for i, ln in enumerate(lines):
+        if keep[i] and not _TS_SIGNATURE.match(ln):
+            for m in _CALL.finditer(ln):
+                nm = m.group(2)
+                if re.search(r"\bfunction\s*\*?\s*$", ln[:m.start(2)]):
+                    continue  # `function name(`: a declaration
+                chain = receiver(text, off + m.start(2))
+                before = ln[:m.start(2)].rstrip()
+                q = m.group(1) or ("." if before.endswith((".", "->")) and not before.endswith("...") else "")
+                if chain and q and q != ".":
+                    q = chain[-1] if re.match(r"^[\w$]+$", chain[-1]) else "."
+                if nm in _CALL_SKIP and (not q or (nm in _NOT_FUNC and nm != "new")):
+                    continue
+                top.calls.append(Call(nm, q, i + 1, chain if q else (), m.start(2)))
+        off += (len(ln) if keep[i] else 0) + 1
+
+
 def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     from . import chains
     _LAM_SIZE.clear()
@@ -2174,6 +2214,8 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             imod.kind, imod.methods = "interface", names
             mods[iname] = imod
     top = Func(mod.name, "<top>", rel, 1, len(lines), "", kind="top")
+    if fam == "js" and ext != ".qml" and not rel.endswith(".d.ts"):
+        _top_calls(top, [mod, *mods.values()], code, lines, tk, fam)
     if fam == "js":  # module-level callbacks (`app.get('/', function (req, res) {` at the top of a file)
         top.code = code
         _pack_params(top)
