@@ -156,6 +156,10 @@ class Project:
     config_problems: list[str] = field(default_factory=list)
     precise: dict = field(default_factory=dict)  # what the language servers settled (precise.py), when asked
     params: dict = field(default_factory=dict)  # the packs' [[param]] entries in force ("<pack>/<id>" -> entry)
+    # name -> [(caller, line)]: calls that reached no project function though one has the name
+    # (a method on a library-typed value: `reader.Read()` on an IDataReader). `callers --wide`
+    # lists them apart, as possible callers, below the exact and name-guess ones
+    possible: dict[str, list[tuple[str, int]]] = field(default_factory=lambda: defaultdict(list))
 
     # ---- lookups
     def module_of_file(self, rel: str) -> Module | None:
@@ -1872,6 +1876,7 @@ def _nothing(project: Project, f: Func, c) -> None:
     named = any(g.kind != "top" and fam & _family(g.file) for g in project.by_name.get(c.name, ()))
     if named:
         res[3] += 1
+        project.possible[c.name].append((f.id, c.line))
     if _TRACE is not None:
         _TRACE.append((f.file, c.line, c.name, c.chain, "named" if named else "nothing", ()))
 

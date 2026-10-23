@@ -31,17 +31,34 @@ def flat(p: core.Project, findings: list[core.Finding]) -> list[dict]:
             for f in findings]
 
 
-def walk(p: core.Project, spec: str, depth: int, reverse: bool, fuzzy: bool = False) -> list[dict]:
+def walk(p: core.Project, spec: str, depth: int, reverse: bool, fuzzy: bool = False, wide: bool = False) -> list[dict]:
     """`callers` (reverse) / `callees`: per matching function, its exact and
     name-guess edge counts and what it reaches within `depth` calls (exact
-    edges unless `fuzzy`)."""
+    edges unless `fuzzy`). `wide` (callers): also the possible callers, the
+    calls by that name that reached no project function (a library-typed
+    receiver), listed apart."""
     out = []
     for s in p.find(spec):
         ex, guess = core.edge_split(p, s.id, reverse=reverse)
-        dist = core.reach(p, s.id, depth, reverse=reverse, exact_only=not fuzzy)
-        out.append(dict(where(p, s.id), exact=ex, guess=guess,
-                        reach=[dict(where(p, k), depth=d) for k, d in sorted(dist.items(), key=lambda kv: (kv[1], kv[0])) if d]))
+        dist = core.reach(p, s.id, depth, reverse=reverse, exact_only=not fuzzy and not wide)
+        row = dict(where(p, s.id), exact=ex, guess=guess,
+                   reach=[dict(where(p, k), depth=d) for k, d in sorted(dist.items(), key=lambda kv: (kv[1], kv[0])) if d])
+        if reverse:
+            poss = possible_callers(p, s)
+            row["possible"] = len(poss)
+            if wide:
+                row["possible_sites"] = [dict(where(p, fid), line=ln) for fid, ln in poss]
+        out.append(row)
     return out
+
+
+def possible_callers(p: core.Project, g) -> list[tuple[str, int]]:
+    """Call sites named like g that reached no project function: a receiver the
+    code types as a library's (`reader.Read()` on an IDataReader) may still be one
+    of the project's own. Not edges: a third tier below exact and name guess."""
+    fam = core._family(g.file)
+    return sorted({(fid, ln) for fid, ln in p.possible.get(g.name, ())
+                   if fid in p.funcs and fam & core._family(p.funcs[fid].file)})
 
 
 def shortest(p: core.Project, a: str, b: str, fuzzy: bool = False) -> tuple[list[str], bool]:

@@ -143,6 +143,9 @@ def _main(argv=None) -> int:
     ap.add_argument("--precise", action="store_true",
                     help="ask language servers where the calls the static resolver guesses go (see README)")
     ap.add_argument("--fuzzy", action="store_true", help="callers / callees / path / impact: also follow name-guess edges")
+    ap.add_argument("--wide", action="store_true",
+                    help="callers: everything that may call it, in three tiers: exact, name guess, and calls by that name "
+                         "on a library-typed value (the most a name search would find, ranked)")
     ap.add_argument("--since", help="tidy reports: only files changed since this git ref; impact: start from the functions changed since it")
     ap.add_argument("--ids", action="store_true", help="tidy reports: only ids, one per line")
     ap.add_argument("--apply", action="store_true", help="remove: write the files (default: show what would go)")
@@ -241,19 +244,24 @@ def _main(argv=None) -> int:
         if not a.args:
             ap.error(f"{a.cmd} needs a function")
         rev = a.cmd == "callers"
-        starts = queries.walk(p, a.args[0], a.depth, rev, a.fuzzy)
+        starts = queries.walk(p, a.args[0], a.depth, rev, a.fuzzy, wide=rev and a.wide)
         if not starts:
             print(f"no function matches {a.args[0]!r}")
             return 1
         word = "callers" if rev else "callees"
         for s in starts:
             ex, guess = s["exact"], s["guess"]
-            print(f"{_fmt(p, s['id'])}  [{ex} exact, {guess} name-guess {word}{'' if a.fuzzy else ', walking exact'}]")
+            print(f"{_fmt(p, s['id'])}  [{ex} exact, {guess} name-guess {word}{'' if a.fuzzy or (rev and a.wide) else ', walking exact'}]")
             for r in s["reach"]:
                 print(f"  {'  ' * (r['depth'] - 1)}{'<-' if rev else '->'} {_fmt(p, r['id'])}")
-            if ex == 0 and not a.fuzzy:
+            if ex == 0 and not a.fuzzy and not (rev and a.wide):
                 # (a miss must not read as "nothing calls it")
                 print(f"  0 exact {word}" + (f"; {guess} by name guess only (--fuzzy shows them)" if guess else "; none by name guess either"))
+            if rev and a.wide:
+                for x in s.get("possible_sites", []):
+                    print(f"  ?? {_fmt(p, x['id'])} line {x['line']}  (a call by that name on a library-typed value)")
+            elif rev and s.get("possible"):
+                print(f"  ({s['possible']} more calls by that name on library-typed values: --wide lists them)")
         return 0
 
     if a.cmd == "path":

@@ -225,27 +225,25 @@ Sourcegraph's precise "find references", read from the SCIP index
 `scip-python` / `scip-typescript` write (a reference written as a call counts;
 every tool is then scored on the files both CodeQL and the indexer read).
 
-Precision / recall, October 2026:
+Precision / recall, October 2026. seamcheck's exact answer (`callers`) and its
+ranked full answer (`callers --wide`: exact, then name guesses, then calls by
+that name on library-typed values):
 
-| repo | lang | seamcheck | SCIP (Sourcegraph) | ast-grep | Semgrep† |
-|---|---|---|---|---|---|
-| requests | Python | 100% / 100% | 100% / 95.5% | 51.2% / 100% | 52.6% / 100% |
-| httpx | Python | 96.4% / 96.8% | 96.1% / 98.8% | 40.0% / 100% | 33.7% / 100% |
-| flask | Python | 46.5%* / 93.8% | 66.7% / 0.8% | 18.3% / 47.9% | 96.2% / 28.9% |
-| click (held out) | Python | 97.4% / 100% | 100% / 71.1% | 76.0% / 100% | 75.9% / 100% |
-| koa (held out) | JavaScript | 22.1%* / 94.4% | 47.1% / 44.4% | 5.0% / 100% | 9.9% / 100% |
-| axios (held out) | JavaScript | 94.3% / 90.2% | 100% / 65.6% | 31.2% / 94.0% | 69.1% / 100% |
-| ky (held out) | TypeScript | 100% / 80.0% | 100% / 80.0% | 57.1% / 80.0% | – |
-| zod (held out) | TypeScript | 100% / 98.4% | 99.1% / 82.5% | 46.2% / 88.6% | 75.6% / 99.0% |
-| javapoet (held out) | Java | 90.1% / 92.3% | – | 28.0% / 100% | 37.7% / 100% |
-| gin (held out) | Go | 100% / 65.4% | – | 100% / 13.6% | 95.2% / 100% |
-| rack (held out) | Ruby | 87.6% / 88.4% | – | 56.4% / 43.1% | 89.0% / 100% |
-| sidekiq (held out) | Ruby | 99.0% / 98.5% | – | 0.0% / 0.0% | – |
-| Dapper (held out) | C# | 87.8% / 50.7% | – | 54.1% / 99.2% | 82.1% / 100% |
-| jsoup | Java | 95.5% / 99.1% | – | 86.0% / 100% | – |
-| gson | Java | 92.2% / 81.0% | – | 78.1% / 99.3% | – |
-| cobra | Go | 100% / 100% | – | 77.8% / 77.8% | – |
-| express | JavaScript | 65.7%* / 100% | – | 9.1% / 100% | – |
+| repo | lang | seamcheck exact | seamcheck `--wide` | SCIP (Sourcegraph) | ast-grep | Semgrep† |
+|---|---|---|---|---|---|---|
+| requests | Python | 100% / 100% | 88.0% / 100% | 100% / 95.5% | 51.2% / 100% | 52.6% / 100% |
+| httpx | Python | 96.4% / 96.8% | 64.7% / 100% | 96.1% / 98.8% | 40.0% / 100% | 33.7% / 100% |
+| flask | Python | 46.5%* / 86.4% | 27.2% / 86.4% | 66.7% / 0.7% | 18.3% / 44.1% | 96.2% / 28.9% |
+| click (held out) | Python | 97.4% / 100% | 82.6% / 100% | 100% / 71.1% | 76.0% / 100% | 75.9% / 100% |
+| koa (held out) | JavaScript | 22.1%* / 94.4% | 6.5% / 100% | 47.1% / 44.4% | 5.0% / 100% | 9.9% / 100% |
+| axios (held out) | JavaScript | 94.3% / 90.0% | 32.7% / 94.9% | 100% / 65.5% | 31.2% / 93.8% | 69.1% / 100% |
+| ky (held out) | TypeScript | 100% / 80.0% | 66.7% / 80.0% | 100% / 80.0% | 57.1% / 80.0% | – |
+| zod (held out) | TypeScript | 100% / 98.4% | 78.8% / 99.2% | 99.1% / 82.5% | 46.2% / 88.6% | 75.6% / 99.0% |
+| javapoet (held out) | Java | 90.1% / 92.3% | 76.2% / 95.2% | – | 28.0% / 100% | 37.7% / 100% |
+| gin (held out) | Go | 100% / 65.4% | 79.8% / 97.5% | – | 100% / 13.6% | 95.2% / 100% |
+| rack (held out) | Ruby | 87.6% / 86.0% | 70.5% / 89.0% | – | 56.4% / 41.9% | 89.0% / 100% |
+| sidekiq (held out) | Ruby | 99.0% / 98.5% | 57.3% / 98.7% | – | 0.0% / 0.0% | – |
+| Dapper (held out) | C# | 89.9% / 51.3% | 51.4% / 98.0% | – | 54.8% / 99.2% | 82.1% / 100% |
 
 \* below the true figure: sites CodeQL misses count against seamcheck. koa's
 `ctx.set(...)` reaches `response.set` through `delegates(proto, 'response')`;
@@ -282,8 +280,12 @@ What the columns say:
 - sidekiq's ast-grep row is zero because the pattern `$R.name($$$A)`
   matches a Ruby call only when it is written with parentheses, and the
   targets' calls there aren't (`@config.redis do |conn|`).
-- jsoup, gson, cobra and express are from the earlier run (seamcheck and
-  ast-grep only, before the overload rule above).
+- `--wide` is what to compare with a name search: it finds what the search
+  finds (recall at or above ast-grep's on 11 of the 13; javapoet 95.2% against
+  100%, Dapper 98.0% against 99.2%) and is at least as precise on 11 of 13
+  (Dapper 51.4% against 54.8%; gin 79.8% against ast-grep's 100% at 13.6%
+  recall), with the exact tier first. The exact column is
+  the answer to act on without reading.
 
 ### Architecture rules, against dependency-cruiser and ArchUnit
 
@@ -473,6 +475,8 @@ Options
   -C DIR          project root (default: the nearest parent with seamcheck.toml)
   --config PATH   more config: a .toml or a folder of them (repeatable)
   --fuzzy         callers / callees / path / impact: also walk name-guess edges
+  --wide          callers: also the possible callers (calls by that name on a
+                  library-typed value), listed below exact and name guess
   --precise       ask language servers where the guessed calls go (see "Precise mode")
   --no-cache      parse everything again
   --strict        runtime: also flag rules that had nothing to check in this run
@@ -593,7 +597,12 @@ gate watches it for you (below).
 
 Queries say how sure they are. `callers`, `callees`, `path` and `impact` walk
 exact edges; `--fuzzy` adds the guesses. `find` and the `callers` header print
-both counts (`callers: 12 exact, 1849 name-guess`).
+both counts (`callers: 12 exact, 1849 name-guess`). `callers --wide` answers
+"what could call this?" in three ranked tiers: the exact callers, the name
+guesses, and then (marked `??`) the calls by that name on a value the code types
+as a library's (`reader.Read()` on an `IDataReader` may still be the project's
+own reader). That third tier is never an edge, so nothing else counts it; it is
+what a name search would add, kept below what is known.
 
 Tests are functions too (kind `test`): ExUnit `test "..." do` (including a
 head that goes on to the next line, like `test "x",\n %{conn: conn} do`),
@@ -1295,7 +1304,7 @@ claude mcp add seamcheck -- seamcheck serve -C /path/to/repo
 |---|---|---|
 | `check` | `only`, `skip` (rule ids), `errors_only` | the findings, as `check --json` |
 | `gate` | `since` (default `HEAD`), `staged` | `{blocked, changed_files, findings}`, as `gate --json` |
-| `callers` / `callees` | `name`, `depth` (2), `fuzzy` | per match: exact and guess counts, what it reaches with depth |
+| `callers` / `callees` | `name`, `depth` (2), `fuzzy`, `wide` (callers) | per match: exact, guess and possible counts, what it reaches with depth; `wide` lists the possible sites |
 | `path` | `from`, `to`, `fuzzy` | the chain, or `through_guesses_only` |
 | `find` | `name` | id, file, lines, callers exact / guessed |
 | `context` | `name` | per match: source, callers (file, line, exact), its calls and their targets, the tests reaching it |
