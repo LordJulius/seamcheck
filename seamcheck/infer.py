@@ -467,9 +467,10 @@ class Types:
                 inner = [(g.start, g.end) for g in m.funcs if g.kind != "top"] if f.kind == "top" else []
                 for x in _EXPANDO.finditer(code):
                     loc = x.group(1)
-                    if loc == "this" or not f.bound.get(loc, "").startswith("expr:"):
+                    held_ = f.bound.get(loc, "") or (m.bound.get(loc, "") if f.kind == "top" else "")
+                    if loc == "this" or not held_.startswith(("expr:", "mod:")):
                         continue
-                    if inner and any(a <= code.count("\n", 0, x.start()) + 1 <= b for a, b in inner):
+                    if inner and any(a < code.count("\n", 0, x.start()) + 1 <= b for a, b in inner):
                         continue  # (inside a function: its own locals)
                     ch = expression(code, x.end())
                     fm_ = re.match(r"\s*(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(", code[x.end():x.end() + 200])
