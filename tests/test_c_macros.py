@@ -31,3 +31,48 @@ class CMacros(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+CPP = {
+    "src/config.h": """#define GETTER(KEY, TYPE) \\
+    TYPE KEY() { return value(#KEY).value<TYPE>(); }
+#define SETTER(FUNC, TYPE) \\
+    void FUNC(const TYPE& v) { setValue(v); }
+#define GETTER_SETTER(G, S, TYPE) \\
+    GETTER(G, TYPE) \\
+    SETTER(S, TYPE)
+
+class Config
+{
+public:
+    Config();
+    GETTER_SETTER(showHelp, setShowHelp, bool)
+    GETTER(savePath, QString)
+};
+""",
+    "src/config.cpp": '#include "config.h"\n\nConfig::Config()\n{\n}\n',
+    "src/widget.cpp": """#include "config.h"
+
+void toggle(bool on)
+{
+    Config().setShowHelp(on);
+    if (Config().showHelp()) {
+    }
+}
+""",
+}
+
+
+class CppMacroMethods(unittest.TestCase):
+    def test_methods_a_macro_defines_and_calls_on_a_temporary(self):
+        # flameshot's CONFIG_GETTER_SETTER: each use in a class body declares methods named by its arguments
+        with tempfile.TemporaryDirectory() as d:
+            for name, body in CPP.items():
+                os.makedirs(os.path.join(d, os.path.dirname(name)), exist_ok=True)
+                with open(os.path.join(d, name), "w") as fh:
+                    fh.write(body)
+            p = core.load(d, use_cache=False)
+            names = {f.name for f in p.funcs.values() if f.file == "src/config.h"} - {"<top>"}
+            self.assertEqual(names, {"showHelp", "setShowHelp", "savePath"})  # (not the templates' KEY / FUNC)
+            got = {p.funcs[dst].name for dst, _l, e in p.edges.get("src/widget.toggle", []) if e}
+            self.assertEqual(got, {"Config", "setShowHelp", "showHelp"})

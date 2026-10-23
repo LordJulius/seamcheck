@@ -19,6 +19,31 @@ FILES = {
     "src/ui/types.ts": "export type Shown = { a: number };\n",
     "src/a/one.ts": 'import { two } from "../b/two";\n\nexport function one() {\n  two();\n}\n',
     "src/b/two.ts": 'import { one } from "../a/one";\n\nexport function two() {\n  one();\n}\n',
+    "web/app.py": """import subprocess
+from web.util import run_it, safe_name
+
+
+def handler(request):
+    cmd = request.args.get("c")
+    full = "ls " + cmd
+    run_it(full)
+    subprocess.run("date")
+
+
+def other(request):
+    name = safe_name(request.args.get("n"))
+    subprocess.run(name)
+""",
+    "web/util.py": """import subprocess
+
+
+def run_it(text):
+    subprocess.run(text, shell=True)
+
+
+def safe_name(n):
+    return n
+""",
     "src/main/java/org/x/select/Visitor.java": "package org.x.select;\n\npublic interface Visitor {\n    void head(int n);\n}\n",
     "src/main/java/org/x/select/Traversor.java": """package org.x.select;
 
@@ -62,6 +87,20 @@ layers = [{ name = "ui", in = ["src/ui/**"] }, { name = "db", in = ["src/db/**"]
 id = "no-cycles"
 kind = "cycles"
 in = ["src/**"]
+
+[[rule]]
+id = "no-shell"
+kind = "path"
+from = ["web/app.py:*"]
+to = ['^subprocess\\.run$']
+
+[[rule]]
+id = "no-tainted-shell"
+kind = "path"
+from = ["web/app.py:*"]
+to = ['^subprocess\\.run$']
+source = 'request\\.args'
+unless = ["safe"]
 
 [[rule]]
 id = "no-package-cycles"
@@ -119,6 +158,18 @@ class Arch(unittest.TestCase):
         self.assertEqual(g, {"src/a/one.ts": {"src/b/two.ts": 1}, "src/b/two.ts": {"src/a/one.ts": 1}})
         self.assertIn('"src/a/one.ts" -> "src/b/two.ts" [color=red];', arch.render(g, "dot"))
         self.assertIn("graph LR", arch.render(g, "mermaid"))
+
+    def test_path_reaches_sinks_through_calls(self):
+        got = sorted((f.func, f.message.split(": ", 1)[1]) for f in self.found["no-shell"])
+        self.assertIn(("handler", "handler -> run_it"), got)
+        self.assertIn(("handler", "handler"), got)  # the constant `subprocess.run("date")`
+
+    def test_path_with_a_source_follows_the_tainted_value(self):
+        # handler's `cmd` -> `full` -> run_it's parameter -> subprocess.run(text): reported;
+        # the constant `date` and the value through safe_name are not
+        [f] = self.found["no-tainted-shell"]
+        self.assertEqual(f.func, "handler")
+        self.assertIn("web/util.py:5", f.message)
 
     def test_a_call_through_an_interface_is_no_package_dependency(self):
         # Traversor calls Visitor.head; Printer implements it: select doesn't depend on examples
