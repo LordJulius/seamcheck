@@ -243,7 +243,7 @@ that name on library-typed values):
 | gin (held out) | Go | 100% / 65.4% | 79.8% / 97.5% | – | 100% / 13.6% | 95.2% / 100% |
 | rack (held out) | Ruby | 87.6% / 86.0% | 70.5% / 89.0% | – | 56.4% / 41.9% | 89.0% / 100% |
 | sidekiq (held out) | Ruby | 99.0% / 98.5% | 57.3% / 98.7% | – | 0.0% / 0.0% | – |
-| Dapper (held out) | C# | 89.9% / 51.3% | 51.4% / 98.0% | – | 54.8% / 99.2% | 82.1% / 100% |
+| Dapper (held out) | C# | 89.9% / 51.3% | 51.7% / 100% | – | 54.8% / 99.2% | 82.1% / 100% |
 
 \* below the true figure: sites CodeQL misses count against seamcheck. koa's
 `ctx.set(...)` reaches `response.set` through `delegates(proto, 'response')`;
@@ -282,7 +282,7 @@ What the columns say:
   targets' calls there aren't (`@config.redis do |conn|`).
 - `--wide` is what to compare with a name search: it finds what the search
   finds (recall at or above ast-grep's on 11 of the 13; javapoet 97.1% against
-  100%, Dapper 98.0% against 99.2%) and is at least as precise on 11 of 13
+  100%; Dapper 100% against 99.2%) and is at least as precise on 11 of 13
   (Dapper 51.4% against 54.8%; gin 79.8% against ast-grep's 100% at 13.6%
   recall), with the exact tier first. The exact column is
   the answer to act on without reading.

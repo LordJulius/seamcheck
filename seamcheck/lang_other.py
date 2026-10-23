@@ -2005,7 +2005,8 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 elif depth <= 0 and ch == ";":
                     body_end = k  # a declaration without a body (trait/interface) or an expression body
                     break
-                elif depth <= 0 and ch == "\n" and "=>" in code[m.start():k] and not code[max(m.start(), k - 8):k].rstrip().endswith("=>"):
+                elif depth <= 0 and ch == "\n" and "=>" in code[m.start():k] and not code[max(m.start(), k - 8):k].rstrip().endswith("=>") \
+                        and ext != ".cs":  # (C#: `Make(Type t) =>\n  a ? b :\n  c;` runs to its `;`)
                     body_end = k
                     break
                 elif depth <= 0 and ch == "\n" and ext == ".swift" and \
@@ -2644,7 +2645,8 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     f.bound[nm_] = "type:" + ty
                 for m in _CALL.finditer(ln):
                     nm = m.group(2)
-                    if i == sa and (nm == name or m.start(2) < name_col) or line_start[i] + m.start(2) in decl_pos:
+                    if i == sa and (nm == name and m.start(2) <= name_col or m.start(2) < name_col) \
+                            or line_start[i] + m.start(2) in decl_pos:  # (`Read() => _reader.Read();`: the second is a call)
                         continue
                     chain = receiver(body, off + m.start(2))
                     before = ln[:m.start(2)].rstrip()

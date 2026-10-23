@@ -818,3 +818,14 @@ class FieldInitializerFixes(unittest.TestCase):
         self.assertNotIn("src/a/D.N", {d for k, d, _ in got if k.endswith("<init>")})  # an expression-bodied member: not one
         self.assertIn(("src/a/D.Build", "src/a/D.Make", True), got)  # `Expression<Func<A, B, C, D, bool>> Build(`
         self.assertFalse(any(c.name in ("Deprecated", "Obsolete") for f in p.funcs.values() for c in f.calls))
+
+
+class CsExpressionBodies(unittest.TestCase):
+    def test_expression_bodied_members_keep_their_calls(self):
+        p = load({"W.cs": "namespace a {\n  internal sealed class W\n  {\n    private W _reader;\n    public bool Read() => _reader.Read();\n"
+                          "    private static W Make(int type) =>\n        type > 0 ? Build(type) :\n        Build(type);\n"
+                          "    static W Build(int t) { return null; }\n  }\n}\n"})
+        self.assertEqual([("Read", 5)], [(c.name, c.line) for c in p.funcs["W.W.Read"].calls] if "W.W.Read" in p.funcs
+                         else [(c.name, c.line) for c in p.find("W.Read")[0].calls])
+        mk = p.find("W.Make")[0]
+        self.assertEqual((6, 8), (mk.start, mk.end))  # (to its `;`, over lines)
