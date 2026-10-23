@@ -69,9 +69,9 @@ _KOTLIN = [re.compile(r"\bfun\s+(?:<[^>]*>\s*)?(?:[\w.]+(?:<[^<>]*(?:<[^<>]*>[^<
 # be `=> expr;`, a constructor may chain `: base(x)`.
 _STMT = r"(?!(?:return|new|else|throw|await|yield|case|goto|using|lock|fixed|checked|unchecked)\b)"
 # (a type-use annotation may sit among the modifiers: `public @Nullable Document ownerDocument()`)
-_JAVA = [re.compile(rf"^[ \t]*(?:@\w+(?:\([^)\n]*\))?[ \t]+)*{_STMT}(?:(?:@[\w.]+(?:\([^)\n]*\))?|[\w<>\[\],.?]+)[ \t]+){{1,7}}([A-Za-z_]\w*)[ \t]*"
+_JAVA = [re.compile(rf"^[ \t]*(?:@\w+(?:\([^)\n]*\))?[ \t]+)*{_STMT}(?:(?:@[\w.]+(?:\([^)\n]*\))?|[\w.]+<[^<>\n]*(?:<[^<>\n]*(?:<[^<>\n]*>[^<>\n]*)*>[^<>\n]*)*>[?\[\]]*|[\w<>\[\],.?]+)[ \t]+){{1,7}}([A-Za-z_]\w*)[ \t]*"
                     r"\((?:[^;{}()]|\([^()]*\))*\)[ \t]*(?:throws [\w., ]+)?\s*\{", re.M)]
-_CS = [re.compile(rf"^[ \t]*(?:\[[^\]\n]*\][ \t]*)*{_STMT}(?:(?:[\w<>\[\],.?]+|[\w.]*<?\((?:[^()\n;{{}}=]|\([^()\n]*\))*\)[>?\[\]]*)[ \t]+){{1,6}}([A-Za-z_]\w*)[ \t]*(?:<[^>\n]*>)?[ \t]*"
+_CS = [re.compile(rf"^[ \t]*(?:\[[^\]\n]*\][ \t]*)*{_STMT}(?:(?:[\w.]+<[^<>\n]*(?:<[^<>\n]*(?:<[^<>\n]*>[^<>\n]*)*>[^<>\n]*)*>[?\[\]]*|[\w<>\[\],.?]+|[\w.]*<?\((?:[^()\n;{{}}=]|\([^()\n]*\))*\)[>?\[\]]*)[ \t]+){{1,6}}([A-Za-z_]\w*)[ \t]*(?:<[^>\n]*>)?[ \t]*"
                   r"\((?:[^;{}()]|\([^()]*\))*\)[ \t]*(?::[ \t]*(?:base|this)[ \t]*\((?:[^;{}()]|\([^()]*\))*\))?"
                   r"(?:\s*where[^{;=]*)?\s*(?:\{|=>)", re.M)]
 _GO = [re.compile(r"^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(", re.M)]
@@ -1717,6 +1717,51 @@ _TS_SIGNATURE = re.compile(r"^\s*(?:(?:public|private|protected|static|readonly|
                            r"[\w$]+\??\s*(?:<[^>]*>)?\s*\([^)]*\)\s*:\s*[^=;{]+;\s*$")
 
 
+def _field_initializer(lines: list[str], c) -> bool:
+    """A call in a field's initializer (`static final ClassName OBJECT = ClassName.get(...);`,
+    over lines too), not in an expression-bodied member (`Prop => (x).NullCheck();`,
+    `get => ...`), whose parameters and locals no function here holds."""
+    i = c.line - 1
+    while i > 0 and not lines[i - 1].rstrip().endswith((";", "{", "}", "]")) and c.line - i < 12:
+        i -= 1
+    stmt = "\n".join(lines[i:c.line - 1] + [lines[c.line - 1][:max(c.col, 0)]])
+    em = re.search(r"(?<![=!<>+\-*/%&|^])=(?![=>])", stmt)
+    return em is not None and "=>" not in stmt[:em.start()] and not re.search(r"\b(?:get|set|init)\s*=>|\)\s*=>", stmt)
+
+
+def _class_initializers(top: Func, mods_: list, code: str, rel: str) -> None:
+    """Java / C# / Kotlin: a call in a class body outside its methods (a field or static
+    initializer) runs in that class, `this` and all: each class's such calls are its
+    `<init>` (a function of kind "top"), the innermost class around the line."""
+    spans = []
+    for m_ in mods_:
+        if not m_.decls:
+            continue
+        dm = re.search(rf"\b(?:class|interface|object|record|struct|enum)\s+{re.escape(m_.decls[0])}\b[^{{;]*\{{", code)
+        if dm is None:
+            continue
+        close = lambdas.matching(code, dm.end() - 1)
+        if close < 0:
+            continue
+        spans.append((code.count("\n", 0, dm.start()) + 1, code.count("\n", 0, close) + 1, m_))
+    if not spans:
+        return
+    inits: dict[str, Func] = {}
+    keep = []
+    for c in top.calls:
+        around = [sp for sp in spans if sp[0] <= c.line <= sp[1]]
+        if not around:
+            keep.append(c)
+            continue
+        a_, b_, m_ = min(around, key=lambda sp: sp[1] - sp[0])
+        g = inits.get(m_.name)
+        if g is None:
+            g = inits[m_.name] = Func(m_.name, "<init>", rel, a_, b_, "", kind="top")
+            m_.funcs.append(g)
+        g.calls.append(c)
+    top.calls = keep
+
+
 def _top_calls(top: Func, mods_: list, code: str, lines: list[str], tk: str, fam: str) -> None:
     """JS / TS / PHP: the calls a file makes outside its functions: `const app = express()`,
     `app.use(router)`, and a test file's `describe` / `before` callbacks (not
@@ -2678,8 +2723,19 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             imod.kind, imod.methods = "interface", names
             mods[iname] = imod
     top = Func(mod.name, "<top>", rel, 1, len(lines), "", kind="top")
-    if (fam == "js" and ext != ".qml" and not rel.endswith(".d.ts")) or php:  # (PHP: a page script's code)
+    if (fam == "js" and ext != ".qml" and not rel.endswith(".d.ts")) or php \
+            or ext in (".java", ".cs"):
+        # (PHP: a page script's code; Java / C# / Kotlin: field and static initializers,
+        # `static final ClassName OBJECT = ClassName.get("java.lang", "Object");`)
         _top_calls(top, [mod, *mods.values()], code, lines, tk, fam)
+        if ext in (".java", ".cs"):  # (`@Deprecated(since = "9")`, `[Obsolete("x")]`: no calls)
+            # (nor is a member declared without a body: `object Map();` in an interface)
+            top.calls = [c for c in top.calls if not (0 < c.line <= len(lines) and (
+                lines[c.line - 1][:max(c.col, 0)].rstrip().endswith("@") or lines[c.line - 1].lstrip().startswith("[")
+                or re.search(r"(?<![.\w])(?!(?:return|new|await|throw|yield|else|case|in|is|as|out|ref|not|and|or)\s)"
+                             r"[A-Za-z_][\w<>,\[\]?.]*\s+$", lines[c.line - 1][:max(c.col, 0)])))]
+            top.calls = [c for c in top.calls if _field_initializer(lines, c)]
+            _class_initializers(top, [mod, *mods.values()], code, rel)
     if fam == "js":  # module-level callbacks (`app.get('/', function (req, res) {` at the top of a file)
         top.code = code
         _pack_params(top)

@@ -239,7 +239,7 @@ that name on library-typed values):
 | axios (held out) | JavaScript | 94.3% / 90.0% | 32.7% / 94.9% | 100% / 65.5% | 31.2% / 93.8% | 69.1% / 100% |
 | ky (held out) | TypeScript | 100% / 80.0% | 66.7% / 80.0% | 100% / 80.0% | 57.1% / 80.0% | – |
 | zod (held out) | TypeScript | 100% / 98.4% | 78.8% / 99.2% | 99.1% / 82.5% | 46.2% / 88.6% | 75.6% / 99.0% |
-| javapoet (held out) | Java | 90.1% / 92.3% | 76.2% / 95.2% | – | 28.0% / 100% | 37.7% / 100% |
+| javapoet (held out) | Java | 90.3% / 94.2% | 76.5% / 97.1% | – | 28.0% / 100% | 37.7% / 100% |
 | gin (held out) | Go | 100% / 65.4% | 79.8% / 97.5% | – | 100% / 13.6% | 95.2% / 100% |
 | rack (held out) | Ruby | 87.6% / 86.0% | 70.5% / 89.0% | – | 56.4% / 41.9% | 89.0% / 100% |
 | sidekiq (held out) | Ruby | 99.0% / 98.5% | 57.3% / 98.7% | – | 0.0% / 0.0% | – |
@@ -281,7 +281,7 @@ What the columns say:
   matches a Ruby call only when it is written with parentheses, and the
   targets' calls there aren't (`@config.redis do |conn|`).
 - `--wide` is what to compare with a name search: it finds what the search
-  finds (recall at or above ast-grep's on 11 of the 13; javapoet 95.2% against
+  finds (recall at or above ast-grep's on 11 of the 13; javapoet 97.1% against
   100%, Dapper 98.0% against 99.2%) and is at least as precise on 11 of 13
   (Dapper 51.4% against 54.8%; gin 79.8% against ast-grep's 100% at 13.6%
   recall), with the exact tier first. The exact column is
@@ -650,8 +650,8 @@ the code.
 | Python | flask 96.3%, httpx 97.3%, requests 96.1% |
 | C | jq 99.9%, redis 100.0% |
 | C++ | flameshot 98.1%, kdeconnect 97.4% |
-| C# | Polly 96.7%, Newtonsoft.Json 98.5% |
-| Java | gson 97.3%, jsoup 97.1% |
+| C# | Polly 96.6%, Newtonsoft.Json 98.5% |
+| Java | gson 96.9%, jsoup 97.1% |
 | Kotlin | nowinandroid 96.8%, okhttp 95.0% |
 | Rust | ripgrep 96.1%, bat 95.3% |
 | Go | cobra 97.3%, fzf 95.7% |
@@ -688,7 +688,7 @@ factory returns) were followed to the code that runs.
 | JavaScript | axios 95.2%, koa 96.7% |
 | Java | commons-lang 96.4%, javapoet 97.3% |
 | Kotlin | moshi 95.5% |
-| C# | Dapper 96.5%, AutoMapper 95.2% |
+| C# | Dapper 96.4%, AutoMapper 95.2% |
 | Elixir | ecto 99.9%, oban 100.0% |
 | GDScript | Pixelorama 96.2% |
 | C | lua 99.9%, cJSON 97.1% |
