@@ -984,6 +984,9 @@ class Types:
             if name in self._lib_results():
                 return EXT  # `hc<App>(url)`: a runtime proxy (packs' [[returns]])
             g = self.bare(mod, f, name)
+            if name[:1].isupper() and (g is None or (not g.returns and g.name == name)) \
+                    and (got := self.instance(mod, name, self_mods)) is not None:
+                return got  # `ConfigHandler().value()`: a constructor (ahead of a library base's own methods)
             if g is None and not fm.file.endswith(".py"):
                 own = self.own_class(mod, f)
                 hits = self.method(own, name)[0] if own else []

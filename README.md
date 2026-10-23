@@ -20,11 +20,13 @@ the project writes down about how its parts fit together.
 - **Says how sure it is.** On 37 open-source repos in 16 languages, 95% or
   more of the calls into project code are exact on every one (see "How exact
   it is"). The rest are marked as guesses, never passed off as fact.
-- **Checked against CodeQL.** On 12 repos in six languages, where both
-  resolve a call seamcheck names the same callee 98-100% of the time (Java
-  and Go: 84%, plus the overrides the declared type allows), and wrong at
-  0-0.3% of sites (Ruby's sinatra: 2.4%). It needs no build and no database:
-  0.5-9 s where CodeQL takes 25 s to 5 min (see "How it compares").
+- **Checked against CodeQL.** On 14 repos in eight languages (C and C++
+  included), where both resolve a call seamcheck names the same callee
+  98-100% of the time (Java and Go: 84%, plus the overrides the declared type
+  allows), and wrong at 0-0.3% of sites (Ruby's sinatra: 2.4%). It needs no
+  build and no database: 0.5-9 s where CodeQL takes 25 s to 5 min (see "How
+  it compares"). Its `path` rule found every injection CodeQL's
+  security-extended queries found in a deliberately vulnerable Flask app.
 - **Every check came from a real bug.** Each rule and lint was written after a
   bug it would have caught, and its test reproduces that bug (cut down) and
   its fix.
@@ -129,6 +131,8 @@ ground truth that runs offline on the same code.
 | fzf | Go | 2,429 | 84.4% | 15.6% | 0.0% | 92.3% | 4 | 19 s + 19 s | 1.7 s |
 | sinatra | Ruby | 1,306 | 96.6% | 1.0% | 2.4% | 84.5% | 1,461 | 7 s + 308 s | 2.1 s |
 | jekyll | Ruby | 1,933 | 99.6% | 0.3% | 0.1% | 95.4% | 2,559 | 7 s + 23 s | 2.4 s |
+| jq | C | 5,861 | 100.0% | 0.0% | 0.0% | 76.0%† | 443 | 15 s + 9 s | 1.1 s |
+| flameshot | C++ | 598 | 99.3% | 0.6% | 0.2% | 90.1% | 1,403 | 23 s + 8 s | 4.6 s |
 
 - **same callee**: of the sites both resolve, seamcheck's exact targets are all
   among CodeQL's. **wider**: CodeQL's callee plus overrides the receiver's
@@ -141,14 +145,21 @@ ground truth that runs offline on the same code.
   (flask, express, jekyll) found every one right: a pytest fixture's `app`,
   the Express app a framework pack types, `Jekyll.logger` (a `LogAdapter`).
   CodeQL's Go database comes from `go build`, so it has no `_test.go` files.
+  C / C++ ran with `--build-mode=none`, so CodeQL saw only what its extractor
+  could read without a compile, as seamcheck does.
+- † jq: most of the rest are in its vendored decNumber library, called through
+  macros that expand to other macros; 88% outside `vendor/`. flameshot's
+  rest: C++ operators (`a & b` on a project enum) and constructors run by
+  member initializers and declarations, which seamcheck doesn't record as calls.
 - **What it doesn't have**: most of the rest are calls through a value
   seamcheck can't type statically (a Java `Map` that a project class
   implements, a JS value returned from an untyped callback), which stay
   guesses or name nothing.
 - Not compared: C# (CodeQL's extractor wants a .NET SDK even with
-  `--build-mode=none`, and none could be installed here), and C/C++, Kotlin
-  and Swift, which weren't run (CodeQL builds Kotlin and Swift to extract
-  them). seamcheck reads every one as it is.
+  `--build-mode=none`, and none could be installed here), Kotlin and Swift
+  (CodeQL extracts them only from a Gradle / Xcode build, which couldn't run
+  here). seamcheck reads every one as it is; their exactness is in "How
+  exact it is".
 
 Running the comparison found seamcheck bugs, all fixed (tests in `tests/`):
 JS / TS calls outside any function were never recorded (express's
@@ -157,7 +168,10 @@ JS / TS calls outside any function were never recorded (express's
 (`public @Nullable Document ownerDocument()`) weren't parsed, Python
 decorators weren't calls, a Go method's bare call to the package function of
 the same name was taken for the method itself, and Java overloads ignored the
-argument count.
+argument count. The C++ run added methods a macro defines
+(flameshot's `CONFIG_GETTER_SETTER(showHelp, setShowHelp, bool)` in a class
+body: 83 of the sites missed) and calls on a temporary
+(`ConfigHandler().setShowHelp(x)`); coverage went from 74% to 90%.
 
 ### "Who calls X?", against grep-style tools
 
@@ -200,6 +214,31 @@ minutes a question here against seamcheck's one loaded graph.
   seamcheck reads the source (3.6 s), and the same rule works on a Python,
   Go, Rust or C# repo.
 
+### Security paths, against CodeQL's security queries
+
+A `kind = "path"` rule with a `source` (below, under Rules) asks: can a
+request value reach a dangerous call? It follows exact calls from the
+entry points and, in each function, names assigned from the source (or from
+such a name, or from a parameter below the entry). Against CodeQL's
+`python-security-extended` suite on two deliberately vulnerable apps, with
+one rule (sinks: `subprocess.*`, `os.system`, `eval` / `exec`, `.execute`,
+`pickle.loads`, `yaml.load`, `render_template_string`, `ImageMath.eval`,
+`open`; sources: `request.args|form|files|url|...`):
+
+| app | CodeQL injection findings | seamcheck found | seamcheck only |
+|---|---|---|---|
+| Vulnerable-Flask-App | 2 (SQL, template injection) | both | none |
+| pygoat | 9 (SQL, command, code, 3 deserialization, 3 path) | 7 | 1: `ImageMath.eval(request value)`, code injection CodeQL has no sink for |
+
+The two seamcheck misses are path-injection sinks the rule didn't name
+(`os.path.isfile` in a lab-build helper, `os.path.exists` in a management
+command). seamcheck took 0.2-0.4 s per app. This is
+reachability plus a light local taint, not CodeQL's data flow: a value
+through a container, a `with open(...) as f` handle or another object's
+field is not followed, so CodeQL stays the tool for a security audit. The
+rule's use is a cheap gate a project writes for its own sinks and runs on
+every change.
+
 ### What each tool is for
 
 | | seamcheck | CodeQL | Semgrep (OSS) | ast-grep | Sourcegraph / SCIP | ArchUnit | dependency-cruiser |
@@ -208,10 +247,12 @@ minutes a question here against seamcheck's one loaded graph.
 | needs | Python 3.11 | a database per language; C#/C++/Java/Kotlin/Swift builds | itself | itself | a server and an indexer per language | a JVM test build | Node |
 | languages in one graph | 16, across language and process seams (HTTP, D-Bus, QML↔C++) | one per database | n/a | n/a | per indexer | Java | JS/TS |
 | call graph | yes, exact or marked guess | yes, most precise | no (Pro: some) | no | via indexers | classes, not calls | modules only |
+| security | reachability + local taint to the sinks a rule names | full data flow, large query suites | large rule registry | patterns | no | no | no |
 | for an agent | MCP server, `context`, JSON | CLI, SARIF | CLI, SARIF | CLI | API | tests | CLI |
 
-Where the others are the better tool: CodeQL for security (taint tracking
-through data flow) and for the precise runtime callee of a virtual call;
+Where the others are the better tool: CodeQL for a security audit (data
+flow through containers, fields and libraries, and hundreds of maintained
+queries) and for the precise runtime callee of a virtual call;
 Semgrep for its large registry of security rules; Sourcegraph for search
 across many repositories in a browser; ArchUnit when the architecture rules
 should be Java tests over real types; dependency-cruiser for rich JS
@@ -432,7 +473,7 @@ the code.
 |---|---|
 | Python | flask 96.3%, httpx 97.3%, requests 96.1% |
 | C | jq 99.9%, redis 100.0% |
-| C++ | flameshot 96.5%, kdeconnect 96.0% |
+| C++ | flameshot 97.1%, kdeconnect 96.2% |
 | C# | Polly 95.2%, Newtonsoft.Json 95.5% |
 | Java | gson 97.1%, jsoup 97.0% |
 | Kotlin | nowinandroid 96.9%, okhttp 96.1% |
@@ -705,6 +746,26 @@ id = "no-cycles"                       # cycles: one finding per cycle, its shor
 kind = "cycles"
 in = ["src/**"]
 level = "dir"                          # file (default) | dir: packages / folders, like ArchUnit's slices
+```
+
+**Paths to a sink** (`kind = "path"`): no chain of exact calls from `from`
+may reach a call matching `to` (regexes over the call as written) within
+`depth` calls, unless it passes a function named in `unless`. With `source`,
+a sink counts only when its arguments come from the source: the source
+itself, a name assigned from it (transitively) in that function, or, below
+the entry, a parameter; a value through a call named like an `unless` entry
+(`_sanitize_username(u)`) is clean. One finding per entry and sink, with the
+chain:
+
+```toml
+[[rule]]
+id = "request-reaches-shell"
+kind = "path"
+from = ["**/views.py:*", "**/app.py:*"]  # function specs: `file:name`, ids, `file:LINE`
+to = ['^subprocess\.(run|Popen)$', '^os\.system$', '^(eval|exec)$', '\.execute$', '^pickle\.loads$']
+source = 'request\.(args|form|json|files|GET|POST)'
+unless = ["escape", "sanitize", "secure_filename"]
+depth = 6
 ```
 
 `seamcheck graph [GLOB...] --level dir --format dot|mermaid|json` draws the

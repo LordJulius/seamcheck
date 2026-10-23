@@ -244,14 +244,15 @@ _CALL_SKIP = _NOT_FUNC | {"async", "await", "catch", "require", "import", "print
 
 _PY_BLOCK = re.compile(r"^(\s*)(?:async\s+)?(def|class)\s+([A-Za-z_]\w*)")
 _PY_CALL = re.compile(r"(?:\b([A-Za-z_]\w*)\s*\.\s*)?\b([A-Za-z_]\w*)\s*\(")
+# (`open`, `eval`, `exec`, `compile` are recorded: Python's own, but a `path` rule's sinks)
 _PY_SKIP = {"if", "elif", "while", "for", "return", "and", "or", "not", "in", "is", "print", "len", "range",
             "str", "int", "float", "bool", "list", "dict", "set", "tuple", "isinstance", "super", "lambda",
-            "min", "max", "abs", "sorted", "enumerate", "zip", "open", "any", "all", "sum", "map", "filter",
+            "min", "max", "abs", "sorted", "enumerate", "zip", "any", "all", "sum", "map", "filter",
             "getattr", "setattr", "hasattr", "type", "repr", "round", "with", "assert", "yield", "await", "except",
             "def", "class", "del", "raise", "import", "from", "as", "async", "else", "try", "finally", "global",
             "nonlocal", "pass", "case", "match", "issubclass", "iter", "next", "id", "hash", "vars", "dir",
             "callable", "format", "frozenset", "bytes", "bytearray", "object", "reversed", "divmod", "pow", "chr",
-            "ord", "hex", "oct", "bin", "input", "exec", "eval", "compile", "globals", "locals", "memoryview",
+            "ord", "hex", "oct", "bin", "input", "globals", "locals", "memoryview",
             "property", "staticmethod", "classmethod", "slice", "complex", "breakpoint", "aiter", "anext"}
 _PY_IMPORT = re.compile(r"^[ \t]*import[ \t]+([\w. \t,]+)$", re.M)
 _PY_FROM = re.compile(r"^[ \t]*from[ \t]+(\.*[\w.]*)[ \t]+import[ \t]+(\([^)]*\)|[^\n]+)", re.M)
@@ -315,6 +316,12 @@ def parse_python(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     fm = Module(_modname(rel), rel, len(raw), raw, lines)
     _py_imports(fm, rel, code)
     blocks = []  # (start, end, indent, kind, name)
+    in_str, open_ = set(), None  # lines that start inside a triple-quoted string (its closing `"""` at column 0)
+    for i, ln in enumerate(lines):
+        if open_:
+            in_str.add(i)
+        for q in re.findall(r'"""|\'\'\'', ln):
+            open_ = None if open_ == q else open_ or q
     for i, ln in enumerate(lines):
         m = _PY_BLOCK.match(ln)
         if not m:
@@ -323,7 +330,7 @@ def parse_python(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         end = len(lines) - 1
         for j in range(i + 1, len(lines)):
             t = lines[j]
-            if t.strip() == "":
+            if t.strip() == "" or j in in_str:
                 continue
             if len(t[:len(t) - len(t.lstrip())].expandtabs(4)) <= indent and not t.lstrip().startswith((")", "]")):
                 end = j - 1
@@ -1557,6 +1564,56 @@ def _top_calls(top: Func, mods_: list, code: str, lines: list[str], tk: str, fam
         off += (len(ln) if keep[i] else 0) + 1
 
 
+_DEFINE = re.compile(r"^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)\(([^)]*)\)((?:[^\n]*\\\n)*[^\n]*)", re.M)
+
+
+def _macro_defined(code: str, raw: list[str], line_of, found: list[tuple]) -> list[tuple]:
+    """`found` plus the C / C++ functions a macro of this file defines, named by its
+    arguments: `#define CONFIG_GETTER(KEY, TYPE) TYPE KEY() {...}` makes each
+    `CONFIG_GETTER(showHelp, bool)` (in a class body) a method `showHelp`, and the
+    template inside the `#define` (a function `KEY`) is none."""
+    text = "\n".join(raw)
+    defs = {}
+    for m in _DEFINE.finditer(text):
+        params = [p.strip() for p in m.group(2).split(",")]
+        defs[m.group(1)] = (params, m.group(3).replace("\\\n", " "), m.start(), m.end())
+    if not defs:
+        return found
+    spans = [(s, e, set(params)) for params, _, s, e in defs.values()]
+    found = [f for f in found if not any(s <= f[3] < e and f[2] in ps for s, e, ps in spans)]
+
+    def named(name: str, depth: int = 0) -> list[int]:
+        """Which parameters of macro `name` name a function its body defines."""
+        params, body, _, _ = defs[name]
+        out = []
+        for i, p in enumerate(params):
+            if re.search(rf"[\w&*>][ \t]+(?:\w+::)*{re.escape(p)}[ \t]*\([^()]*\)[\w \t]*\{{", body):
+                out.append(i)
+        for m in re.finditer(r"\b([A-Za-z_]\w*)[ \t]*\(([^()]*)\)", body) if depth < 3 else []:
+            if m.group(1) in defs and m.group(1) != name:
+                args = [a.strip() for a in m.group(2).split(",")]
+                out += [params.index(args[j]) for j in named(m.group(1), depth + 1) if j < len(args) and args[j] in params]
+        return sorted(set(out))
+
+    makers = {n: ix for n in defs if (ix := named(n))}
+    out = found
+    for m in re.finditer(rf"^[ \t]*({'|'.join(map(re.escape, makers))})[ \t]*\(", code, re.M) if makers else []:
+        if any(s <= m.start() < e for s, e, _ in spans):
+            continue
+        close = lambdas.matching(code, m.end() - 1)
+        if close < 0:
+            continue
+        args, pos = [], m.end()
+        for part in code[m.end():close].split(","):
+            lead = len(part) - len(part.lstrip())
+            args.append((part.strip(), pos + lead))
+            pos += len(part) + 1
+        for i in makers[m.group(1)]:
+            if i < len(args) and re.fullmatch(r"[A-Za-z_]\w*", args[i][0]):
+                out.append((line_of(args[i][1]), line_of(close), args[i][0], args[i][1], -1))
+    return out
+
+
 def parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     from . import chains
     _LAM_SIZE.clear()
@@ -1743,6 +1800,8 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             if body_end is None:
                 body_end = min(n - 1, m.end() + 200)
             found.append((start_line, line_of(body_end), name, npos_, body_start if body_start is not None else -1))
+    if cpp:
+        found = _macro_defined(code, raw, line_of, found)
     tests: set[tuple[int, str]] = set()
     if fam == "js":
         # it("...") / test("...") blocks (vitest, jest, node:test): anonymous

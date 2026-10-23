@@ -280,3 +280,95 @@ def render(g: dict[str, dict[str, int]], fmt: str) -> str:
     lines += [f'  "{a}" -> "{b}"' + (" [color=red]" if a in cyc and b in cyc else "") + ";"
               for a in sorted(g) for b in sorted(g[a])]
     return "\n".join(lines + ["}"])
+
+
+def path(project, r: dict) -> list:
+    """[[rule]] kind = "path": no call chain from `from` (function specs) may reach a
+    call matching `to` (regexes over `qual.name` as written: `os\\.system`, `\\.execute$`,
+    `^eval$`) within `depth` exact calls, unless it passes a function named in `unless`
+    (a sanitizer, an auth check). With `source` (a regex: `request\\.`), a sink counts
+    only when its arguments come from it: a variable assigned from the source (or from
+    such a variable) in the sink's function, the source itself, or, below the entry
+    point, a parameter. One finding per entry point and sink, with the chain."""
+    from .core import Finding
+    sinks = [re.compile(p) for p in (r["to"] if isinstance(r["to"], list) else [r["to"]])]
+    source = re.compile(r["source"]) if r.get("source") else None
+    unless = set(r.get("unless", []))
+    depth = int(r.get("depth", 6))
+    fuzzy = bool(r.get("fuzzy", False))
+    starts = []
+    for spec in (r["from"] if isinstance(r["from"], list) else [r["from"]]):
+        starts.extend(project.find(spec))
+    out = []
+    for s in {f.id: f for f in starts}.values():
+        if s.name in unless:
+            continue
+        prev = {s.id: None}
+        frontier, hits = [s.id], {}
+        for _ in range(depth + 1):
+            nxt = []
+            for fid in frontier:
+                f = project.funcs[fid]
+                for c in f.calls:
+                    text = (f"{c.qual}." if c.qual and c.qual != "." else "") + c.name
+                    if any(p.search(text) for p in sinks) and (f.file, c.line) not in hits \
+                            and (source is None or _tainted_args(project, f, c, source, unless, entry=fid == s.id)):
+                        hits[(f.file, c.line)] = (fid, text)
+                for dst, _ln, exact in project.edges.get(fid, []):
+                    if (exact or fuzzy) and dst not in prev and dst in project.funcs and project.funcs[dst].name not in unless:
+                        prev[dst] = fid
+                        nxt.append(dst)
+            frontier = nxt
+        for (file, line), (fid, text) in sorted(hits.items()):
+            chain, k = [], fid
+            while k is not None:
+                chain.append(project.funcs[k].name)
+                k = prev[k]
+            out.append(Finding(r["id"], r.get("severity", "error"), s.file, s.start, s.name,
+                               r.get("message", f"reaches {text}() at {file}:{line}: ") + " -> ".join(reversed(chain))))
+    return out
+
+
+def _tainted_args(project, f, c, source, unless: set, entry: bool) -> bool:
+    """The sink call's argument text mentions the source, a name assigned (transitively,
+    in f) from it, or, when f is below the entry point, one of f's parameters; a value
+    passed through a call named like an `unless` entry (`_sanitize_username(u)`) is clean."""
+    clean = re.compile(rf"\w*(?:{'|'.join(map(re.escape, unless))})\w*\s*\(") if unless else None
+    m = project.modules.get(f.module)
+    if m is None or not (0 < c.line <= len(m.raw)):
+        return True
+    text = "\n".join(m.raw[c.line - 1:c.line + 8])
+    k = text.find(c.name)
+    k = text.find("(", k) if k >= 0 else -1
+    depth_, j, args = 0, k, ""
+    while 0 <= j < len(text):
+        depth_ += text[j] in "([{"
+        depth_ -= text[j] in ")]}"
+        if depth_ == 0:
+            args = text[k + 1:j]
+            break
+        j += 1
+    if clean and clean.search(args):
+        return False
+    if source.search(args):
+        return True
+    body = "\n".join(m.raw[f.start - 1:f.end])
+    tainted = set()
+    if not entry:
+        head = body[:body.find(")") + 1] if ")" in body else ""
+        tainted |= {n for n in re.findall(r"[A-Za-z_]\w*", head[head.find("(") + 1:]) if n not in ("self", "cls")}
+    assigns = []
+    code = "\n".join(m.code[f.start - 1:f.end])  # (string contents blanked, offsets kept)
+    for am in re.finditer(r"^([ \t]*)([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)\s*(.+)$", code, re.M):
+        # the whole statement: up to the next line that starts at its indentation or less
+        # (a continuation is deeper, closes a bracket or string, or is inside a string)
+        nxt = re.compile(rf"^(?!{am.group(1)}[\s)\]}}'\"])(?=[ \t]*\S)", re.M).search(code, am.end() + 1)
+        assigns.append((am.group(2), body[am.start(3):nxt.start() if nxt else len(body)]))
+    changed = True
+    while changed:
+        changed = False
+        for name, rhs in assigns:
+            if name not in tainted and not (clean and clean.search(rhs)) and (source.search(rhs) or any(re.search(rf"\b{re.escape(t)}\b", rhs) for t in tainted)):
+                tainted.add(name)
+                changed = True
+    return any(re.search(rf"\b{re.escape(t)}\b", args) for t in tainted)
