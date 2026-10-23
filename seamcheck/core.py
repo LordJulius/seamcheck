@@ -2516,7 +2516,8 @@ def _build_edges(project: Project) -> None:
                     # has is no proof (`res.json()` on a fetch Response is not Context.json,
                     # `@app.call` not Logger#call); the receiver's type is what settles it
                     mine = []
-                own = [g for g in cands if g.file == f.file and g.recv] if not f.file.endswith(".cs") else []
+                own = [g for g in cands if g.file == f.file and g.recv] if not f.file.endswith((".cs", ".go")) else []
+                # (Go: a method's receiver is no extension; `err[i].Error()` on an `error` isn't this file's Error)
                 fm_ = project.modules.get(mod.owner, mod) if mod and mod.owner else mod
                 if not targets and c.chain and f.file.endswith(".gd") and mod is not None:
                     # `var part: RigidBody3D = ...` then `part.explode()`: the object is a script

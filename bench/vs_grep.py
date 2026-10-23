@@ -193,8 +193,28 @@ def _scip_callers(docs: dict, root: str, g) -> set:
 
 
 def _semgrep_all(semgrep: str, root: str, lang: str, names: list[str]) -> dict:
-    """Semgrep's name matches for several names in one scan (one rule per name): {name: sites}."""
+    """Semgrep's name matches for several names in one scan (one rule per name): {name: sites}.
+    A name no pattern can spell (`[]`, `<=>`, `name=`) gets nothing; if the scan still errors,
+    each name is scanned alone."""
     hits = {n: set() for n in names}
+    ok = [n for n in names if re.fullmatch(r"[A-Za-z_$][\w$]*[?!]?", n)]
+    got = _semgrep_rules(semgrep, root, lang, ok)
+    if got is None:
+        for n in ok:
+            one = _semgrep_rules(semgrep, root, lang, [n])
+            if one:
+                hits[n] |= one[n]
+        return hits
+    for n, sites in got.items():
+        hits[n] |= sites
+    return hits
+
+
+def _semgrep_rules(semgrep: str, root: str, lang: str, names: list[str]):
+    """One Semgrep scan, a rule per name: {name: sites}, or None when it errored."""
+    hits = {n: set() for n in names}
+    if not names:
+        return hits
     ignore = os.path.join(root, ".semgrepignore")
     made = not os.path.exists(ignore)
     if made:
@@ -212,7 +232,10 @@ def _semgrep_all(semgrep: str, root: str, lang: str, names: list[str]) -> dict:
         os.remove(rule)
         if made:
             os.remove(ignore)
-    for r in json.loads(out).get("results", []):
+    data = json.loads(out)
+    if not data.get("results") and data.get("errors"):
+        return None
+    for r in data.get("results", []):
         rid = r.get("check_id", "").rsplit(".", 1)[-1]
         rel = os.path.normpath(r["path"])
         if rid.startswith("n") and rid[1:].isdigit() and int(rid[1:]) < len(names) and not rel.startswith(_SKIP_DIRS):

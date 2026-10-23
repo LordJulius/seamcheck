@@ -1796,6 +1796,13 @@ def _top_calls(top: Func, mods_: list, code: str, lines: list[str], tk: str, fam
                     continue
                 top.calls.append(Call(nm, q, i + 1, chain if q else (), m.start(2)))
         off += (len(ln) if keep[i] else 0) + 1
+    if fam == "js":
+        # `validate<[\n  number,\n]>(...)`: a call whose type arguments go on over lines (the
+        # line-by-line scan above sees no `(` after the name)
+        for gm in re.finditer(r"(?<![\w$.])([A-Za-z_$][\w$]*)[ \t]*<(?=[^;()]*\n)[^;()=]*>[ \t]*\(", text):
+            ln0 = text.count("\n", 0, gm.start(1))
+            if keep[ln0] and gm.group(1) not in _CALL_SKIP and "\n" in gm.group(0):
+                top.calls.append(Call(gm.group(1), "", ln0 + 1, (), gm.start(1) - (text.rfind("\n", 0, gm.start(1)) + 1)))
 
 
 _DEFINE = re.compile(r"^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)\(([^)]*)\)((?:[^\n]*\\\n)*[^\n]*)", re.M)
