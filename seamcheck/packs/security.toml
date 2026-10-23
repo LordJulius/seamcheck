@@ -104,3 +104,56 @@ to = ['^Process\.Start$', '^(new )?(SqlCommand|NpgsqlCommand|MySqlCommand|Proces
       '^File\.(ReadAllText|ReadAllBytes|WriteAllText|Open|Delete)$', '^Redirect$']
 unless = ["Escape", "Sanitize", "Validate", "GetFileName", "Encode", "Parse", "TryParse"]
 depth = 6
+
+# --- patterns that are wrong wherever they appear (tests aside) ---------------
+
+[[rule]]
+id = "tls-verification-off"
+kind = "forbid"
+severity = "warn"  # (a client library's own `verify=False` option sets CERT_NONE on purpose)
+why = "a request that skips certificate validation can be read and changed by anyone on the network"
+fix = "keep verification on; pin or add the CA instead of turning it off"
+message = "certificate validation is turned off"
+in = ["**/*.py", "**/*.js", "**/*.mjs", "**/*.cjs", "**/*.ts", "**/*.tsx", "**/*.jsx", "**/*.php", "**/*.rb", "**/*.go", "**/*.java", "**/*.kt", "**/*.cs"]
+pattern = '^(?!.*\bjwt\.).*\bverify\s*=\s*False\b|_create_unverified_context\s*\(|\bCERT_NONE\b|rejectUnauthorized\s*:\s*false|InsecureSkipVerify\s*:\s*true|VERIFY_NONE\b|CURLOPT_SSL_VERIFYPEER\s*,\s*(?:false|0)\b|ServerCertificateValidationCallback\s*=\s*(?:\([^)]*\)|\w+)\s*=>\s*true'
+allow = ["**/test/**", "**/tests/**", "**/spec/**", "**/test_*.py", "**/*_test.*", "**/*.test.*", "**/*.spec.*", "**/*Test.*", "**/*Tests.*", "**/testing/**"]
+
+[[rule]]
+id = "flask-debug"
+kind = "forbid"
+why = "Flask's debugger runs any Python a visitor sends it"
+fix = "read debug from the environment, off by default"
+message = "the app runs with Flask's debugger on"
+pattern = '\.run\s*\([^)]*\bdebug\s*=\s*True|\bapp\.debug\s*=\s*True'
+in = ["**/*.py"]
+allow = ["**/test/**", "**/tests/**", "**/test_*.py", "**/*_test.py", "**/examples/**"]
+
+[[rule]]
+id = "xml-external-entities"
+kind = "forbid"
+why = "a parser that expands external entities reads local files and URLs an attacker names (XXE)"
+fix = "parse with entity expansion off (the default in most parsers)"
+message = "the XML parser expands external entities"
+in = ["**/*.py", "**/*.js", "**/*.mjs", "**/*.cjs", "**/*.ts", "**/*.tsx", "**/*.jsx", "**/*.php", "**/*.rb", "**/*.go", "**/*.java", "**/*.kt", "**/*.cs"]
+pattern = 'setFeature\s*\(\s*(?:\w+\.)?feature_external_(?:ges|pes)\s*,\s*(?:True|1)|resolve_entities\s*=\s*True|\bnoent\s*:\s*true|\bLIBXML_NOENT\b|setExpandEntityReferences\s*\(\s*true|XmlResolver\s*=\s*new\s+XmlUrlResolver|DtdProcessing\s*=\s*DtdProcessing\.Parse'
+allow = ["**/test/**", "**/tests/**", "**/spec/**", "**/test_*.py", "**/*_test.*", "**/*.test.*", "**/*Test.*", "**/*Tests.*"]
+
+[[rule]]
+id = "weak-password-hash"
+kind = "forbid"
+why = "MD5 / SHA-1 / SHA-2 over a password is cracked fast; passwords need a slow, salted hash"
+fix = "bcrypt, scrypt, argon2 or PBKDF2 (password_hash in PHP, has_secure_password in Rails)"
+message = "a password is hashed with a fast hash"
+in = ["**/*.py", "**/*.js", "**/*.mjs", "**/*.cjs", "**/*.ts", "**/*.tsx", "**/*.jsx", "**/*.php", "**/*.rb", "**/*.go", "**/*.java", "**/*.kt", "**/*.cs"]
+pattern = '(?i)\b(?:md5|sha1|sha224|sha256|sha384|sha512)\b(?:\.\w+)?\s*\(\s*[^()\n]*(?:\([^()\n]*\)[^()\n]*)*\bp(?:ass|wd|asswd|assword)\w*'
+allow = ["**/test/**", "**/tests/**", "**/spec/**", "**/test_*.py", "**/*_test.*", "**/*.test.*", "**/*Test.*", "**/*Tests.*"]
+
+[[rule]]
+id = "jwt-unverified"
+kind = "forbid"
+why = "a JWT decoded without checking its signature can be forged by anyone"
+fix = "pass the key and the expected algorithms; never verify=False or the none algorithm"
+message = "a JWT is decoded without verifying its signature"
+in = ["**/*.py", "**/*.js", "**/*.mjs", "**/*.cjs", "**/*.ts", "**/*.tsx", "**/*.jsx", "**/*.php", "**/*.rb", "**/*.go", "**/*.java", "**/*.kt", "**/*.cs"]
+pattern = '\bjwt\.decode\s*\([^)]*\bverify\s*=\s*False|\bjwt\.decode\s*\([^)]*verify_signature|\bjwt\.decode\s*\(\s*\w+\s*\)|\.decode\s*\([^)]*algorithms\s*=\s*\[\s*["\x27]none'
+allow = ["**/test/**", "**/tests/**", "**/spec/**", "**/test_*.py", "**/*_test.*", "**/*.test.*", "**/*Test.*", "**/*Tests.*"]

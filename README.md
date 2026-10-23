@@ -303,8 +303,24 @@ doesn't read: `is_numeric` on each octet, `preg_match('/^\d+$/')`, an
 `mysqli_real_escape_string` in a numeric context and a value read back from
 the session.
 
-On the 37 benchmark repos (none written to be vulnerable) the pack reports
-nothing; running it there found and fixed its false positives (a request's
+Beyond injection, the pack has five pattern rules for mistakes that are
+wrong wherever they appear (test code aside): certificate validation turned
+off, Flask's debugger on, an XML parser expanding external entities, a
+password through MD5 / SHA-1 / a bare SHA-2, and a JWT decoded without its
+signature. Against CodeQL's findings of those kinds on the same apps:
+
+| kind | CodeQL | seamcheck found | only seamcheck (real) |
+|---|---|---|---|
+| weak password hash | 5 (VFA 1, pygoat 3, railsgoat 1) | 5 | 1 (railsgoat's `hash_password`) |
+| Flask debug mode | 19 (pygoat) | 19 | 1 (`app.debug = True`) |
+| XML external entities | 2 (pygoat, dvna) | 2 | 0 |
+| certificate validation off | 4 (all in VFA's `tests/e2e_zap.py`) | 0: test code is left out | 0 |
+| JWT signature not verified | 0 (not in that suite) | 1 (VFA `jwt.decode(token, verify=False)`) | 1 |
+
+On the 37 benchmark repos the injection rules report nothing, and the
+pattern rules two warnings (certificate checks off is a warning, not an
+error): httpx's own implementation of its `verify=False` option and sinatra's
+test-server runner, both on purpose; running it there found and fixed its false positives (a request's
 own `query()` method, Express's `res.download(path, { root })`, Rails'
 `where(id: params[:id])`, a Go prepared statement's `QueryRow`, values
 through `int()` / `.to_i`). Test code is never an entry point.
@@ -1073,7 +1089,7 @@ severity = "error"
 | `compose` | `init-order` (`kotlin-init-order`), `inert-control` (Kotlin); `no-global-scope` (warn: a `GlobalScope` coroutine outlives its screen) |
 | `express` | (type knowledge only, below) |
 | `hono` | (type knowledge only, below) |
-| `security` | `python-injection`, `js-injection`, `php-injection`, `ruby-injection`, `go-injection`, `java-injection`, `csharp-injection`: request data into a shell, eval, SQL, a deserializer, a file path, a redirect or an outbound request (see "Security, against CodeQL"). On with no `seamcheck.toml`; `init` lists it for every repo |
+| `security` | `python-injection`, `js-injection`, `php-injection`, `ruby-injection`, `go-injection`, `java-injection`, `csharp-injection`: request data into a shell, eval, SQL, a deserializer, a file path, a redirect or an outbound request; `tls-verification-off` (warn), `flask-debug`, `xml-external-entities`, `weak-password-hash`, `jwt-unverified` (see "Security, against CodeQL"). On with no `seamcheck.toml`; `init` lists it for every repo |
 
 A pack also says what its framework hands the code, so the call graph can type
 it. That knowledge applies whenever package.json shows the framework, listed
