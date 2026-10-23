@@ -1363,6 +1363,9 @@ class Types:
         if seg in p.modules:
             return ("static", (seg,), True)
         short = p.short.get(seg) if not (seg[:1].islower() and fm.file.endswith((".rb", ".rake", ".ru", ".py") + _JS_EXTS[:-1])) else None
+        if short:  # (a Swift file's `LSNocilla` is not the Objective-C header of that name)
+            from .core import _family
+            short = [mn for mn in short if _family(p.modules[mn].file) & _family(fm.file)]
         if short:  # (a lowercase Ruby / JS name is a value, never the file `site.rb` / `app.js`: those come by import)
             return ("static", tuple(short), len(short) == 1)
         if fm.file.endswith(".gd") and (al := self._autoload(fm.file, seg)) is not None:
