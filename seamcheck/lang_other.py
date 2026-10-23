@@ -135,6 +135,8 @@ _CS_KEYWORD_TYPED = re.compile(r"(?:^|[(,])\s*(?:(?:const|final|this|out|ref|in|
 # `memory_buf_t &dest`, `struct node *n`, `buffer b;` (keywords and built-in types aren't types)
 _CPP_ANY_TYPED = re.compile(r"(?<![\w:>.])(?:(?:const|struct|class|union|enum|volatile)\s+)*(?:::)?((?:\w+::)*[A-Za-z_]\w*(?:<[^;=(){}<>]*(?:<[^;=(){}<>]*>)?[^;=(){}<>]*>)?)"
                             r"(?:\s*[\*&]+\s*|\s+)(?:const\s+)?([a-z_]\w*)\s*(?=[,;=)\[{]|$)", re.M)
+# other languages' primitive names a C++ project may name a class (fmt's `bigint`)
+_OTHER_LANGS_PRIMS = {"bigint", "error", "str", "number", "symbol", "rune", "boolean", "any", "unknown", "mixed", "object"}
 _CPP_CTOR_DECL = re.compile(r"^[ \t]*(?:const[ \t]+)?(?:::)?((?:\w+::)*[A-Za-z_]\w*(?:<[^;=(){}]*>)?)[ \t]+([a-z_]\w*)[ \t]*"
                             r"\((?:[^;(){}]|\([^;(){}]*\))*\)[ \t]*;", re.M)
 _CPP_NOT_TYPE = {"return", "else", "case", "delete", "new", "throw", "goto", "typedef", "using", "namespace", "sizeof",
@@ -232,7 +234,8 @@ def _typed(tk: str, text: str) -> list[tuple[str, str]]:
             out += [(m.group(2), t) for m in _CPP_ANY_TYPED.finditer(text)
                     if m.group(2) not in have and m.group(1).split("::")[-1].split("<")[0] not in _CPP_NOT_TYPE
                     and m.group(2) not in _CPP_NOT_TYPE and not _ALLCAPS.match(m.group(1))
-                    and (t := type_name(m.group(1))) and t not in _CPP_NOT_TYPE]
+                    and (t := type_name(m.group(1)) or (m.group(1) if m.group(1) in _OTHER_LANGS_PRIMS else ""))
+                    and t not in _CPP_NOT_TYPE]
         if tk == "jvm":
             out += [(m.group(1), m.group(2)) for m in _JV_NEW.finditer(text)]
             have = {n for n, _ in out}  # `int sourceMember`, `string? name`: the language's own value types
@@ -2347,7 +2350,7 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             _pack_params(f)
         sig_end = bpos if bpos >= 0 else min(len(code), npos + 400)
         sig = code[npos + len(name):sig_end]
-        if tk in ("swift", "php", "kotlin", "jvm", "rust", "go", "js") and "\n" in sig:
+        if tk in ("swift", "php", "kotlin", "jvm", "rust", "go", "js", "cpp") and "\n" in sig:
             for nm_, ty in _typed(tk, sig.replace("\n", " ")):  # parameters on lines of their own
                 f.bound.setdefault(nm_, "type:" + ty)
         if kotlin:

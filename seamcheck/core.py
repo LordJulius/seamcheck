@@ -2169,6 +2169,14 @@ def _build_edges(project: Project) -> None:
                         project.redges[g.id].append((f.id, c.line, True))
                     _nothing(project, f, c)
                     continue
+            if not targets and not q and not c.chain and mod is not None and f.file.endswith((".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh")):
+                cands_ = [g for g in project.by_name.get(c.name, ()) if g.kind != "top" and _family(g.file) & _family(f.file)]
+                own_ = {mod.name, mod.owner}
+                if cands_ and all(g.file != f.file and g.file.endswith((".cpp", ".cc", ".cxx")) and (
+                        (g.ns and not (f.ns == g.ns or f.ns.startswith(g.ns + "::") or g.ns.startswith(f.ns + "::") and f.ns))
+                        or (project.modules[g.module].owner and g.module not in own_)) for g in cands_):
+                    _nothing(project, f, c)  # `fclose(f)`: libc's; a `test::fclose` in another .cc isn't visible here
+                    continue
             if not targets and not q and not c.chain and mod is not None and f.file.endswith(infer._JS_EXTS) and not any(
                     g.kind != "top" and _family(g.file) & _family(f.file) and not project.modules[g.module].owner
                     and project.modules[g.module].kind not in ("class", "interface") for g in project.by_name.get(c.name, ())):
