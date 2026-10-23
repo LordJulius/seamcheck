@@ -949,6 +949,22 @@ _BASE_SKIP = {"public", "private", "protected", "virtual", "internal", "extends"
 _CPP_EXTS = (".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h", ".c")
 
 
+_JS_THIS_METHOD = re.compile(r"\bthis\.[\w$]+\s*=\s*(?:async\s+)?(?:function\b|\([^()]*\)\s*=>|[\w$]+\s*=>)")
+
+
+def _js_constructors(code: str) -> list:
+    """ES5 classes: `function UserDAO(db) { this.getUser = (id) => {...} }`, a
+    capitalized function that defines methods on `this` (`new UserDAO(db)`)."""
+    out = []
+    for m in re.finditer(r"(?<![\w$.])(function)\s+([A-Z][\w$]*)\s*\(", code):
+        close = lambdas.matching(code, m.end() - 1)
+        b = code.find("{", close) if close > 0 else -1
+        e = lambdas.matching(code, b) if b > 0 and not code[close + 1:b].strip() else -1
+        if e > 0 and _JS_THIS_METHOD.search(code, b, e):
+            out.append(m)
+    return out
+
+
 def _classes(code: str, ext: str, fam: str) -> list[dict]:
     """Class-like declarations: name, bases as written, header text, and the
     body's character span (None for a body-less `class Foo(val a: A)`)."""
@@ -964,6 +980,8 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
                                                          r"(enum|actor)\s+([A-Z]\w*)", code)]
         if fam == "kotlin":
             matches += [(m, "companion") for m in _COMPANION.finditer(code)]
+        if fam == "js" and ext != ".qml":
+            matches += [(m, "type") for m in _js_constructors(code)]
     for m, how in matches:
         if how == "impl":
             name, bases, kw = m.group(2).split("::")[-1], ([m.group(1).split("::")[-1]] if m.group(1) else []), "impl"

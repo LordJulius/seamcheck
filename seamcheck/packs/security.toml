@@ -37,7 +37,8 @@ to = ['^(child_process|cp)\.(exec|execSync|spawn|spawnSync|execFile|execFileSync
       '^(?!.*\b(req|request|ctx|express)\.).*\.(query|raw|\$queryRawUnsafe|\$executeRawUnsafe)$', '^(fs\.)?(readFile|readFileSync|createReadStream|writeFile|writeFileSync|unlink|unlinkSync)$',
       '^(res|reply)\.(sendFile|download)$', '^(res|reply)\.redirect$',
       '^(serialize|nodeSerialize)\.unserialize$', '^unserialize$',
-      '^(needle|axios|got|superagent|request|http|https)\.(get|post|put|request)$', '^fetch$']
+      '^(needle|axios|got|superagent|request|http|https)\.(get|post|put|request)$', '^fetch$',
+      '(?i)(col|collection|coll)\.(find|findOne|findOneAndUpdate|findOneAndDelete|updateOne|updateMany|deleteOne|deleteMany|remove|count|countDocuments|aggregate)$']
 unless = ["escape", "sanitize", "validate", "normalize", "basename", "url_for", "parseInt", "parseFloat", "Number"]
 depth = 6
 

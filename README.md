@@ -20,17 +20,18 @@ the project writes down about how its parts fit together.
 - **Says how sure it is.** On 37 open-source repos in 16 languages, 95% or
   more of the calls into project code are exact on every one (see "How exact
   it is"). The rest are marked as guesses, never passed off as fact.
-- **Checked against CodeQL.** On 14 repos in eight languages (C and C++
+- **Checked against CodeQL.** On 16 repos in nine languages (C, C++ and C#
   included), where both resolve a call seamcheck names the same callee
-  98-100% of the time (Java and Go: 84%, plus the overrides the declared type
-  allows), and wrong at 0-0.3% of sites (Ruby's sinatra: 2.4%). It needs no
+  91-100% of the time (the rest mostly CodeQL's callee plus the overrides the
+  declared type allows), and a different one at 0-2.4% of sites. It needs no
   build and no database: 0.5-9 s where CodeQL takes 25 s to 5 min (see "How
-  it compares").
+  it compares"). Against ArchUnit, all 54 package dependency rules on jsoup
+  and gson come out the same, read from source with no build.
 - **Finds injections with no config.** In a repo with no `seamcheck.toml`,
   `seamcheck check` runs the built-in security pack: request data reaching a
   shell, `eval`, SQL, a deserializer, a file path, a redirect or an outbound
   request, in Python, JS/TS, PHP, Ruby, Go, Java and C#. On six deliberately
-  vulnerable apps it found 31 of the 38 injections CodeQL's security-extended
+  vulnerable apps it found 33 of the 38 injections CodeQL's security-extended
   suites report there, plus 3 real ones CodeQL doesn't, in under 4 s per app;
   on the 37 ordinary benchmark repos it reports nothing.
 - **Many repos, one graph.** Put several checkouts (or symlinks to them) in one
@@ -145,6 +146,8 @@ ground truth that runs offline on the same code.
 | jekyll | Ruby | 1,933 | 99.6% | 0.3% | 0.1% | 95.4% | 2,559 | 7 s + 23 s | 2.4 s |
 | jq | C | 5,861 | 100.0% | 0.0% | 0.0% | 76.0%† | 443 | 15 s + 9 s | 1.1 s |
 | flameshot | C++ | 598 | 99.3% | 0.6% | 0.2% | 90.1% | 1,403 | 23 s + 8 s | 4.6 s |
+| Polly | C# | 14,689 | 90.7% | 8.2% | 1.1% | 83.8% | 398 | 70 s + 124 s | 3.8 s |
+| Newtonsoft.Json | C# | 20,193 | 96.0% | 1.5% | 2.4% | 79.7% | 14,829 | 102 s + 57 s | 6.2 s |
 
 - **same callee**: of the sites both resolve, seamcheck's exact targets are all
   among CodeQL's. **wider**: CodeQL's callee plus overrides the receiver's
@@ -167,11 +170,18 @@ ground truth that runs offline on the same code.
   seamcheck can't type statically (a Java `Map` that a project class
   implements, a JS value returned from an untyped callback), which stay
   guesses or name nothing.
-- Not compared: C# (CodeQL's extractor wants a .NET SDK even with
-  `--build-mode=none`, and none could be installed here), Kotlin and Swift
-  (CodeQL extracts them only from a Gradle / Xcode build, which couldn't run
-  here). seamcheck reads every one as it is; their exactness is in "How
-  exact it is".
+- C#: CodeQL's sites leave out property and event accessors and operators
+  (`get_Count`, `op_Equality`, an explicit conversion), which no call syntax
+  names and seamcheck doesn't model as calls (with them, 30% more sites), and
+  a generic callee is named without its type arguments. A method's overloads
+  split over a `partial class`'s files count as one function, as overloads
+  in one file do. Most of the 1-2% "different callee" are overloads by
+  parameter type (`WriteValue(int)` in `JsonWriter` against the override in
+  `JsonTextWriter`) and a generic-receiver extension method
+  (`PolicyBuilder<T>.Retry()` against `PolicyBuilder.Retry()`).
+- Not compared: Kotlin and Swift (CodeQL extracts them only from a Gradle /
+  Xcode build, which couldn't run here). seamcheck reads both as they are;
+  their exactness is in "How exact it is".
 
 Running the comparison found seamcheck bugs, all fixed (tests in `tests/`):
 JS / TS calls outside any function were never recorded (express's
@@ -180,7 +190,12 @@ JS / TS calls outside any function were never recorded (express's
 (`public @Nullable Document ownerDocument()`) weren't parsed, Python
 decorators weren't calls, a Go method's bare call to the package function of
 the same name was taken for the method itself, and Java overloads ignored the
-argument count. The C++ run added methods a macro defines
+argument count. The C# run found that a verbatim string (`@"..."` over
+several lines, `""` for a quote) ended at the line's end, so everything after
+one in a file went unread (Newtonsoft.Json's tests: 11,000 calls; coverage
+went from 58% to 80%), and that `base.X()` in one file of a `partial class`
+named the class's own method; Go's raw strings (`` `O'Brien` ``) had the same
+problem. The C++ run added methods a macro defines
 (flameshot's `CONFIG_GETTER_SETTER(showHelp, setShowHelp, bool)` in a class
 body: 83 of the sites missed) and calls on a temporary
 (`ConfigHandler().setShowHelp(x)`); coverage went from 74% to 90%.
@@ -225,6 +240,13 @@ minutes a question here against seamcheck's one loaded graph.
   parser and select. ArchUnit needs the build first (Maven: 18 s, then 1.8 s);
   seamcheck reads the source (3.6 s), and the same rule works on a Python,
   Go, Rust or C# repo.
+- **Package dependency rules** (`kind = "depend"`, against ArchUnit's
+  `noClasses().that().resideInAPackage("org.jsoup.A..").should()
+  .dependOnClassesThat().resideInAPackage("org.jsoup.B..")` for every pair of
+  top-level packages, on the compiled classes): jsoup, 42 rules, the same 28
+  fail and the same 14 pass; gson, 12 rules, the same 5 fail. ArchUnit counts
+  any use of a type (fields, signatures, generics); seamcheck reads imports
+  and exact calls, and here that is the same graph.
 
 ### Security, against CodeQL's security queries
 
@@ -246,14 +268,14 @@ injection):
 |---|---|---|---|---|---|---|
 | Vulnerable-Flask-App | Python | 2 | 2 | 0 | not timed | 0.4 s |
 | pygoat | Python | 13 | 10 | 1: `ImageMath.eval(request value)` | not timed | 0.3 s |
-| NodeGoat | JavaScript | 8 | 5 | 0 | 12 s + 50 s | 0.4 s |
+| NodeGoat | JavaScript | 8 | 7 | 0 | 12 s + 50 s | 0.4 s |
 | dvna | JavaScript | 4 | 4 | 0 | 10 s + 39 s | 0.2 s |
 | railsgoat | Ruby | 9 | 8 | 2: `send_file` of a request path, an open redirect | 6 s + 28 s | 2.3 s |
 | govwa | Go | 2 | 2 | 0 | 19 s + 18 s | 3.9 s |
-| **total** | | **38** | **31 (82%)** | **3** | | |
+| **total** | | **38** | **33 (87%)** | **3** | | |
 
-What seamcheck misses: a NoSQL query object built from the request and
-passed on (NodeGoat's `{$where: ...}`, `findOne({userName})`), sinks the pack
+What seamcheck misses: a NoSQL `$where` string built inside a closure and
+returned to the query (NodeGoat), sinks the pack
 doesn't name (pygoat's `os.path.isfile` / `os.path.exists`), and a Rails
 `scope` lambda. govwa's template XSS is reported where `template.HTML(...)`
 is called on the value, CodeQL reports it at the wrapper.
