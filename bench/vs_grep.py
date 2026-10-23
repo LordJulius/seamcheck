@@ -266,6 +266,12 @@ def main() -> None:
                        for d, ln, ex in es if not ex and d == g.id}
         wide |= {(p.funcs[fid].file, ln) for fid, ln in queries.possible_callers(p, g)}
         row["seamcheck --wide"] = _score(_align_lines({x for x in wide if x[0] in seen}, truth, p), truth)
+        if opt("--misses"):  # (what --wide leaves out, and what it adds that CodeQL hasn't)
+            w_ = _align_lines({x for x in wide if x[0] in seen}, truth, p)
+            for f_, l_ in sorted(truth - w_)[:int(opt("--misses"))]:
+                print(f"    MISS {f_}:{l_}")
+            for f_, l_ in sorted(w_ - truth)[:int(opt("--misses"))]:
+                print(f"    EXTRA {f_}:{l_}")
         if opt("--sg"):
             t = time.time()
             row["ast-grep"] = _score({x for x in _sg(opt("--sg"), root, lang, g.name) if x[0] in seen}, truth)

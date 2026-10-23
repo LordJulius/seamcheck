@@ -799,3 +799,22 @@ class PossibleCallersTier(unittest.TestCase):
         got = queries.walk(p, "Wrapped.Read", 1, True, wide=True)[0]
         self.assertEqual(1, got["possible"])
         self.assertEqual(8, got["possible_sites"][0]["line"])
+
+
+class FieldInitializerFixes(unittest.TestCase):
+    def test_java_and_csharp_field_initializers_and_nested_generic_returns(self):
+        p = load({"src/a/B.java": "package a;\n@Deprecated(since = \"1\")\npublic final class B {\n  private final int n = size();\n"
+                                  "  static final B ONE = B.get(\"x\");\n  public static B get(String s) { return new B(); }\n"
+                                  "  int size() { return 1; }\n}\n",
+                  "src/a/D.cs": "namespace a {\n  [Obsolete(\"x\")]\n  public class D {\n    private static readonly D Shared = Create();\n"
+                                "    public int Count => Create().N();\n    public static D Create() { return new D(); }\n"
+                                "    public int N() { return 1; }\n"
+                                "    protected virtual Expression<Func<A, B, C, D, bool>> Build(Type t)\n    {\n      return Create().Make();\n    }\n"
+                                "    public E Make() { return null; }\n  }\n}\n"})
+        got = {(k, d, e) for k, es in p.edges.items() for d, _l, e in es}
+        self.assertIn(("src/a/B.<init>", "src/a/B.size", True), got)  # a field initializer, in its class
+        self.assertIn(("src/a/B.<init>", "src/a/B.get", True), got)
+        self.assertIn(("src/a/D.<init>", "src/a/D.Create", True), got)
+        self.assertNotIn("src/a/D.N", {d for k, d, _ in got if k.endswith("<init>")})  # an expression-bodied member: not one
+        self.assertIn(("src/a/D.Build", "src/a/D.Make", True), got)  # `Expression<Func<A, B, C, D, bool>> Build(`
+        self.assertFalse(any(c.name in ("Deprecated", "Obsolete") for f in p.funcs.values() for c in f.calls))
