@@ -49,6 +49,12 @@ def _types(held: dict, text: str) -> None:
         t = type_name(m.group(2))
         if t and not held.get(m.group(1), "").startswith("group:"):  # (a group binding says more than `Node`)
             held[m.group(1)] = "type:" + t
+        em = re.match(r"(?:Array|PackedArray)\[\s*([A-Z][\w.]*)\s*\]$", m.group(2))
+        if em:  # `var frames: Array[Frame]`: frames[i] is a Frame
+            held[m.group(1) + "[]"] = "type:" + em.group(1)
+        dm = re.match(r"Dictionary\[\s*[\w.]+\s*,\s*([A-Z][\w.]*)\s*\]$", m.group(2))
+        if dm:  # `Dictionary[String, Layer]`: a value is a Layer
+            held[m.group(1) + "[]"] = "type:" + dm.group(1)
     for m in _INFER_VAR.finditer(text):
         cast = _CAST.match(text, m.end())  # `var x := $Path/To as Type`
         if cast and m.group(1) not in held:
@@ -107,7 +113,15 @@ def parse(path: str, rel: str, text: str, res_of) -> list[Module]:
     covered = set()
     for si, (idx, indent, name) in enumerate(starts):
         end = len(lines) - 1
-        for j in range(idx + 1, len(lines)):
+        # a signature over several lines (`func f(\n\timage: Image,\n) -> void:`): the body after it
+        hdr_end, depth = idx, 0
+        for j in range(idx, min(len(lines), idx + 40)):
+            depth += lines[j].count("(") - lines[j].count(")")
+            hdr_end = j
+            if depth <= 0:
+                break
+        header = " ".join(lines[idx:hdr_end + 1])
+        for j in range(hdr_end + 1, len(lines)):
             t = lines[j]
             if t.strip() == "":
                 continue
@@ -120,10 +134,10 @@ def parse(path: str, rel: str, text: str, res_of) -> list[Module]:
             end -= 1
         f = Func(mod.name, name, rel, idx + 1, end + 1, "\n".join(lines[idx:end + 1]))
         _collect(f, lines, idx, end, str_by_line)
-        for m in _PARAM.finditer(lines[idx]):
+        for m in _PARAM.finditer(header):
             f.bound["" + m.group(1)] = "type:" + m.group(2)
         _types(f.bound, f.code)
-        rm = _RETURNS.search(lines[idx])
+        rm = _RETURNS.search(header)
         if rm:
             f.returns = type_name(rm.group(1))
         mod.funcs.append(f)

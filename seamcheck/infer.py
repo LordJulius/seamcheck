@@ -921,7 +921,12 @@ class Types:
         mods, exact, declared = self.type_modules(mod, ty)
         if not declared:
             if mod.file.endswith(_DYNAMIC) and ty in self.extended:
-                return None  # `n: Node` in GDScript / Python: any project script that extends Node may be it
+                # `image: Image` with `ImageExtended extends Image` in the project: that subclass or the
+                # engine's own. A method no project subclass defines is the library's (core: an external
+                # base); one a subclass defines stays a guess (not exact)
+                subs = tuple(mn for mn, m_ in self.p.modules.items()
+                             if m_.file.endswith(os.path.splitext(mod.file)[1]) and (m_.parent == ty or ty in getattr(m_, "lib_bases", ())))
+                return ("inst", subs, False) if subs else None
             return ("ext", (ty,), True) if ty[:1].isupper() or "." in ty or mod.file.endswith((".rs", ".swift")) or \
                 (mod.file.endswith(".py") and ty in _PY_BUILTIN) else None
         return ("inst", tuple(mods), exact)
