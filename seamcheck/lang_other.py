@@ -749,6 +749,13 @@ def _cjs(mod: Module, rel: str, text: str, lines: list[str]) -> None:
 
 def _js_imports(mod: Module, rel: str, text: str, lines: list[str]) -> None:
     d = rel.rsplit("/", 1)[0] if "/" in rel else ""
+    for m in re.finditer(r"""^[ \t]*import[ \t]+type[ \t]*\{([^}]*)\}\s*from\s*["']([^"']+)["']""", text, re.M):
+        if _real(lines, text, m.start()):  # `import type {KyInstance} from './types/ky.js'`: types only (no dependency)
+            for part in m.group(1).split(","):
+                src, _, local = part.strip().partition(" as ")
+                if src.strip():
+                    mod.imported.setdefault((local or src).strip(), (f"js:{d}\0{m.group(2)}", src.strip()))
+                    mod.__dict__.setdefault("type_imports", set()).add((local or src).strip())
     for m in _JS_IMPORT.finditer(text):
         if not _real(lines, text, m.start()):
             continue
@@ -1046,6 +1053,9 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
             matches += [(m, "companion") for m in _COMPANION.finditer(code)]
         if fam == "js" and ext != ".qml":
             matches += [(m, "type") for m in _js_constructors(code)]
+            # TS `type ResponsePromise<T> = { text: () => ... } & Promise<R>`: an object type, read as an interface
+            matches += [(m, "type") for m in re.finditer(
+                r"(?<![\w.$])(?:export\s+)?(?:declare\s+)?(type)\s+([A-Z][\w$]*)(?=\s*(?:<[^=;{]*(?:=[^;{]*)?>)?\s*=\s*\{)", code)]
     for m, how in matches:
         if how == "impl":
             name, bases, kw = m.group(2).split("::")[-1], ([m.group(1).split("::")[-1]] if m.group(1) else []), "impl"
@@ -1086,8 +1096,9 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
                 if not code[:k].rstrip().endswith((",", ":", "(")) and not (
                         fam == "kotlin" and re.match(r"(?:@\w+\s*|(?:private|internal|public|protected)\s+)*constructor\b|@\w+\s*$|@\w+\s*\n", nxt)):
                     break  # (Kotlin: `class Builder\n  @JvmOverloads\n  constructor(...) {` goes on)
-            elif ch == "=" and depth <= 0 and fam in ("js", "c") and how == "type":
-                break  # `type X = ...` / a declaration, not a class body
+            elif ch == "=" and depth <= 0 and fam in ("js", "c") and how == "type" and not (
+                    kw == "type" and code[k + 1:k + 40].lstrip().startswith("{")):
+                break  # `type X = ...` / a declaration, not a class body (`type X = {`: an object type's)
             k += 1
         hdr = code[m.end():body if body is not None else k]
         if how == "type":
@@ -1124,13 +1135,18 @@ def _classes(code: str, ext: str, fam: str) -> list[dict]:
                         break
                 j += 1
             span = (body, j)
+            if kw == "type":  # `type X = {...} & express.Express & Promise<R>`: the other parts are its bases
+                k_ = j + 1
+                while (im_ := re.match(r"\s*&\s*([A-Za-z_$][\w$.]*)(?:<(?:[^<>]|<(?:[^<>]|<[^<>]*>)*>)*>)?", code[k_:k_ + 400])):
+                    bases.append(im_.group(1).split(".")[-1])
+                    k_ += im_.end()
             if ext == ".php":  # `use SomeTrait;` in the body: the trait's methods are the class's
                 for tm in re.finditer(r"^[ \t]*use[ \t]+([\w\\, \t]+)[ \t]*[;{]", code[body:j], re.M):
                     bases += [t.strip().split("\\")[-1] for t in tm.group(1).split(",") if t.strip()]
         elif ext in _CPP_EXTS:
             continue  # `class QMouseEvent;`: a forward declaration names a type defined elsewhere
         kind = "ext" if kw in ("extension", "impl") or re.search(r"\bpartial\b", code[max(0, m.start() - 40):m.end()]) else "class"
-        if kw in ("interface", "protocol", "trait"):
+        if kw in ("interface", "protocol", "trait", "type"):
             kind = "interface"
         am = re.match(r"\s*<([^>{]*)>", hdr) if ext == ".cs" else None  # C#'s `class Builder<TResult>`
         out.append({"name": name, "kw": kw, "bases": bases, "hdr": hdr, "pos": m.start(), "span": span, "kind": kind,
@@ -1749,7 +1765,8 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     if fam == "js":  # `type X` declares only as `type X = ...` (not `import { type X }`), and an alias of a
         # runtime type (`type ElementsMap = Map<...> & Brand`) is that library type, no project class
         aliases = {m.group(1): m.group(2) for m in _TS_ALIAS.finditer(code)}
-        others = {m.group(1) for m in re.finditer(r"\b(?:class|interface|enum)\s+([A-Z]\w*)", code)}
+        others = {m.group(1) for m in re.finditer(r"\b(?:class|interface|enum)\s+([A-Z]\w*)", code)} | \
+            {m.group(1) for m in re.finditer(r"\btype\s+([A-Z][\w$]*)\s*(?:<[^=;{]*(?:=[^;{]*)?>)?\s*=\s*\{", code)}
         mod.decls = [d for d in mod.decls if d in others or (d in aliases and aliases[d] not in _TS_BUILTIN_TYPES)]
         _js_imports(mod, rel, text, lines)
         for em in re.finditer(r"^[ \t]*(?:module\.)?exports\.([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)(?:\.([A-Za-z_$][\w$]*))?\s*;?[ \t]*$",
@@ -2169,6 +2186,17 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     rm_ = re.match(r"\s*:\s*([^;{}\n]+)", code[e_ + 1:e_ + 300]) if e_ > 0 else None
                     if rm_ and (t_ := type_name(rm_.group(1))):
                         got_fields.setdefault("()", set()).add(t_)
+                mm_ = re.match(r"^\s*(?:readonly\s+)?([A-Za-z_$][\w$]*)\s*\??\s*(?:(<[^()]*?>)?\s*\(|:\s*(?:<[^()]*?>\s*)?\()", ln) \
+                    if home is not mod and home.kind == "interface" else None
+                if mm_ and (not inside[i] or line_class.get(i) is home):
+                    # a member signature: `text(): Promise<string>;`, `get: <T>(url: Input) => ResponsePromise<T>;`
+                    if mm_.group(1) not in home.methods:
+                        home.methods.append(mm_.group(1))
+                    o_ = line_start[i] + ln.index("(", mm_.end() - 1)
+                    e_ = lambdas.matching(code, o_)
+                    rm_ = re.match(r"\s*(?::|=>)\s*([^;{}\n]+)", code[e_ + 1:e_ + 300]) if e_ > 0 else None
+                    if rm_ and (t_ := type_name(rm_.group(1))) and t_ not in ("Promise", "void"):
+                        got_fields.setdefault(mm_.group(1) + "()", set()).add(t_)
             elif ext == ".cs" and not inside[i]:
                 for m in _CS_MEMBER.finditer(ln):
                     got_fields.setdefault(m.group(2), set()).add(generic_name(m.group(1).rstrip("?")))
@@ -2363,6 +2391,11 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 f.returns = "Self"  # a builder step: `return this`
             if not f.returns and bpos >= 0:
                 f.returns = _own_return(code, bpos)
+            if not f.returns and bpos < 0 and fam == "js":  # `(input) => createRequest(input)`: that expression
+                am_ = re.search(r"\)\s*(?::[^=;{}]+?)?=>\s*", sig)
+                ch = expression(sig, am_.end()) if am_ else ()
+                if ch and not sig[am_.end():am_.end() + 1] in "({[":
+                    f.returns = "expr:" + "\x1f".join(ch)
             if not f.returns and tk == "kotlin" and bpos < 0:
                 em = re.search(r"\)\s*=\s*", sig)
                 if em and re.match(r"\s*(?:apply|also)\s*\{|\s*this\b(?!\s*\.)", sig[em.end():]):
