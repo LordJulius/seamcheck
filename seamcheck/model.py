@@ -42,6 +42,7 @@ class Func:
     targs: str = ""  # C#: its overloads' type-parameter counts ("0,1"), "" unknown
     ptypes: str = ""  # its overloads' declared parameter types (lambdas.OV / lambdas.PARAM separated)
     relem: str = ""  # what iterating its declared return type gives (`Vec<Match>`: Match), "" unknown
+    ns: str = ""  # C / C++: the namespace a free function is in ("fmt::detail"), "" none or unknown
     id: str = ""  # "Module.name" (set in __post_init__; kept in sync when a module is renamed)
 
     def __post_init__(self) -> None:

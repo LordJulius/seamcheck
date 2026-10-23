@@ -86,6 +86,27 @@ class Types:
         self.cache[key] = hit
         return hit
 
+    def _cpp_aliases(self) -> dict:
+        """C / C++ type aliases anywhere in the project: `using X = ns::Y<T>;`,
+        `typedef struct Y X;` (name -> the aliased type's own name). An alias two
+        files give different targets is left out."""
+        got = self.cache.get("\0cppal")
+        if got is None:
+            seen: dict = {}
+            for m in self.p.modules.values():
+                if m.owner or not m.file.endswith(_C_EXTS):
+                    continue
+                code = "\n".join(m.code)
+                pairs = [(am.group(1), am.group(2)) for am in re.finditer(r"\busing\s+(\w+)\s*=\s*(?:typename\s+)?([^;=]+);", code)]
+                pairs += [(am.group(2), am.group(1)) for am in
+                          re.finditer(r"\btypedef\s+(?:const\s+)?(?:struct\s+|class\s+|union\s+|enum\s+)?([\w:<>, ]+?)[\s*&]+(\w+)\s*;", code)]
+                for al, target in pairs:
+                    t = type_name(re.sub(r"\b(?:const|typename|volatile)\b", "", target).strip())
+                    if t and t != al:
+                        seen.setdefault(al, set()).add(t.split("::")[-1].split(".")[-1])
+            got = self.cache["\0cppal"] = {k: next(iter(v)) for k, v in seen.items() if len(v) == 1}
+        return got
+
     def _type_modules(self, mod, name: str):
         p = self.p
         fm = self._file_mod(mod)
@@ -97,6 +118,13 @@ class Types:
         al = fm.bound.get(name, "") if name[:1].isupper() else ""
         if al.startswith("type:") and al[5:] != name:  # `using X = A.B;` / PHP `use A\\B as X;`: B, by another name
             name = al[5:]
+        if fm.file.endswith(_C_EXTS) and name not in self.by_type:
+            seen_ = {name}
+            while name in self._cpp_aliases() and name not in self.by_type:
+                name = self._cpp_aliases()[name]  # `using memory_buf_t = fmt::basic_memory_buffer<char, 250>;`
+                if name in seen_:
+                    break
+                seen_.add(name)
         if "." in name and fm.file.endswith(".rs") and name.split(".")[0] in self._rs_external():
             return [], False, False  # `walkdir::DirEntry`: that crate's, not the project's own DirEntry
         if "." in name:  # `pkg.Type`, `Outer.Inner`, `ns.Type`
@@ -317,10 +345,21 @@ class Types:
             if m is not None and m.methods and m.file.endswith(".go") and name in m.methods:
                 impls += [g for g in self._go_impls(m, name) if g not in impls]
             for sub in self.p.children.get(mn, ()):
+                got_ = None
                 for part in [sub] + self.parts(self.p.modules[sub]):  # (a C++ subclass's .cpp half)
                     g = self.p.funcs.get(f"{part}.{name}")
                     if g and g not in impls:
                         impls.append(g)
+                    got_ = got_ or g
+                if got_ is None and self.p.modules[sub].kind != "interface":
+                    # the implementing class inherits it: `class MapperConfigurationExpression : Profile,
+                    # IMapperConfigurationExpression` runs Profile's CreateMap
+                    for a in self.ancestors(sub)[1:]:
+                        g = self.p.funcs.get(f"{a}.{name}")
+                        if g is not None:
+                            if self.p.modules[a].kind != "interface" and g not in impls:
+                                impls.append(g)
+                            break
         for mn in mods:  # Kotlin / C# / Swift extensions on the type, or on a supertype / interface it has
             for a in self.ancestors(mn):
                 m = self.p.modules[a]
@@ -604,8 +643,18 @@ class Types:
             elif v[0] == "inst":
                 hits = self.method(list(v[1]), name)[0]
         else:
+            if name == "new" and f is not None and mod.file.endswith(".cs"):
+                name = self._target_typed_new(mod, f, spec) or name  # `Foo x = new(b => ...)`, `=> new(b => ...)`
             g = self.bare(mod, f, name)
             hits = [g] if g is not None else []
+            if not hits and name[:1].isupper():  # `new MapperConfiguration(cfg => ...)`: the type's constructor
+                for mn in self.type_modules(mod, name)[0]:
+                    tm = self.p.modules[mn]
+                    for ctor in (name.split("`")[0], "__init__", "init", "constructor"):
+                        c_ = self.p.funcs.get(f"{mn}.{ctor}")
+                        if c_ is not None and c_ not in hits:
+                            hits.append(c_)
+                            break
             if not hits and name[:1].isupper() and mod.file.endswith(_JS_EXTS[:-1]) and not self.type_modules(mod, name)[2] \
                     and name not in self._file_mod(mod).imported:
                 self.cache[key] = EXT  # `new Promise((resolve) => ...)`: what a runtime class hands its callback
@@ -654,6 +703,21 @@ class Types:
         got = self.instance(gm, ty)
         self.cache[key] = got
         return got
+
+    def _target_typed_new(self, mod, f, spec: str) -> str:
+        """The type a C# `new(...)` builds: the declared type the line assigns to
+        (`MapperConfiguration c = new(`), or the method's return type (`=> new(`)."""
+        m = self.p.modules.get(f.module)
+        for ln in range(f.start, f.end + 1) if m is not None else ():
+            line = m.code[ln - 1] if ln - 1 < len(m.code) else ""
+            if not re.search(r"\bnew\s*\(", line):
+                continue
+            dm = re.search(r"([A-Z][\w.]*(?:<[^<>=]*>)?)\??\s+\w+\s*=\s*new\s*\(", line)
+            if dm:
+                return generic_name(dm.group(1)) or ""
+            if re.search(r"(?:=>|\breturn)\s*new\s*\(", line) and f.returns and not f.returns.startswith(("expr:", "byov:")):
+                return generic_name(f.returns) or ""
+        return ""
 
     def _lib_results(self) -> set:
         got = self.cache.get("\0libres")
@@ -989,7 +1053,9 @@ class Types:
             if name in self._lib_results():
                 return EXT  # `hc<App>(url)`: a runtime proxy (packs' [[returns]])
             g = self.bare(mod, f, name)
-            if name[:1].isupper() and (g is None or (not g.returns and g.name == name)) \
+            cpp_ = fm.file.endswith((".h", ".hpp", ".hh", ".cpp", ".cc", ".cxx"))
+            if (name[:1].isupper() or cpp_ and g is None and self.type_modules(mod, name)[2]) \
+                    and (g is None or (not g.returns and g.name == name)) \
                     and (got := self.instance(mod, name, self_mods)) is not None:
                 return got  # `ConfigHandler().value()`: a constructor (ahead of a library base's own methods)
             if g is None and not fm.file.endswith(".py"):
@@ -1550,6 +1616,7 @@ def _bare_reaches_nothing(p, fm, name: str) -> bool:
     return not _in_scope(p, fm.name, name) and not any(_in_scope(p, w, name) for w in fm.uses)
 _RS_PRIMS = r"u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32|f64|bool|char|str"
 _ES_MODULE = (".ts", ".tsx", ".mts", ".cts")
+_C_EXTS = (".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh")
 _JS_EXTS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".qml")
 _JS_GLOBALS = {"console", "window", "document", "navigator", "localStorage", "sessionStorage", "globalThis",
                "location", "history", "process", "performance", "crypto",

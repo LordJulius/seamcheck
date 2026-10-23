@@ -1316,6 +1316,42 @@ _C_KEYWORDS = {"if", "for", "while", "switch", "return", "sizeof", "do", "else",
                "_Generic", "offsetof", "__builtin_expect", "__attribute__"}
 
 
+_C_FAMILY = (".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh")
+_STD_NAMESPACES = {"std", "boost", "absl", "Qt", "QtConcurrent", "chrono", "filesystem", "ranges", "views", "this_thread"}
+
+
+def _cpp_namespaces(project: Project) -> set:
+    got = project.__dict__.get("_cpp_ns")
+    if got is None:
+        got = project.__dict__["_cpp_ns"] = {part for g in project.funcs.values() if g.ns for part in g.ns.split("::")}
+    return got
+
+
+def _cpp_namespace_call(project: Project, f: Func, c, targets: list) -> bool:
+    """`detail::write(...)`, `details::os::localtime(...)`, `std::move(...)`: a call
+    qualified by a namespace path. True when the path names namespaces (not a
+    class or a variable): `targets` gets the free functions of that name in a
+    namespace ending with that path (one overload set: exact), none for `std::`."""
+    if not all(re.fullmatch(r"[A-Za-z_]\w*", s_) for s_ in c.chain) or c.chain[-1] in f.bound:
+        return False
+    own = _cpp_namespaces(project)
+    if c.chain[0] in _STD_NAMESPACES and c.chain[0] not in own:
+        return True  # the standard library's (or boost's): no project function
+    if not all(s_ in own for s_ in c.chain):
+        return False  # a class (`Foo::make()`) or a variable: the type layer decides
+    path = "::".join(c.chain)
+    hits = [g for g in project.by_name.get(c.name, []) if g.ns and (g.ns == path or g.ns.endswith("::" + path))]
+    if not hits:  # `details::m_formatter<Padder>(...)`: a class's constructor, the class named in that namespace
+        hits = [g for g in project.by_name.get(c.name, []) if g.module.rsplit(".", 1)[-1] == c.name and project.modules[g.module].owner]
+        if len({g.module for g in hits}) == 1:
+            targets.extend((g, True) for g in hits)
+            return True
+        return False
+    sure = len({g.ns for g in hits}) == 1  # (overloads in one namespace, over several headers: one function)
+    targets.extend((g, sure) for g in hits)
+    return True
+
+
 def _c_macros(project: Project) -> dict[str, list[str]]:
     """Function-like macros in the project's C files: name -> the names their body calls."""
     got = project.__dict__.get("_c_macros")
@@ -1778,6 +1814,10 @@ def _build_edges(project: Project) -> None:
                         _nothing(project, f, c)
                         continue
                     targets = [(g, False) for g in stat]
+            elif c.chain and mod and f.file.endswith(_C_FAMILY) and _cpp_namespace_call(project, f, c, targets):
+                if not targets:
+                    _nothing(project, f, c)  # `std::move(x)`: the standard library's
+                    continue
             elif c.chain and mod:
                 # the receiver's type, step by step (see infer.py)
                 types.line = c.line

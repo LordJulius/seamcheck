@@ -1,6 +1,6 @@
 """How exactly seamcheck links calls, per language, on real open-source repos.
 
-    python3 bench/bench.py REPOS_DIR [--only lang,lang]
+    python3 bench/bench.py REPOS_DIR [--only lang,lang] [--holdout]
 
 REPOS_DIR holds shallow clones named as below (`git clone --depth 1
 https://github.com/<owner>/<repo>`). For each language and repo it prints the
@@ -34,6 +34,25 @@ CORPUS = {
     "Ruby": ([".rb", ".rake", ".ru"], ["sinatra/sinatra", "jekyll/jekyll"]),
     "PHP": ([".php"], ["slimphp/Slim", "guzzle/guzzle"]),
 }
+# Repos never used while tuning seamcheck (`--holdout`): whether the numbers above
+# hold on code nobody fitted the resolver to.
+HOLDOUT = {
+    "Python": ([".py"], ["pallets/click", "Textualize/rich"]),
+    "Go": ([".go"], ["gin-gonic/gin", "urfave/cli"]),
+    "Rust": ([".rs"], ["clap-rs/clap", "sharkdp/fd"]),
+    "TypeScript": ([".ts", ".tsx", ".mts"], ["colinhacks/zod", "sindresorhus/ky"]),
+    "JavaScript": ([".js", ".jsx", ".mjs", ".cjs"], ["axios/axios", "koajs/koa"]),
+    "Java": ([".java"], ["apache/commons-lang", "square/javapoet"]),
+    "Kotlin": ([".kt", ".kts"], ["square/moshi"]),
+    "C#": ([".cs"], ["DapperLib/Dapper", "AutoMapper/AutoMapper"]),
+    "Elixir": ([".ex", ".exs"], ["elixir-ecto/ecto", "sorentwo/oban"]),
+    "GDScript": ([".gd"], ["Orama-Interactive/Pixelorama"]),
+    "C": ([".c"], ["lua/lua", "DaveGamble/cJSON"]),
+    "C++": ([".cpp", ".cc", ".h", ".hpp"], ["fmtlib/fmt", "gabime/spdlog"]),
+    "Swift": ([".swift"], ["onevcat/Kingfisher", "SwiftyJSON/SwiftyJSON"]),
+    "Ruby": ([".rb", ".rake", ".ru"], ["rack/rack", "sidekiq/sidekiq"]),
+    "PHP": ([".php"], ["Seldaek/monolog", "thephpleague/flysystem"]),
+}
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -52,7 +71,7 @@ def main() -> int:
     only = set(sys.argv[sys.argv.index("--only") + 1].split(",")) if "--only" in sys.argv else None
     cache: dict[str, dict] = {}
     worst = 100.0
-    for lang, (exts, repos) in CORPUS.items():
+    for lang, (exts, repos) in (HOLDOUT if "--holdout" in sys.argv else CORPUS).items():
         if only and lang not in only:
             continue
         for slug in repos:

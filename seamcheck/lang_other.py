@@ -122,6 +122,15 @@ _TS_PARAM_FIELD = re.compile(r"\b(?:private|public|protected|readonly)\s+([a-z_$
 # `Client client(...);` at a statement start, `QString name` as a parameter
 _CPP_VALUE = re.compile(r"(?:^|[(,])\s*(?:(?:const|final|this|using|await\s+using|out|ref|in|params|scoped|readonly)\s+)*"
                         r"([A-Z]\w*(?:\.[A-Z]\w*)*(?:<[^;=(){}]*>)?)\s+([a-z_]\w*)\s*(?=[({;=,)]|:(?!:)|in\s)", re.M)
+# C / C++ with any type name (snake_case, `ns::type`, `struct x`): `const details::log_msg &msg`,
+# `memory_buf_t &dest`, `struct node *n`, `buffer b;` (keywords and built-in types aren't types)
+_CPP_ANY_TYPED = re.compile(r"(?<![\w:>.])(?:(?:const|struct|class|union|enum|volatile)\s+)*((?:\w+::)*[A-Za-z_]\w*(?:<[^;=(){}<>]*(?:<[^;=(){}<>]*>)?[^;=(){}<>]*>)?)"
+                            r"(?:\s*[\*&]+\s*|\s+)(?:const\s+)?([a-z_]\w*)\s*(?=[,;=)\[{]|$)", re.M)
+_CPP_NOT_TYPE = {"return", "else", "case", "delete", "new", "throw", "goto", "typedef", "using", "namespace", "sizeof",
+                 "co_return", "co_await", "co_yield", "operator", "public", "private", "protected", "template", "typename",
+                 "static", "inline", "virtual", "explicit", "friend", "mutable", "register", "extern", "auto", "void", "int",
+                 "char", "bool", "float", "double", "long", "short", "unsigned", "signed", "if", "while", "for", "switch",
+                 "do", "constexpr", "consteval", "decltype", "noexcept", "override", "final", "and", "or", "not", "this"}
 _CPP_TYPED = re.compile(r"(?<![\w:>])([A-Z]\w*)\s*[\*&]+\s*([a-z_]\w*)\s*(?=[,;=)\[{]|:(?!:)|$)", re.M)
 # a C++ class member in a header: `BoardModel* m_board = nullptr;`, `Hub m_hub;`
 # `Q_PROPERTY(SortFilterRoomTreeModel *model READ model CONSTANT)`: QML's `obj.model`
@@ -201,6 +210,12 @@ def _typed(tk: str, text: str) -> list[tuple[str, str]]:
         out = [(m.group(2), t) for pat in ((_CPP_TYPED, _CPP_VALUE) if tk == "cpp" else (_CPP_VALUE,))
                for m in pat.finditer(text) if not _ALLCAPS.match(m.group(1))
                and (t := (generic_name(m.group(1)) if tk == "jvm" else type_name(m.group(1))))]
+        if tk == "cpp":
+            have = {n for n, _ in out}
+            out += [(m.group(2), t) for m in _CPP_ANY_TYPED.finditer(text)
+                    if m.group(2) not in have and m.group(1).split("::")[-1].split("<")[0] not in _CPP_NOT_TYPE
+                    and m.group(2) not in _CPP_NOT_TYPE and not _ALLCAPS.match(m.group(1))
+                    and (t := type_name(m.group(1))) and t not in _CPP_NOT_TYPE]
         if tk == "jvm":
             out += [(m.group(1), m.group(2)) for m in _JV_NEW.finditer(text)]
         return out
@@ -2132,6 +2147,10 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 m_.bound = mod.bound
     go_test = go and rel.endswith("_test.go")
     decl_pos = None
+    cpp_ns = []  # C / C++: (body start, body end, name) of each `namespace x {` ("" anonymous)
+    for nm_m in re.finditer(r"\bnamespace\s+((?:\w+::)*\w+)?\s*\{", code) if cpp else ():
+        e_ = lambdas.matching(code, nm_m.end() - 1)
+        cpp_ns.append((nm_m.end() - 1, e_ if e_ > 0 else len(code), nm_m.group(1) or ""))
     for (hname, name), ss in sorted(spans.items(), key=lambda kv: kv[1][0]):
         a_, b_, npos, bpos = max(ss, key=lambda s_: s_[1] - s_[0])
         home, cls = owners[(hname, name)]
@@ -2145,6 +2164,14 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             annotated = True  # XCTest / PHPUnit `testX` methods, swift-testing `@Test`, PHPUnit `#[Test]` / `@test`
         f = Func(home.name, name, rel, a_ + 1, b_ + 1, "\n".join(lines[a_:b_ + 1]),
                  kind="test" if (a_, name) in tests or annotated else "func", recv=recv)
+        if cpp and home is mod and cpp_ns:
+            # a free function's namespace: `namespace fmt { namespace detail {`, `namespace a::b {`
+            path_ = []
+            for s0, s1, nm_ in cpp_ns:
+                # (a namespace an `#if` branch's braces kept open reads as nested in itself: once)
+                if s0 < npos < s1 and nm_ and (not path_ or path_[-1] != nm_):
+                    path_.append(nm_)
+            f.ns = "::".join(path_)
         if fam == "js":
             _pack_params(f)
         sig_end = bpos if bpos >= 0 else min(len(code), npos + 400)
@@ -2281,6 +2308,8 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     if chain and q and q != ".":
                         last = chain[-1]
                         q = last if re.match(r"^[\w$]+$", last) else "."
+                    if nm == "new" and not q and ext == ".cs":  # `MapperConfiguration c = new(cfg => ...)`: its lambdas
+                        _bind_lambdas(f, fam, body, off + m.end() - 1, "new", (), sa, -1)
                     if nm in _CALL_SKIP and (not q or (nm in _NOT_FUNC and nm != "new")):
                         continue  # (a keyword, or `String(`; `c.String()` and `Foo::new()` are calls)
                     f.calls.append(Call(nm, q, i + 1, chain if q else (), m.start(2)))
