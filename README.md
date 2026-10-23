@@ -19,7 +19,7 @@ the project writes down about how its parts fit together.
   Rules work on any text file.
 - **Says how sure it is.** On 37 open-source repos in 16 languages, 95% or
   more of the calls into project code are exact on every one; on 28 repos held
-  out from tuning, 91.5-100% (16 of them 95% or more; see "How exact it is").
+  out from tuning, 91.5-100% (22 of them 95% or more; see "How exact it is").
   The rest are marked as guesses, never passed off as fact.
 - **Checked against CodeQL.** On 17 repos in ten languages (C, C++, C# and
   Kotlin included), where both resolve a call seamcheck names the same callee
