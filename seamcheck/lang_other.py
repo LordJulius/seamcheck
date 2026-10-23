@@ -36,7 +36,9 @@ _JS = [
     re.compile(rf"^[ \t]*this\.({_ID})[ \t]*=[ \t]*(?:async[ \t]+)?(?:\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=\n]+?)?=>|{_ID}[ \t]*=>)", re.M),
     # (the annotation may be a function type: `const mergePath: (...p: string[]) => string = (`; parameters
     # may nest three deep: `(...els: ((A | B)[] | C)[]) =>`)
-    re.compile(rf"\b(?:const|let|var)\s+({_ID})\s*(?::(?:[^=;]|=>){{1,300}}?)?=\s*(?:async\s+)?"
+    # (`export const validate: V = ((schema) => {...}) as V`: the arrow in parentheses; not an
+    # immediately-called `(\n  ({ hasOwnProperty }) => ...\n)(Object.prototype)`)
+    re.compile(rf"\b(?:const|let|var)\s+({_ID})\s*(?::(?:[^=;]|=>){{1,300}}?)?=\s*(?:\((?=\())?(?:async\s+)?"
                rf"(?:function\b|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)\s*(?::\s*[^=]+)?=>|{_ID}\s*=>)"),
     # object-literal members (`applyOp: (op) => {`): a zustand store, a handler table
     # (not a parameter's function type: `fn: (...args: T) => void,`)
@@ -852,6 +854,15 @@ def _js_reexports(mod: Module, rel: str, text: str, lines: list[str]) -> None:
             if part:
                 src, _, local = part.partition(" as ")
                 mod.imported.setdefault((local or src).strip(), (where, src.strip()))
+    for m in re.finditer(r"^[ \t]*(?:export[ \t]+default|module\.exports[ \t]*=)[ \t]*\{", text, re.M):
+        # `export default { ...utils, ...platform }`: what those modules define, this object has
+        close = lambdas.matching(text, m.end() - 1)
+        body = text[m.end():close] if close > 0 else ""
+        for sm in re.finditer(r"(?:^|[{,])\s*\.\.\.\s*([A-Za-z_$][\w$]*)\s*(?=[,}]|$)", body):
+            nm = sm.group(1)
+            where = mod.aliases.get(nm) or (mod.imported[nm][0] if mod.imported.get(nm, ("", ""))[1] in ("default", nm) else "")
+            if where and where not in mod.reexports:
+                mod.reexports.append(where)
 
 
 _RS_USE = re.compile(r"^[ \t]*(pub(?:\([^)]*\))?[ \t]+)?use[ \t]+([^;]+);", re.M)
@@ -1386,6 +1397,25 @@ _FIELD_ASSIGN = {
 }
 
 
+def _js_reassignments(f, lines: list[str], sa: int, sb: int) -> None:
+    """JS: `let headers = own('headers'); ... headers = AxiosHeaders.from(headers);` at the
+    declaration's own block level: from that line on, the value reassigned ("x\0from<line>")."""
+    decl = {}
+    for i in range(sa, sb + 1):
+        ln = lines[i]
+        ind = len(ln) - len(ln.lstrip())
+        dm = re.match(r"\s*(?:let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]+)?=", ln)
+        if dm:
+            decl.setdefault(dm.group(1), ind)
+            continue
+        rm = re.match(r"\s*(?:[\w$.]+\s*=\s*)?([A-Za-z_$][\w$]*)\s*=(?![=>])\s*", ln)
+        if not rm or decl.get(rm.group(1)) != ind:
+            continue
+        ch = expression(ln, rm.end())
+        if ch and ln[rm.end():].rstrip().rstrip(";").endswith(")") and ch[0] != rm.group(1):
+            f.bound[f"{rm.group(1)}\0from{i + 1}"] = "expr:" + "\x1f".join(ch)
+
+
 def _assignments(tk: str, text: str) -> list[tuple[str, str]]:
     """(local, "expr:<chain>") for `x = <chain>`, and (local, "call:<chain>")
     for a closure `x = |a| <chain>` / `x = { a -> <chain> }`: calling it gives that."""
@@ -1413,6 +1443,13 @@ def _assignments(tk: str, text: str) -> list[tuple[str, str]]:
             out.append((m.group(1), "type:" + lit))  # `x = []`, `x = ""`: the language's own value
             continue
         ch = expression(text, m.end())
+        tm_ = re.match(r"[^?:;\n'\"`]*\?\s*(new\s+[\w$.]+\s*\([^()\n]*\))\s*:\s*(new\s+[\w$.]+\s*\([^()\n]*\))\s*;?\s*$",
+                       text[m.end():text.find("\n", m.end()) if "\n" in text[m.end():] else len(text)]) if tk == "js" else None
+        if tm_:  # `c ? new TextEncoder() : new util.TextEncoder()`: whichever runs, if the two agree
+            a_, b_ = expression(tm_.group(1), 0), expression(tm_.group(2), 0)
+            if a_ and b_:
+                out.append((m.group(1), "either:" + "\x1f".join(a_) + "\x1c" + "\x1f".join(b_)))
+                continue
         if ch and ch[0] in ("null", "nil", "None", "undefined", "NULL", "nullptr") and len(ch) == 1:
             continue  # `$stats = null;`: no type yet; a later assignment says it
         if ch:
@@ -2202,9 +2239,9 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                                                          code[line_start[i] + m.end():line_start[i] + m.end() + 400]):
                         continue  # `create((set) => ({ applyOp }))`: a library object holding project callbacks
                     if ch:  # (a PHP property `$x` is read as `->x`)
-                        expr_fields.setdefault(home.name, {}).setdefault(m.group(1).lstrip("$"), ch)
+                        expr_fields.setdefault(home.name, {}).setdefault(m.group(1).lstrip("$") if php else m.group(1), ch)
                     elif (lit := _LITERAL.get(tk, {}).get(code[line_start[i] + m.end():line_start[i] + m.end() + 40].lstrip()[:1])):
-                        got_fields.setdefault(m.group(1).lstrip("$"), set()).add(lit)  # `let sample = """...`: a String
+                        got_fields.setdefault(m.group(1).lstrip("$") if php else m.group(1), set()).add(lit)  # `let sample = """...`: a String
             if fam == "js" and not inside[i] and "{" in ln:  # `const { h } = window;` at the top of a file
                 for nm_, held in _assignments("js", ln if ln.rstrip().endswith(";") else ln + ";"):
                     if held.startswith("expr:") and len(held.split("\x1f")) > 1:
@@ -2476,6 +2513,9 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 f.returns = "byov:" + "|".join(by_ov)  # overloads that return different types
             if not f.returns and bpos >= 0 and re.search(r"\breturn\s+(?:this|self|\$this)\s*[;\n}]", f.code):
                 f.returns = "Self"  # a builder step: `return this`
+            if not f.returns and bpos >= 0 and fam == "js" and cls_name and re.search(
+                    r"\breturn\s+(?:[\w$.]+\s+instanceof\s+this\s*\?\s*[\w$]+\s*:\s*)?new\s+this\s*\(", f.code):
+                f.returns = f"expr:new {cls_name}()"  # `static from(x) { return x instanceof this ? x : new this(x) }`
             if not f.returns and bpos >= 0:
                 f.returns = _own_return(code, bpos)
             if not f.returns and bpos < 0 and fam == "js":  # `(input) => createRequest(input)`: that expression
@@ -2504,6 +2544,8 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                     f.bound.setdefault(nm_ + "\0rebind", held)
                     continue
                 f.bound.setdefault(nm_, held)
+            if fam == "js":
+                _js_reassignments(f, lines, sa, sb)
             for nm_, held in _loop_bindings(tk, body):
                 f.bound.setdefault(nm_, held)
             if go:

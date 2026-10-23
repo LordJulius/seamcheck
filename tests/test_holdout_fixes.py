@@ -552,6 +552,96 @@ class RubyMultiAssignFixes(unittest.TestCase):
         self.assertNotIn("lib/rack/response.Rack::Response.write", got)
 
 
+JS7 = {
+    "package.json": "{\"name\": \"ax\", \"type\": \"module\"}\n",
+    "lib/Headers.js": "class Headers {\n  set(h) {\n    function setHeader(v) {\n      return v;\n    }\n    return setHeader(h);\n  }\n"
+                      "  has(h) {\n    return true;\n  }\n  static from(x) {\n    return x instanceof this ? x : new this(x);\n  }\n"
+                      "  static concat(first, ...rest) {\n    const out = new this(first);\n    rest.forEach((r) => out.set(r));\n    return out;\n  }\n"
+                      "  static accessor(n) {\n    return n;\n  }\n}\nexport default Headers;\n",
+    "lib/list.js": "export function forEach(xs, fn) {\n  return fn(xs);\n}\n",
+    "lib/resolve.js": "import Headers from './Headers.js';\nexport default function resolve(config) {\n  let headers = config.h;\n"
+                      "  config.headers = headers = Headers.from(headers);\n  headers.has('a');\n  return config;\n}\n",
+    "lib/form.js": "import Headers from './Headers.js';\nfunction fill(headers, k) {\n  headers.has(k);\n}\n"
+                   "export function run() {\n  fill(new Headers(), 'a');\n  fill(Headers.from({}), 'b');\n}\n"
+                   "const enc = typeof TextEncoder === 'function' ? new TextEncoder() : new util.TextEncoder();\n"
+                   "export function encode(s) {\n  return enc.encode(s);\n}\n",
+    "lib/http.js": "function direct(a) {\n  return a;\n}\nexport const __direct = direct;\n",
+    "lib/platform/node.js": "export function generateString(n) {\n  return n;\n}\nexport default { generateString };\n",
+    "lib/platform/index.js": "import node from './node.js';\nexport default {\n  ...node,\n};\n",
+    "lib/stream.js": "import platform from './platform/index.js';\nexport function boundary() {\n  return platform.generateString(4);\n}\n",
+    "tests/http.test.js": "import { __direct as direct } from '../lib/http.js';\nimport Headers from '../lib/Headers.js';\n"
+                          "test('a', () => {\n  direct(1);\n  const h = new Headers();\n  h.constructor.accessor('x');\n  socket.has('x');\n});\n"
+                          "test('pollution', () => {\n  Object.prototype.has = function () {\n    return 1;\n  };\n  delete Object.prototype.has;\n});\n",
+}
+
+
+class JsParamFlowAndPatchFixes(unittest.TestCase):
+    def test_axios_shapes(self):
+        p = load(JS7)
+        def got(k):
+            return {(d, e) for d, _l, e in p.edges.get(k, [])}
+        self.assertIn(("lib/Headers.has", True), got("lib/resolve.resolve"))  # reassigned at its own level
+        self.assertIn(("lib/Headers.has", True), got("lib/form.fill"))  # what every caller passes
+        self.assertEqual(set(), {d for d, _ in got("lib/form.encode")})  # either branch a library's
+        self.assertIn(("lib/Headers.set", True), got("lib/Headers.concat"))  # new this(); a rest parameter is an Array
+        self.assertNotIn("lib/list.forEach", {d for d, _ in got("lib/Headers.concat")})
+        self.assertIn(("lib/platform/node.generateString", True), got("lib/stream.boundary"))
+        t = got("tests/http.test.test a")
+        self.assertIn(("lib/http.direct", True), t)
+        self.assertIn(("lib/Headers.accessor", True), t)
+        self.assertNotIn("tests/http.test.has", {d for d, _ in t})  # another test's prototype patch
+
+
+ZOD3 = {
+    "core/core.ts": "export interface $constructor<T> {\n  init(inst: T): void;\n}\n"
+                    "export function $constructor<T>(name: string, initializer: (inst: T) => void, proto?: object): $constructor<T> {\n"
+                    "  function init(inst: T) {\n    initializer(inst);\n  }\n  function _(this: any) {\n    init(this);\n  }\n"
+                    "  Object.defineProperty(_, \"init\", { value: init });\n  return _ as any;\n}\n",
+    "core/index.ts": "export * from './core.js';\nexport * from './schemas.js';\n",
+    "core/schemas.ts": "import * as core from './core.js';\nexport interface $ZodType {\n  x: number;\n}\n"
+                       "export const $ZodType: core.$constructor<$ZodType> = /*@__PURE__*/ core.$constructor(\n  \"$ZodType\",\n  (inst) => {\n    inst.x = 1;\n  }\n);\n",
+    "classic/schemas.ts": "import * as core from '../core/index.js';\nexport interface ZodType extends core.$ZodType {\n  safeParse(d: unknown): boolean;\n}\n"
+                          "export const ZodType: core.$constructor<ZodType> = /*@__PURE__*/ core.$constructor(\n  \"ZodType\",\n"
+                          "  (inst) => {\n    core.$ZodType.init(inst);\n  },\n  {\n    safeParse(d) {\n      return true;\n    },\n  }\n);\n"
+                          "export function check(schema: ZodType) {\n  return schema.safeParse(1);\n}\n",
+}
+
+
+class TsFactoryInterfaceFixes(unittest.TestCase):
+    def test_zod_constructor_values_and_interface_members(self):
+        p = load(ZOD3)
+        got = {(d, e) for k, es in p.edges.items() if k.startswith("classic/schemas") for d, _l, e in es}
+        self.assertIn(("core/core.init", True), got)  # `$ZodType.init`: the factory's attached init
+        self.assertIn(("classic/schemas.safeParse", True), got)  # ZodType's member, from its prototype object
+
+
+JS8 = {
+    "core/parse.ts": "export const _safeParse = (_Err: any) => (schema: any, value: unknown) => {\n  return schema;\n};\n"
+                     "export const validate: V = ((\n  schema: any,\n): boolean => {\n  return true;\n}) as V;\n",
+    "core/doc.ts": "export class Doc {\n  compile(): any {\n    return 1;\n  }\n}\n",
+    "core/compile.ts": "export function compile(s: any) {\n  return s;\n}\n",
+    "core/schemas.ts": "export function make(inst: any) {\n  inst.validate = (x: any) => x;\n}\n",
+    "core/index.ts": "export * from './doc.js';\nexport * from './schemas.js';\nexport * from './compile.js';\nexport * from './parse.js';\n",
+    "classic/parse.ts": "import * as core from '../core/index.js';\nexport const safeParse: <T>(\n  schema: T,\n  value: unknown\n) => boolean = "
+                        "/* @__PURE__ */ core._safeParse(Error);\nexport { validate, compile } from '../core/index.js';\n",
+    "tests/a.test.ts": "import * as z from '../classic/parse.js';\nimport { encode } from './enc.js';\n"
+                       "test('t', () => {\n  z.safeParse(1, 2);\n  z.validate(1);\n  z.compile(1);\n  encode('x');\n"
+                       "  build('/foo', {\n    encode(v) {\n      return v;\n    },\n  });\n});\n",
+    "tests/enc.ts": "export function encode(s: string) {\n  return s;\n}\nexport function build(u: string, o: any) {\n  return o;\n}\n",
+}
+
+
+class JsScopeFixes(unittest.TestCase):
+    def test_factories_reexports_and_object_members(self):
+        p = load(JS8)
+        got = {(d, e) for k, es in p.edges.items() if k.startswith("tests/a.test") for d, _l, e in es}
+        self.assertIn(("core/parse._safeParse", True), got)  # a factory's closure
+        self.assertIn(("core/parse.validate", True), got)  # not `inst.validate = ...` in schemas
+        self.assertIn(("core/compile.compile", True), got)  # `export *` hands on Doc, not Doc.compile
+        self.assertIn(("tests/enc.encode", True), got)  # not the object literal's encode()
+        self.assertNotIn("core/doc.compile", {d for d, _ in got})
+
+
 RB2 = {
     "lib/sq/config.rb": "module Sq\n  class Config\n    def redis\n      redis_pool.with do |conn|\n        yield conn\n      end\n    end\n"
                         "    def redis_pool\n      Thread.current[:pool] || local_pool\n    end\n"

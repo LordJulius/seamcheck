@@ -432,6 +432,9 @@ def load(root: str, config_path: str | list[str] | None = None, use_cache: bool 
     _link(project, precise, use_cache)
     project.__dict__.pop("_counted", None)  # (only for counting while linking)
     project.__dict__.pop("_site_out", None)
+    project.__dict__.pop("_js_imported", None)
+    project.__dict__.pop("_js_arg_members", None)
+    project.__dict__.pop("_js_factory", None)
     _apply_bridges(project)
     project.config_problems += project.bridge_problems
     if use_cache:
@@ -948,6 +951,23 @@ def _qml_context(project: Project) -> None:
                     m.bound.setdefault(n, t)
 
 
+def _js_imported_files(project: Project) -> set[str]:
+    """The JS / TS files some module imports (or re-exports) from."""
+    got = project.__dict__.get("_js_imported")
+    if got is None:
+        got = project.__dict__["_js_imported"] = set()
+        for m in project.modules.values():
+            if not m.file.endswith(_JS_FILE_EXTS):
+                continue
+            for w, _n in m.imported.values():
+                if w in project.modules:
+                    got.add(project.modules[w].file)
+            for w in m.reexports:
+                if w in project.modules:
+                    got.add(project.modules[w].file)
+    return got
+
+
 def _is_test_file(project: Project, rel: str) -> bool:
     cache = project.__dict__.setdefault("_test_files", {})
     if rel not in cache:
@@ -1130,10 +1150,10 @@ def _in_scope(project: Project, where: str, name: str, depth: int = 0) -> list[F
         w, n = dm_.imported["default"]
         return _in_scope(project, w, n, depth + 1)
     t = _lookup(project, where, name)
-    if t:
+    if t and not _js_call_arg_member(project, t) and not _js_member_assigned(project, t):
         return [t]
     m = project.modules.get(where)
-    if m is None or depth >= 4:
+    if m is None or depth >= 8:  # (zod/mini -> external -> parse -> core/index -> core/parse -> a factory)
         return []
     if name in m.imported:
         w, n = m.imported[name]
@@ -1141,10 +1161,66 @@ def _in_scope(project: Project, where: str, name: str, depth: int = 0) -> list[F
         if hits:
             return hits
     for w in m.reexports:
-        hits = _in_scope(project, w, name, depth + 1)
+        hits = [h for h in _in_scope(project, w, name, depth + 1) if not _js_class_member(project, h)]
         if hits:
             return hits
+    held = m.bound.get(name, "")
+    if m.file.endswith(_JS_FILE_EXTS) and re.fullmatch(r"expr:[A-Za-z_$][\w$]*", held) and held[5:] != name:
+        return _in_scope(project, where, held[5:], depth + 1)  # `export const __getDirectAgent = getDirectAgent`
+    if m.file.endswith(_JS_FILE_EXTS) and not m.owner:
+        g = _js_factory_made(project, m, name, depth)
+        if g is not None:
+            return [g]
     return []
+
+
+def _js_factory_made(project: Project, m: Module, name: str, depth: int):
+    """`export const safeParse: <T>(...) => R = core._safeParse(ZodRealError)` where the
+    project's `_safeParse` is `(_Err) => (schema, value) => {...}` (or builds a closure
+    and returns it): calling safeParse runs that closure, in the factory's body."""
+    from .chains import expression
+    cache = project.__dict__.setdefault("_js_factory", {})
+    key = (m.name, name)
+    if key in cache:
+        return cache[key]
+    cache[key] = None
+    code = "\n".join(m.code)
+    dm = re.search(rf"^[ \t]*(?:export[ \t]+)?const[ \t]+{re.escape(name)}\b", code, re.M)
+    if dm is None:
+        return None
+    k, depth_, n = dm.end(), 0, len(code)
+    while k < n:  # the `=` after the type annotation, at the top level
+        c = code[k]
+        if c in "([{<":
+            depth_ += 1
+        elif c in ")]}>" and not (c == ">" and code[k - 1] == "="):
+            depth_ -= 1
+        elif c == "=" and depth_ <= 0 and code[k + 1:k + 2] not in "=>" and code[k - 1] not in "=!<>":
+            break
+        elif c == ";" and depth_ <= 0:
+            return None
+        k += 1
+    ch = expression(code, k + 1) if k < n else ()
+    if not ch or not ch[-1].endswith("()") or len(ch) > 2:
+        return None
+    fname = ch[-1][:-2]
+    if len(ch) == 1:
+        hits = _in_scope(project, m.name, fname, depth + 1)
+    else:
+        w = m.aliases.get(ch[0]) or (m.imported[ch[0]][0] if ch[0] in m.imported else "")
+        hits = _in_scope(project, w, fname, depth + 1) if w in project.modules else []
+    if len(hits) != 1 or not hits[0].file.endswith(_JS_FILE_EXTS):
+        return None
+    g = hits[0]
+    gm = project.modules.get(g.module)
+    head = "\n".join(gm.code[g.start - 1:g.start + 1]) if gm else ""
+    curried = re.search(r"=>\s*(?:async\s+)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*(?::[^=;{]+)?=>", head)
+    local = re.fullmatch(r"expr:([A-Za-z_$][\w$]*)", g.returns or "")
+    closure = local and re.search(rf"\b(?:const|let)\s+{re.escape(local.group(1))}\s*(?::[^=;]+)?=\s*(?:async\s+)?"
+                                  rf"(?:\([^()]*\)\s*(?::[^=;{{]+)?=>|function\b)", g.code)
+    if curried or closure:
+        cache[key] = g
+    return cache[key]
 
 
 _JS_FILE_EXTS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts")
@@ -1865,11 +1941,14 @@ def _js_plain_function(project: Project, g: Func) -> bool:
     not a class or object member, and never stored as a property or exported
     under its name in an object (`{ close }`, `x.close = close`)."""
     m = project.modules.get(g.module)
-    if m is None or m.owner or m.kind or not 0 < g.start <= len(m.raw):
+    if m is None or not 0 < g.start <= len(m.raw):
         return False
     if not re.match(rf"^\s*(?:export\s+)?(?:default\s+)?(?:return\s+)?(?:async\s+)?(?:function\s*\*?\s*{re.escape(g.name)}\s*[(<]|"
                     rf"(?:const|let|var)\s+{re.escape(g.name)}\s*=)", m.raw[g.start - 1]):
         return False
+    if (m.owner or m.kind) and not any(h is not g and h.kind != "top" and h.start < g.start <= h.end
+                                        for h in m.funcs):
+        return False  # (a class's member; a `function setHeader(...)` inside one of its methods is a plain local)
     stored = project.__dict__.setdefault("_js_stored_names", {})
     if m.name not in stored:  # names this file hands on as properties / object members / exports
         text = "\n".join(m.code)
@@ -1877,6 +1956,66 @@ def _js_plain_function(project: Project, g: Func) -> bool:
             set(re.findall(r"[.\w$\]]\s*=\s*([A-Za-z_$][\w$]*)\s*[;\n]", text)) | \
             set(re.findall(r":\s*([A-Za-z_$][\w$]*)\s*[,}\n]", text))
     return g.name not in stored[m.name]
+
+
+def _js_member_assigned(project: Project, g: Func) -> bool:
+    """`inst.validate = (...) => ...` inside a function: a property of that object, not a
+    name in the module (a CommonJS `exports.x = ...` / `module.exports.x = ...` is one)."""
+    m = project.modules.get(g.module)
+    return bool(m is not None and g.file.endswith(_JS_FILE_EXTS) and 0 < g.start <= len(m.raw)
+                and _js_property_fn(project, g)
+                and not re.match(r"\s*(?:module\.)?exports\.", m.raw[g.start - 1]))
+
+
+def _js_class_member(project: Project, g: Func) -> bool:
+    """A method of the class a JS / TS file is named for (`doc.ts`'s `class Doc { compile() }`):
+    `export * from "./doc.js"` hands on `Doc`, not its methods."""
+    m = project.modules.get(g.module)
+    return bool(m is not None and m.kind == "class" and not m.owner and g.file.endswith(_JS_FILE_EXTS)
+                and 0 < g.start <= len(m.raw) and m.raw[g.start - 1][:1] in " \t")
+
+
+def _js_call_arg_member(project: Project, g: Func) -> bool:
+    """A JS method of an object literal handed to a call (`buildURL(url, params, {
+    encode(v) {...} })`, `$constructor("ZodType", init, { parse(d) {...} })`): a member
+    of that object, never a name in the module's scope."""
+    if not g.file.endswith(_JS_FILE_EXTS):
+        return False
+    cache = project.__dict__.setdefault("_js_arg_members", {})
+    if g.id not in cache:
+        m = project.modules.get(g.module)
+        got = False
+        if m is not None and not m.owner and not m.kind and 0 < g.start <= len(m.raw) and re.match(
+                rf"\s+(?:async\s+)?\*?\s*{re.escape(g.name)}\s*(?:\(|:\s*(?:async\s+)?function\b)", m.raw[g.start - 1]):
+            text = "\n".join(m.code[:g.start - 1])
+            depth, k = 0, len(text) - 1
+            while k >= 0:  # back to the object literal's own `{`
+                ch = text[k]
+                if ch in ")]}":
+                    depth += 1
+                elif ch in "([{":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                k -= 1
+            before = text[:k].rstrip() if k >= 0 and text[k] == "{" else ""
+            got = before.endswith((",", "("))
+        cache[g.id] = got
+    return cache[g.id]
+
+
+def _js_scoped_patch(project: Project, g: Func, caller: Func) -> bool:
+    """`Object.prototype.on = function () {` inside a test's body (a prototype-pollution
+    check): a builtin's prototype patched while that function runs, out of reach of
+    calls made anywhere else."""
+    m = project.modules.get(g.module)
+    if m is None or not 0 < g.start <= len(m.raw) or not re.match(
+            rf"^\s*(?:Object|Array|String|Function|Number|Boolean)\.prototype\.{re.escape(g.name)}\s*=", m.raw[g.start - 1]):
+        return False
+    around = [h for h in project.funcs.values() if h.file == g.file and h.kind != "top" and h is not g
+              and h.start < g.start <= h.end]
+    return bool(around) and not any(caller.file == h.file and h.start <= caller.start and caller.end <= h.end
+                                    for h in around)
 
 
 def _js_property_fn(project: Project, g: Func) -> bool:
@@ -1926,6 +2065,7 @@ def _build_edges(project: Project) -> None:
     infer.resolve_bases(project)
     types = infer.Types(project)
     pending: list = []
+    pending_recv: list = []
     site_out = project.__dict__["_site_out"] = {}  # a call site's callees, once resolved
     for m in project.modules.values():
         for a in types.ancestors(m.name)[1:]:
@@ -2326,6 +2466,14 @@ def _build_edges(project: Project) -> None:
                 in_test = _is_test_file(project, f.file)
                 cands = [g for g in project.by_name.get(c.name, []) if g.kind != "top" and fam & _family(g.file)
                          and (in_test or not _is_test_file(project, g.file))]  # product code never calls a test
+                vague = len(cands) > 8  # (a very common name, before the ones out of reach are dropped)
+                if f.file.endswith(_JS_FILE_EXTS):
+                    cands = [g for g in cands if not _js_scoped_patch(project, g, f)]
+                if in_test and f.file.endswith(_JS_FILE_EXTS):
+                    # a JS test file no module imports keeps its own functions (`on()` of one test's
+                    # mock socket): another file can't be handed them
+                    cands = [g for g in cands if g.file == f.file or not _is_test_file(project, g.file)
+                             or g.file in _js_imported_files(project)]
                 if q and mod and 0 < c.line <= len(mod.raw) and f"{q}::{c.name}" in mod.raw[c.line - 1]:
                     # `veridian::api::parseClaim(...)`: the namespace names where it lives
                     named = [g for g in cands if f"/{q}/" in "/" + g.file or g.module.split("::")[-1] == q
@@ -2376,7 +2524,7 @@ def _build_edges(project: Project) -> None:
                     # JSONArray.textOrNull side by side): the call is one of them
                     targets = [(g, True) for g in mine]
                 else:
-                    if len(cands) > 8:
+                    if vague or len(cands) > 8:
                         cands = []  # a very common name (run, get, init...): too vague to be a useful edge
                     targets = [(g, False) for g in cands]
             # Virtual dispatch: a call that lands on a parent's function can
@@ -2412,10 +2560,14 @@ def _build_edges(project: Project) -> None:
             seen_t = {t.id for t, _ in targets}
             more = [(o, e) for o, e in more if o.id not in seen_t and not seen_t.add(o.id)]
             site_out[(f.file, c.line, c.col, c.name)] = [(t.id, exact) for t, exact in targets + more]
+            if targets and not any(e for _, e in targets) and c.chain and f.file.endswith(_JS_FILE_EXTS) \
+                    and c.chain[0] not in f.bound and c.chain[0] in _param_names(f):
+                pending_recv.append((f, c))  # `headers.set(...)` on a parameter: typed by what the callers pass
             for t, exact in targets + more:
                 project.edges[f.id].append((t.id, c.line, exact))
                 project.redges[t.id].append((f.id, c.line, exact))
     _param_flow(project, types, pending)
+    _param_receivers(project, types, pending_recv)
 
 
 def _py_returned_closure(project: Project, g: Func):
@@ -2488,6 +2640,109 @@ def _param_names(f: Func) -> list[str]:
         m = re.match(r"^\s*(?:(?:public|private|protected|readonly)\s+)?([A-Za-z_$][\w$]*)\s*[?]?\s*(?:[:=].*)?$", p_, re.S)
         out.append(m.group(1) if m and m.group(1) not in ("self", "cls") else "")
     return out
+
+
+def _arg_value(project: Project, types, f: Func, k: int, depth: int = 0):
+    """The value every caller of f passes as its k-th argument (JS / TS): each
+    caller exact, each argument a chain that evaluates to the same project
+    type (or every one a library's value: a literal, a builtin's), or the
+    caller's own parameter whose callers do; else None."""
+    from . import lambdas, chains
+    callers = project.redges.get(f.id, [])
+    if depth > 3 or not callers or not all(e for _, _, e in callers) or len(callers) > 40:
+        return None
+    got = set()
+    for src, line, _ in callers:
+        g = project.funcs.get(src)
+        gm = project.modules.get(g.module) if g else None
+        site = next((c2 for c2 in (g.calls if g else []) if c2.line == line and c2.name == f.name and c2.col >= 0), None)
+        if site is None or gm is None or not 0 < line <= len(gm.code):
+            return None
+        code = "\n".join(gm.code[line - 1:line + 30])
+        o = code.find("(", site.col)
+        close = lambdas.matching(code, o) if o >= 0 else -1
+        args = lambdas.split_top(code[o + 1:close]) if close > 0 else []
+        if len(args) <= k or any(a.strip().startswith("...") for a in args[:k + 1]):
+            return None
+        text = args[k].strip()
+        if re.fullmatch(r"""(?s)'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`[^`$]*`|-?\d[\d_.]*|\[.*\]""", text):
+            got.add(("ext",))  # a string, a number, an array: the runtime's
+            if len(got) > 1:
+                return None
+            continue
+        gparams = _param_names(g)
+        if re.fullmatch(r"[A-Za-z_$][\w$]*", text) and text in gparams and text not in g.bound:
+            v = _arg_value(project, types, g, gparams.index(text), depth + 1)  # handed on from its own callers
+            got.add(None if v is None else ("ext",) if infer_mod.is_ext(v) else (v[0], tuple(sorted(v[1]))))
+            if None in got or len(got) > 1:
+                return None
+            continue
+        ch = chains.expression(text, 0)
+        flat = text
+        while re.search(r"\([^()]*[^()\s][^()]*\)", flat):
+            flat = re.sub(r"\([^()]*\)", "()", flat)  # (the arguments: not part of the chain)
+        if not ch or re.sub(r"\s+|\bnew\b|\??\.", "", flat) != re.sub(r"\s+|\bnew\b|\??\.", "", "".join(ch)):
+            return None  # (not a plain chain: `a || b`, a literal)
+        types.line = line
+        v = types.chain(gm, g, ch)
+        if v is None or v is infer_mod.UNKNOWN:
+            return None
+        got.add(("ext",) if infer_mod.is_ext(v) else (v[0], tuple(sorted(v[1]))) if v[0] == "inst" and v[2] else None)
+        if None in got or len(got) > 1:
+            return None
+    one = got.pop()
+    return infer_mod.EXT if one == ("ext",) else ("inst", one[1], True)
+
+
+def _param_receivers(project: Project, types, pending: list) -> None:
+    """A JS / TS call guessed on a parameter (`headers.set(k, v)` in
+    `setFormDataHeaders(headers, ...)`): typed by what every caller passes,
+    the call reaches that type's method, or (a library value) nothing."""
+    for f, c in pending:
+        params = _param_names(f)
+        v = _arg_value(project, types, f, params.index(c.chain[0]))
+        if v is None:
+            continue
+        mod = project.modules.get(f.module)
+        types.line = c.line
+        v = types.chain(mod, f, c.chain, start=v) if len(c.chain) > 1 else v
+        if v is None or v is infer_mod.UNKNOWN:
+            continue
+        if infer_mod.is_ext(v):
+            hits = []
+        elif v[0] == "inst":
+            hits = types.method(list(v[1]), c.name)[0]
+            if not hits:
+                continue
+        else:
+            continue
+        for fid in [g.id for g in project.funcs.values() if g.file == f.file and g.start <= f.start and f.end <= g.end]:
+            old = [(d, ln, e) for d, ln, e in project.edges.get(fid, []) if ln == c.line and not e
+                   and d.rsplit(".", 1)[-1] == c.name]
+            if not old:
+                continue
+            for d, ln, e in old:
+                project.edges[fid].remove((d, ln, e))
+                if (fid, ln, e) in project.redges.get(d, []):
+                    project.redges[d].remove((fid, ln, e))
+            for h in hits:
+                project.edges[fid].append((h.id, c.line, True))
+                project.redges[h.id].append((fid, c.line, True))
+        res = project.resolution[os.path.splitext(f.file)[1]]
+        if res[1] > 0:
+            res[1] -= 1
+            if hits:
+                res[0] += 1
+            else:
+                res[2] += 1
+                fam = _family(f.file)
+                if any(g.kind != "top" and fam & _family(g.file) for g in project.by_name.get(c.name, ())):
+                    res[3] += 1
+        if _TRACE is not None:
+            for i, r in enumerate(_TRACE):
+                if r[0] == f.file and r[1] == c.line and r[2] == c.name and r[4] == "guess":
+                    _TRACE[i] = (r[0], r[1], r[2], r[3], "exact" if hits else "named", tuple(h.id for h in hits[:4]))
+                    break
 
 
 def _param_flow(project: Project, types, pending: list) -> None:

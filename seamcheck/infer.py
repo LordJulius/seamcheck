@@ -356,6 +356,15 @@ class Types:
                 found.append(first)  # (no class's overloads take that count as read: the nearest)
         if found:
             return found, True
+        fac = []
+        for mn in mods:
+            for a in self.ancestors(mn):
+                got_ = self._ts_factory_member(a, name)
+                if got_:
+                    fac += [g for g in got_ if g not in fac]
+                    break
+        if fac:
+            return fac, True
         impls = []
         for mn in mods:
             m = self.p.modules.get(mn)
@@ -530,6 +539,9 @@ class Types:
             return ("inst", (held[4:],), True) if held[4:] in self.p.modules else None
         if held.startswith("expr:"):
             return self.chain(mod, f, tuple(held[5:].split("\x1f")), depth + 1, self_mods=self_mods)
+        if held.startswith("either:"):  # a conditional's two values: the one they agree on
+            got = {self.chain(mod, f, tuple(x.split("\x1f")), depth + 1, self_mods=self_mods) for x in held[7:].split("\x1c")}
+            return got.pop() if len(got) == 1 else None
         if held.startswith("oneof:"):  # what every site hands a QML property, each read where it is handed
             got = set()
             for alt in held[6:].split("\x1c"):
@@ -1194,6 +1206,8 @@ class Types:
     def first(self, mod, f, seg: str, depth: int, self_mods=None):
         p = self.p
         fm = self._file_mod(mod)
+        if seg == "new this()" and fm.file.endswith(_JS_EXTS) and (own_ := self_mods or self.own_class(mod, f)):
+            return ("inst", tuple(own_), True)  # `new this(first)` in a static method: an instance of the class
         if seg in ("this", "self", "$this", "Self", "static"):
             own = self_mods or self.own_class(mod, f)
             if not own and f is not None and f.bound.get(seg, "").startswith("mod:"):
@@ -1299,8 +1313,17 @@ class Types:
             return ("ns", (), True)
         if f is not None and self.line and f"{seg}@{self.line}" in f.bound:  # a binding of that line only (a match arm)
             return self.held(mod, f, f.bound[f"{seg}@{self.line}"], depth + 1, self_mods)
+        if f is not None and seg not in f.bound and fm.file.endswith(_JS_EXTS) and re.match(
+                rf"[^{{]*?\(\s*(?:[^()]*,\s*)?\.\.\.{re.escape(seg)}\s*(?::[^()]*)?\)", f.code):
+            return EXT  # `concat(first, ...targets)`: a rest parameter is an Array
         if f is not None:
             held = f.bound.get(seg)
+            if self.line and fm.file.endswith(_JS_EXTS) and any(k.startswith(seg + "\0from") for k in f.bound):
+                # reassigned at the declaration's level before this line: the latest such value
+                after = [(int(k.split("\0from")[1]), v) for k, v in f.bound.items() if k.startswith(seg + "\0from")]
+                after = [x for x in after if x[0] < self.line]
+                if after:
+                    held = max(after)[1]
             if held and held.startswith("lam:") and self.line and fm.file.endswith(_JS_EXTS) and \
                     (seg in fm.imported or seg in fm.bound or seg in fm.aliases) and \
                     any(k.startswith(seg + "@") for k in f.bound):
@@ -1423,6 +1446,61 @@ class Types:
         if seg in _JS_GLOBALS and fm.file.endswith(_JS_EXTS):
             return EXT  # `console`, `window`, `document`: the runtime's (no project name took it)
         return self._rb_named(mod, seg)
+
+    def _ts_factory_member(self, mn: str, name: str) -> list:
+        """TS: `export interface $constructor { init(...) }` beside `export function
+        $constructor(...)` that builds its values: the function the factory attaches as
+        that member (`Object.defineProperty(_, "init", { value: init })`, `_.init = init`)."""
+        m = self.p.modules.get(mn)
+        if m is None or m.kind != "interface" or not m.owner or not m.file.endswith(_JS_EXTS[:-1]):
+            return []
+        own = self._ts_initializer_member(m, name)
+        if own is not None:
+            return [own]
+        fac = self.p.funcs.get(f"{m.owner}.{mn.rsplit('.', 1)[-1]}")
+        raw = "\n".join(self.p.modules[m.owner].raw[fac.start - 1:fac.end]) if fac is not None else ""
+        if fac is None or not re.search(rf"""defineProperty\(\s*[\w$]+\s*,\s*["']{re.escape(name)}["']\s*,\s*\{{\s*value\s*:\s*{re.escape(name)}\b"""
+                                         rf"|[\w$]+\.{re.escape(name)}\s*=\s*{re.escape(name)}\s*;", raw):  # (strings blanked in the code)
+            return []
+        return [g for g in self.p.by_name.get(name, ()) if g.file == fac.file and fac.start < g.start <= fac.end][:1]
+
+    def _ts_initializer_member(self, m, name: str):
+        """`export const ZodType = core.$constructor("ZodType", (inst, def) => {
+        inst.safeParse = (data) => ...` beside `export interface ZodType`: the
+        function the initializer stores as that member, or None."""
+        idx = self.cache.get(("\0tsinit", m.owner))
+        if idx is None:
+            idx = self.cache[("\0tsinit", m.owner)] = {}
+            fm = self.p.modules[m.owner]
+            raw = fm.raw
+            heads = [i for i, ln in enumerate(raw) if re.match(r"(?:export\s+)?(?:const|let|var|function|class|interface|type)\b", ln)]
+            for k, i in enumerate(heads):
+                dm = re.match(r"(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\b[^=]*=", raw[i])
+                if not dm:
+                    continue
+                end = heads[k + 1] if k + 1 < len(heads) else len(raw)
+                for g in fm.funcs:
+                    if i < g.start <= end and 0 < g.start <= len(raw) and re.match(
+                            rf"\s*(?:inst\.{re.escape(g.name)}\s*=|(?:async\s+)?\*?\s*{re.escape(g.name)}\s*(?:\(|:\s*(?:async\s+)?function\b))",
+                            raw[g.start - 1]):  # (`inst.check = ...`, or a member of the prototype object it is given)
+                        idx.setdefault((dm.group(1), g.name), g)
+        return idx.get((m.name.rsplit(".", 1)[-1], name))
+
+    def _ts_value(self, mods, seg: str, depth: int):
+        """TS: `core.$ZodBase64` read as a value, where the module declares both an
+        interface and a `const` of that name (`export interface $ZodBase64 ...`,
+        `export const $ZodBase64: ... = $constructor(...)`): the const's value."""
+        from .core import _defining_module
+        for mn in mods:
+            dm = _defining_module(self.p, mn, seg)
+            if not dm.endswith("." + seg) or self.p.modules[dm].kind not in ("interface", "type"):
+                continue
+            fm = dm[:-len(seg) - 1]
+            top = self.p.funcs.get(fm + ".<top>")
+            held = self.p.modules[fm].bound.get(seg) or (top.bound.get(seg) if top else None)
+            if held and held.startswith("expr:"):
+                return self.held(self.p.modules[fm], top, held, depth + 1)
+        return None
 
     def yielded(self, g, depth: int):
         """Ruby: the value a method yields to its block (`yield conn`, `block.call(x)`, or
@@ -1757,6 +1835,8 @@ class Types:
             return cur
         if seg in ("[]", "(...)"):
             return None
+        if seg == "constructor" and kind == "inst" and mod.file.endswith(_JS_EXTS):
+            return ("static", mods, exact)  # `headers.constructor.accessor(...)`: the class itself
         if kind == "ns":  # a QML module's namespace: `KDEConnect.Type`
             name = seg[:-2] if seg.endswith("()") else seg
             if mod.file.endswith(_C_EXTS):
@@ -1836,6 +1916,10 @@ class Types:
                     return EXT
             return None
         # a field / property / nested type
+        if kind == "static" and mod.file.endswith(_JS_EXTS) and seg[:1] not in "(<[" and depth < _MAX:
+            val = self._ts_value(mods, seg, depth)
+            if val is not None:
+                return val
         if kind == "static":
             inner = [f"{mn}.{seg}" for mn in mods if f"{mn}.{seg}" in self.p.modules and self._nested(f"{mn}.{seg}")] \
                 or self._py_classes(mods, seg)
