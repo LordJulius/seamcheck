@@ -30,6 +30,8 @@ _JS = [
                rf"(?:function[ \t]*\*?[ \t]*\(|\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=\n]+?)?=>|{_ID}[ \t]*=>)", re.M),
     # `module.exports.request = (req) =>`, `exports.parse = s =>`: an export's arrow function
     re.compile(rf"^[ \t]*(?:module\.)?exports\.({_ID})[ \t]*=[ \t]*(?:async[ \t]+)?(?:\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=\n]+?)?=>|{_ID}[ \t]*=>)", re.M),
+    # `ky.create = (newDefaults) => createInstance(...)`: an arrow stored as a property (named by it)
+    re.compile(rf"^[ \t]*(?!this\.)(?:{_ID}\.)+({_ID})[ \t]*=[ \t]*(?:async[ \t]+)?(?:\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=\n]+?)?=>|{_ID}[ \t]*=>)", re.M),
     # `this.use = (arg, ...handlers) => {` in a constructor: a member of the class
     re.compile(rf"^[ \t]*this\.({_ID})[ \t]*=[ \t]*(?:async[ \t]+)?(?:\((?:[^()]|\([^()]*\))*\)[ \t]*(?::[^=\n]+?)?=>|{_ID}[ \t]*=>)", re.M),
     # (the annotation may be a function type: `const mergePath: (...p: string[]) => string = (`; parameters
@@ -223,6 +225,11 @@ def _typed(tk: str, text: str) -> list[tuple[str, str]]:
     if tk == "js":
         out = [(m.group(1), t) for pat in (_TS_TYPED, _TS_NEW) for m in pat.finditer(text)
                if (t := type_name(m.group(2)) if "<" in m.group(2) else m.group(2))]  # (`Router<string>`: a Router)
+        have = {n for n, _ in out}
+        # `const server = express() as ExtendedHttpTestServer;`: the cast states its type
+        out += [(m.group(1), m.group(2)) for m in re.finditer(
+            r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=[^;\n]*?\sas\s+([A-Z][\w$.]*)\s*;?[ \t]*$", text, re.M)
+            if m.group(1) not in have]
         have = {n for n, _ in out}
         # `(s: string)`, `cells: string[]`, `n?: number`: the runtime's String / Array / Number
         out += [(m.group(1), "Array" if m.group(3) else _TS_PRIM[m.group(2)]) for m in _TS_PRIM_TYPED.finditer(text)
@@ -2381,6 +2388,17 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             f.ns = "::".join(path_)
         if fam == "js":
             _pack_params(f)
+            # `new ReadableStream({ start(controller) {...} })`: an options object's method gets what that
+            # class hands it (a library's: its values; a project class's: unknown)
+            ob_ = code.rfind("{", 0, npos)
+            nm_ = re.search(r"\bnew\s+([A-Za-z_$][\w$.]*)\s*(?:<[^()]*>)?\s*\(\s*$", code[max(0, ob_ - 200):ob_]) if ob_ >= 0 else None
+            if nm_ and lambdas.matching(code, ob_) > npos and not re.search(r"[;{}]", code[ob_ + 1:npos]):
+                pk_ = code.find("(", npos)
+                pe_ = lambdas.matching(code, pk_) if pk_ >= 0 else -1
+                for prm in (lambdas.split_top(code[pk_ + 1:pe_]) if pe_ > 0 else []):
+                    pm_ = re.match(r"\s*([A-Za-z_$][\w$]*)\s*[,:=)]?", prm)
+                    if pm_ and pm_.group(1) not in f.bound:
+                        f.bound[pm_.group(1)] = f"expr:new {nm_.group(1).split('.')[-1]}()\x1f(...)"
         sig_end = bpos if bpos >= 0 else min(len(code), npos + 400)
         sig = code[npos + len(name):sig_end]
         if tk in ("swift", "php", "kotlin", "jvm", "rust", "go", "js", "cpp") and "\n" in sig:

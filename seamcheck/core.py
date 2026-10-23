@@ -618,7 +618,7 @@ def _workspace_entry(project: Project, spec: str, cache: dict) -> str:
     for name, (d, main) in ws.items():
         if spec == name:
             entry = os.path.normpath(os.path.join(d, main)) if main and not main.startswith(("dist", "./dist", "build", "./build", "lib/", "./lib/")) else ""
-            for cand in ([entry] if entry else []) + [os.path.join(d, "src/index"), os.path.join(d, "index")]:
+            for cand in ([entry] if entry else []) + [os.path.join(d, x) for x in ("src/index", "source/index", "lib/index", "index")]:
                 if re.sub(r"\.(?:[mc]?[jt]sx?)$", "", cand) in project.modules:
                     return cand
             return os.path.join(d, "src/index")
@@ -1877,6 +1877,13 @@ def _js_plain_function(project: Project, g: Func) -> bool:
     return g.name not in stored[m.name]
 
 
+def _js_property_fn(project: Project, g: Func) -> bool:
+    """A JS function stored as a property (`req.setTimeout = () => {}`): never called bare."""
+    m = project.modules.get(g.module)
+    return bool(m and 0 < g.start <= len(m.raw) and g.file.endswith((".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"))
+                and re.match(rf"^\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.{re.escape(g.name)}\s*=", m.raw[g.start - 1]))
+
+
 def walk_order(project: Project) -> list[Func]:
     """The order calls are resolved in (and the trace written): innermost
     function first, so a call in a callback or a nested class's method is
@@ -2296,7 +2303,8 @@ def _build_edges(project: Project) -> None:
                     continue
             if not targets and not q and not c.chain and mod is not None and f.file.endswith(infer._JS_EXTS) and not any(
                     g.kind != "top" and _family(g.file) & _family(f.file) and not project.modules[g.module].owner
-                    and project.modules[g.module].kind not in ("class", "interface") for g in project.by_name.get(c.name, ())):
+                    and project.modules[g.module].kind not in ("class", "interface") and not _js_property_fn(project, g)
+                    for g in project.by_name.get(c.name, ())):
                 _nothing(project, f, c)  # `setTimeout(...)`: a JS method needs its receiver; no free function has the name
                 continue
             if not targets:

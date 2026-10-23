@@ -31,7 +31,9 @@ DEFAULT_TESTS = ["test/**", "tests/**", "**/test/**", "**/tests/**", "**/__tests
                  "**/src/androidTest/**", "**/*.test.*", "**/*.spec.*", "**/*_test.*", "**/test_*.py",
                  "**/*Test.kt", "**/*Test.java", "**/*_spec.rb", "**/spec/**/*.rb",
                  "**/test_*.rb", "Tests/**", "**/Tests/**", "**/*Tests.swift", "**/*Tests.kt", "**/*Tests.java",
-                 "**/*.Tests/**", "**/*.Specs/**", "**/*Tests.cs", "**/*Test.cs"]
+                 "**/*.Tests/**", "**/*.Specs/**", "**/*Tests.cs", "**/*Test.cs",
+                 "test-helpers/**", "**/test-helpers/**", "test_helpers/**", "**/test_helpers/**",
+                 "test-utils/**", "**/test-utils/**", "testutils/**", "**/testutils/**"]
 DEFAULT_CORPUS = ["scripts/**", "config/**", "deploy/**", "priv/**", "rel/**", "bin/**", "tools/**", "Makefile",
                   "justfile", "*.toml", "*.json", "*.yml", "*.yaml", ".github/**", "**/*.service", "**/*.sh",
                   "**/*.tscn", "**/*.tres", "**/*.heex", "**/*.eex", "**/*.html", "**/AndroidManifest.xml",
