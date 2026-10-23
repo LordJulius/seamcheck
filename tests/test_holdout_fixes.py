@@ -159,3 +159,65 @@ class PythonHoldoutFixes(unittest.TestCase):
         self.assertIn(("app/core.Group.command", True), {(d, e) for d, _l, e in p.edges.get("tests/test_cli.test_group", [])})
         self.assertIn(("app/core.ConsoleOptions.update_width", True), {(d, e) for d, _l, e in p.edges.get("app/render.render", [])})
         self.assertIn(("app/core.Group.command", True), {(d, e) for d, _l, e in p.edges.get("app/render.<top>", [])})
+
+
+RS = {
+    "Cargo.toml": "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    "src/lib.rs": """pub mod arg;
+pub mod filter;
+""",
+    "src/arg.rs": """pub struct Arg;
+
+impl Arg {
+    pub fn new(name: &str) -> Self {
+        Arg
+    }
+    pub fn action(self, a: u8) -> Self {
+        self
+    }
+}
+
+#[macro_export]
+macro_rules! arg {
+    ($name:ident) => {
+        $crate::arg::Arg::new(stringify!($name))
+    };
+}
+""",
+    "src/filter.rs": """pub struct TimeFilter;
+
+impl TimeFilter {
+    pub fn after(s: &str) -> Option<Self> {
+        Some(TimeFilter)
+    }
+    pub fn applies_to(&self, t: u64) -> bool {
+        true
+    }
+}
+""",
+    "tests/builder/main.rs": "mod utils;\nmod opts;\n",
+    "tests/builder/utils.rs": "pub fn assert_output(s: &str) {}\n",
+    "tests/derive/main.rs": "mod utils;\n",
+    "tests/derive/utils.rs": "pub fn assert_output(s: &str) {}\n",
+    "tests/builder/opts.rs": """use crate::utils;
+use app::filter::TimeFilter;
+
+fn check() {
+    utils::assert_output("x");
+    let a = arg!(x).action(1);
+    TimeFilter::after("1s").unwrap().applies_to(3);
+    let f = make();
+    let f = f.into_thing();
+}
+""",
+}
+
+
+class RustHoldoutFixes(unittest.TestCase):
+    def test_crate_local_modules_macro_values_and_option_self(self):
+        p = load(RS)
+        got = {(d, e) for d, _l, e in p.edges.get("tests/builder/opts.check", [])}
+        self.assertIn(("tests/builder/utils.assert_output", True), got)
+        self.assertNotIn("tests/derive/utils.assert_output", {d for d, _ in got})
+        self.assertIn(("src/arg.action", True), got)
+        self.assertIn(("src/filter.TimeFilter.applies_to", True), got)
