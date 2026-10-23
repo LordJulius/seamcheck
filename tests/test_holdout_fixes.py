@@ -537,3 +537,16 @@ class KotlinWhenArrowFixes(unittest.TestCase):
         p = load(KT)
         got = {(d, e) for d, _l, e in p.edges.get("src/Reader.next", [])}
         self.assertIn(("src/Reader.nextQuoted", True), got)
+
+
+RB = {
+    "lib/rack/response.rb": "module Rack\n  class Response\n    def write(s)\n      s\n    end\n  end\nend\n",
+    "test/spec_pipe.rb": "describe 'x' do\n  it 'writes' do\n    rd, wr = IO.pipe\n    wr.write('a')\n  end\nend\n",
+}
+
+
+class RubyMultiAssignFixes(unittest.TestCase):
+    def test_multiple_assignment_from_a_library_constant(self):
+        p = load(RB)
+        got = {d for es in p.edges.values() for d, _l, _e in es}
+        self.assertNotIn("lib/rack/response.Rack::Response.write", got)

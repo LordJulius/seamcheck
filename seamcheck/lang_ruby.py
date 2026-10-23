@@ -908,6 +908,10 @@ def _collect(f: Func, b, code: str, starts: list[int], idx: list[int], lines: li
             ch = expression(code, a + im.end(), is_local)
             if ch and not (ch[0][:1].islower() and not ch[0].endswith("()") and ch[0] not in f.bound):
                 f.bound.setdefault(im.group(1), "expr:" + "\x1f".join(ch))
+        mm_ = re.match(r"\s*([a-z_]\w*(?:\s*,\s*\*?[a-z_]\w*)+)\s*=\s*((?:::)?[A-Z]\w*(?:::[A-Z]\w*)*)\s*[.(]", ln)
+        if mm_:  # `rd, wr = IO.pipe`: each an element of a constant's value (kept if the constant is a library's)
+            for nm in re.findall(r"[a-z_]\w*", mm_.group(1)):
+                f.bound.setdefault(nm, "lib:" + mm_.group(2).lstrip(":"))
         if f.kind != "top":
             am = _ASSIGN.match(ln, len(ln) - len(lead))
             if am and not re.match(r"\s*(?:\|\||&&|\*\*|<<|>>|[-+*/%|&^])=", ln[am.end(1):]):
