@@ -12,7 +12,9 @@ truth that runs offline on the same checkout.
 
 A call site is (file, line, callee name). Reported:
   agree      seamcheck's exact edges at a site CodeQL resolved: all among CodeQL's targets
-  disagree   an exact edge CodeQL does not have at a site CodeQL resolved
+  wider      CodeQL's target and more: overrides the receiver's declared type allows, where
+             CodeQL's data flow saw the one runtime class
+  wrong      no target in common with CodeQL
   covered    CodeQL's sites where seamcheck has an exact edge to a CodeQL target
   sc-only    sites seamcheck calls exact that CodeQL left unresolved (sampled: who is right?)
   by-name    what a name-only tool (grep, ast-grep, Semgrep) offers at CodeQL's sites:
@@ -22,6 +24,7 @@ import collections
 import csv
 import os
 import random
+import re
 import subprocess
 import sys
 import time
@@ -69,11 +72,18 @@ def _run_codeql(root: str, lang: str, codeql: str, work: str) -> tuple[str, floa
     return out, t1 - t0, t2 - t1
 
 
-def _same(g, target) -> bool:
+def _same(g, target, raw=None) -> bool:
     """A seamcheck function and a CodeQL callee location are one function
-    (CodeQL places a decorated Python def at its `def`, seamcheck may start at the decorator)."""
+    (CodeQL places a decorated Python def at its `def`, seamcheck may start at
+    the decorator). seamcheck gives a method's overloads one id (Java's three
+    `toJson`): CodeQL's overload counts as that function when its line
+    declares the same name in the same file."""
     tf, tl = target
-    return g.file == tf and (g.start <= tl <= max(g.end, g.start) or abs(g.start - tl) <= 3)
+    if g.file != tf:
+        return False
+    if g.start <= tl <= max(g.end, g.start) or abs(g.start - tl) <= 3:
+        return True
+    return raw is not None and 0 < tl <= len(raw) and re.search(rf"\b{re.escape(g.name)}\s*[(<]", raw[tl - 1]) is not None
 
 
 def main() -> None:
@@ -105,17 +115,26 @@ def main() -> None:
                 continue
             (exact if ex else guess)[(f.file, ln, g.name)].add(g.id)
     files = {k[0] for k in cq}
-    agree = disagree = covered = 0
+    raws = {}
+
+    def same(g, t):
+        if t[0] not in raws:
+            mods = p.by_file.get(t[0]) or []
+            raws[t[0]] = mods[0].raw if mods else None
+        return _same(g, t, raws[t[0]])
+    agree = disagree = covered = wider = 0
     bad, only = [], []
     for site, targets in cq.items():
         got = [p.funcs[i] for i in exact.get(site, ())]
         if got:
-            if all(any(_same(g, t) for t in targets) for g in got):
+            if all(any(same(g, t) for t in targets) for g in got):
                 agree += 1
+            elif any(same(g, t) for g in got for t in targets):
+                wider += 1  # CodeQL's callee and overrides of it: the receiver's declared type allows them
             else:
                 disagree += 1
                 bad.append((site, sorted(g.id for g in got), sorted(targets)))
-            if any(_same(g, t) for g in got for t in targets):
+            if any(same(g, t) for g in got for t in targets):
                 covered += 1
     for site, got in exact.items():
         if site[0] in files and site not in cq:
@@ -123,16 +142,18 @@ def main() -> None:
     names = collections.Counter(g.name for g in p.funcs.values() if g.kind != "top")
     ambiguous = sum(1 for (_f, _l, n) in cq if names[n] > 1)
     mean = sum(names[n] for (_f, _l, n) in cq) / max(len(cq), 1)
-    both = agree + disagree
+    both = agree + disagree + wider
     print(f"{os.path.basename(root.rstrip('/'))}: CodeQL resolved {len(cq)} call sites; seamcheck exact at {len(exact)} sites")
     print(f"  time       {timing}")
     print(f"  agree      {agree}/{both} = {100 * agree / max(both, 1):.1f}% of the sites both resolved")
+    print(f"  wider      {wider}/{both} = {100 * wider / max(both, 1):.1f}%: CodeQL's callee plus overrides the declared type allows")
+    print(f"  wrong      {disagree}/{both} = {100 * disagree / max(both, 1):.1f}%: no callee in common")
     print(f"  covered    {covered}/{len(cq)} = {100 * covered / max(len(cq), 1):.1f}% of CodeQL's sites")
     print(f"  sc-only    {len(only)} exact sites CodeQL left unresolved")
     print(f"  by-name    {ambiguous}/{len(cq)} = {100 * ambiguous / max(len(cq), 1):.1f}% of CodeQL's sites name a function "
           f"defined more than once (mean {mean:.1f} definitions per name)")
     missed = [(site, sorted(guess.get(site, ()))) for site, targets in cq.items()
-              if not any(_same(p.funcs[i], t) for i in exact.get(site, ()) for t in targets)]
+              if not any(same(p.funcs[i], t) for i in exact.get(site, ()) for t in targets)]
     kinds = collections.Counter("guess" if g else "none" for _s, g in missed)
     print(f"  missed     {len(missed)} of CodeQL's sites: seamcheck guessed at {kinds['guess']}, "
           f"had no edge at {kinds['none']}")

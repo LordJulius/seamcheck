@@ -1245,6 +1245,20 @@ def _family(rel: str) -> set[str]:
     return _FAMILIES.get(ext, {ext})
 
 
+_EXPLICIT_RECEIVER = (".go", ".rs", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".php")
+
+
+def _needs_receiver(project: Project, g: Func) -> bool:
+    """`g` is a method a call reaches only through a receiver (Go's `func (c *Command) X`,
+    Rust's `fn x(&self)`, a JS / TS / PHP class's method), not a free function."""
+    if g.file.endswith(".go"):
+        return bool(g.recv)
+    if g.file.endswith(".rs"):
+        return re.search(r"\(\s*(?:&\s*)?(?:'\w+\s+)?(?:mut\s+)?self\b", g.code.split("{", 1)[0]) is not None \
+            or bool(project.modules[g.module].owner)
+    return bool(project.modules[g.module].owner)
+
+
 def _scoped_language(rel: str, mod=None) -> bool:
     """A language where a bare name resolves only through the file's own
     definitions and imports. A plain .js script (a QML library, a browser
@@ -1734,7 +1748,11 @@ def _build_edges(project: Project) -> None:
                 # a bare call in a class: its own (or an inherited) method first;
                 # `Foo(...)` / `new Foo(...)` / `: Base(args)`: Foo's constructor
                 own = types.own_class(mod, f) if (mod.owner or mod.kind) else None
+                # (Go, Rust, JS/TS, PHP: a method needs its receiver, `c.Name()` / `self.x()` /
+                # `this.x()` / `$this->x()`; a bare `MarkFlagRequired(...)` in a method is the package's)
                 hits, on_type = types.method(own, c.name) if own else ([], False)
+                if f.file.endswith(_EXPLICIT_RECEIVER):
+                    hits = [g for g in hits if not _needs_receiver(project, g)]
                 if hits and on_type and len(hits) == 1:
                     targets = [(hits[0], True)]
                 elif c.name[:1].isupper() and not _in_scope(project, (project.modules.get(mod.owner, mod) if mod.owner else mod).name, c.name):
