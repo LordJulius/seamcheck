@@ -2307,6 +2307,12 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             if cm and cm.start() < e_:
                 e_ = cm.start()
         cpp_ns.append((nm_m.end() - 1, e_, nm_m.group(1) or ""))
+    # `SPDLOG_NAMESPACE_BEGIN` ... `SPDLOG_NAMESPACE_END`, `FMT_BEGIN_NAMESPACE`: a macro opening the
+    # library's namespace, named by the macro's prefix (spdlog, fmt)
+    for bm_ in re.finditer(r"^[ \t]*([A-Z][A-Z0-9]*)_(?:NAMESPACE_BEGIN|BEGIN_NAMESPACE)\b[ \t]*$", code, re.M) if cpp else ():
+        em_ = re.compile(rf"^[ \t]*{bm_.group(1)}_(?:NAMESPACE_END|END_NAMESPACE)\b", re.M).search(code, bm_.end())
+        cpp_ns.append((bm_.end(), em_.start() if em_ else len(code), bm_.group(1).lower()))
+    cpp_ns.sort()
     for (hname, name), ss in sorted(spans.items(), key=lambda kv: kv[1][0]):
         a_, b_, npos, bpos = max(ss, key=lambda s_: s_[1] - s_[0])
         home, cls = owners[(hname, name)]

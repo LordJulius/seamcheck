@@ -135,7 +135,8 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                     arity = "`" + str(1 + _top_commas(code[g + 1:j - 1]))
                     j = _skip_back_ws(code, g)
             s = _ident_back(code, j)
-            if s < j and code[s:j] in ("return", "await", "throw", "yield", "case", "in", "else", "and", "or", "not"):
+            if s < j and code[s:j] in ("return", "await", "throw", "yield", "case", "in", "else", "and", "or", "not") \
+                    and code[:s].rstrip()[-1:] not in (".", ":", ">", "$"):  # (`callback.await()` is a method)
                 s = j  # `return (x ?? y).ToString()`: a keyword before a parenthesized expression, no call
             if s == j and j > 1 and code[j - 1] == "!" and code[j - 2] in _IDENT_CH and code[j - 2:j] != "!!":
                 ms = _ident_back(code, j - 1)  # Rust `arg!(...)`: a macro's value starts the chain
@@ -158,6 +159,11 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                     segs.append(f"<as:{cast.group(1)}>")  # `($Timer as Timer).start()`: a Timer
                 elif aw:
                     segs.append(aw.group(1))  # `(await res).toString()`: what res holds
+                elif (nc_ := re.match(r"^[^?()]*(?:\([^()]*\)[^?()]*)*\?\?\s*", inner)) and \
+                        re.fullmatch(r"[\w$.]+(?:\(\))?\s*", inner[nc_.end():]) and (ich := expression(inner, nc_.end())):
+                    segs.extend(reversed(ich))  # `(responder ?? self).downloader(...)`: the fallback's type
+                elif (awc := re.match(r"^\s*(?:await|try[?!]?)\s+", inner)) and (ich := expression(inner, awc.end())):
+                    segs.extend(reversed(ich))  # `(await conn.QueryAsync<T>(sql)).Single()`: what the call gives
                 elif re.match(r"^\s*-?[\w.]+\s*(?:\.\.[.<=]|\.\.(?=\s*-?\w))\s*-?[\w.]+\s*$", inner):
                     segs.append("<range>")  # `(1...9).contains(x)`, `(0..<5).map`: a range
                 elif re.search(r"[-+*/%|^~]|<<|>>", inner) and not re.search(r"[A-Za-z_$][\w$]*\s*\(|\?|=|\b(?:as|new|await)\b|['\"`]", inner):

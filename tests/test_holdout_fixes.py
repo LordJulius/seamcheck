@@ -353,3 +353,25 @@ class CsHoldoutFixes2(unittest.TestCase):
         self.assertNotIn("src/Things.Item.ToString", names)  # `n.ToString()` on an int
         self.assertNotIn("src/Things.Item.Add", names)  # `statements` is a List<string>
         self.assertNotIn("tests/Spec.Other.Source.Source", names)  # its own nested Source has no constructor
+
+
+CPP2 = {
+    "include/lib/common.h": "#pragma once\n#include <vector>\n#define LIB_NAMESPACE_BEGIN namespace lib {\n#define LIB_NAMESPACE_END }\n"
+                            "LIB_NAMESPACE_BEGIN\nvoid drop(int n);\nLIB_NAMESPACE_END\n",
+    "include/lib/registry.h": "#pragma once\n#include <vector>\nnamespace lib {\nclass registry {\npublic:\n    void drop(int n);\n"
+                              "    void add(int n);\nprivate:\n    std::vector<int> items_;\n};\n}\n",
+    "include/lib/registry-inl.h": "#pragma once\n#include \"registry.h\"\nnamespace lib {\n"
+                                  "inline void registry::add(int n) { items_.push_back(n); }\ninline void registry::drop(int n) { }\n}\n",
+    "include/lib/common-inl.h": "#pragma once\n#include \"common.h\"\nLIB_NAMESPACE_BEGIN\ninline void drop(int n) { }\nLIB_NAMESPACE_END\n",
+    "include/lib/queue.h": "#pragma once\nnamespace lib {\nclass queue {\npublic:\n    void push_back(int n) { }\n};\n}\n",
+    "bench/main.cpp": "#include \"lib/common.h\"\nint main() {\n    lib::drop(1);\n    return 0;\n}\n",
+}
+
+
+class CppHoldoutFixes2(unittest.TestCase):
+    def test_inl_headers_see_their_fields_and_macro_namespaces(self):
+        p = load(CPP2)
+        add = {d for d, _l, _e in p.edges.get("include/lib/registry-inl.registry.add", [])}
+        self.assertNotIn("include/lib/queue.queue.push_back", add)  # `items_` is a std::vector
+        got = {(d, e) for d, _l, e in p.edges.get("bench/main.main", [])}
+        self.assertIn(("include/lib/common-inl.drop", True), got)
