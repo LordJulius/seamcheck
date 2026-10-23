@@ -1245,12 +1245,26 @@ def _family(rel: str) -> set[str]:
     return _FAMILIES.get(ext, {ext})
 
 
-def _scoped_language(rel: str) -> bool:
+def _scoped_language(rel: str, mod=None) -> bool:
     """A language where a bare name resolves only through the file's own
     definitions and imports. A plain .js script (a QML library, a browser
-    script) sees globals from anywhere, so it is not."""
-    return os.path.splitext(rel)[1] in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts", ".py", ".go", ".rs",
-                                        ".swift", ".php", ".rb", ".rake", ".ru")
+    script) sees globals from anywhere, so it is not; a CommonJS or ES
+    module .js file (`require(`, `module.exports`, `import`) is."""
+    ext = os.path.splitext(rel)[1]
+    if ext in (".js", ".jsx", ".mjs", ".cjs") and mod is not None:
+        fm = mod
+        hit = _MODULE_JS.get(fm.file)
+        if hit is None:
+            raw = "\n".join(fm.raw)
+            hit = _MODULE_JS[fm.file] = ext in (".mjs", ".cjs") or bool(re.search(
+                r"\brequire\s*\(\s*['\"]|\bmodule\.exports\b|^[ \t]*exports\.\w+\s*=|^[ \t]*(?:import|export)\b", raw, re.M)) \
+                and not re.search(r"^[ \t]*(?:global|globalThis|window)\.\w+\s*=", raw, re.M)
+        return hit
+    return ext in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts", ".py", ".go", ".rs",
+                   ".swift", ".php", ".rb", ".rake", ".ru")
+
+
+_MODULE_JS: dict[str, bool] = {}
 
 
 def _implicit_member(project: Project, types, mod, f: Func, c: Call):
@@ -1597,6 +1611,7 @@ def _link(project: Project, precise: bool, use_cache: bool) -> None:
 def _build_edges(project: Project) -> None:
     _resolve_imports(project)
     _locals_cache.clear()
+    _MODULE_JS.clear()
     groups = _groups(project)
     scope_cache: dict = {}
     ext_cache: dict = {}
@@ -1826,7 +1841,7 @@ def _build_edges(project: Project) -> None:
                          and not (mod and re.match(rf"^\s*{re.escape(c.name)}\s*:", mod.raw[g.start - 1]))]  # (not `key: () =>`)
                 if len(inner) == 1:
                     targets = [(inner[0], True)]
-                elif not inner and _scoped_language(f.file):
+                elif not inner and _scoped_language(f.file, mod):
                     if f.file.endswith(_PARAM_FLOW_EXTS) and c.name in _param_names(f):
                         pending.append((f, c))  # a parameter: what the callers pass (after this pass)
                     _nothing(project, f, c)  # a closure or a parameter: no project function by that name
@@ -1864,7 +1879,7 @@ def _build_edges(project: Project) -> None:
                 if not targets and c.name in mod.external:
                     _nothing(project, f, c)
                     continue
-                if not targets and _scoped_language(f.file) and c.name not in mod.imported:
+                if not targets and _scoped_language(f.file, mod) and c.name not in mod.imported:
                     # Elixir, Kotlin, Java, an ES module: a bare call reaches only
                     # what is local, imported or in its package. Nothing in scope
                     # means a library or the language's own (Enum, Compose's Row,
@@ -1872,6 +1887,14 @@ def _build_edges(project: Project) -> None:
                     # project function of that name.
                     _nothing(project, f, c)
                     continue
+            if not targets and q and f.file.endswith(".py") and c.name[:1].isupper() and mod is not None \
+                    and (cls := _py_class(project, mod, f"{q}.{c.name}")):
+                # `sessions.Session()`: a class through its module builds one, so its __init__ runs
+                t = _lookup(project, cls, "__init__")
+                if t is None:
+                    _nothing(project, f, c)  # (a class with no __init__ of its own: no project function runs)
+                    continue
+                targets = [(t, True)]
             if not targets and q and _MODULE_Q.match(q) and q != "Self":
                 # A qualifier that names a module (`Enum.reject`, `Repo.rollback`)
                 # and misses: the function lives outside the project (or the alias
