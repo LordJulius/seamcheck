@@ -491,8 +491,8 @@ def _dirty(arg: str, source, clean, tainted: set) -> bool:
         return False
     if clean:
         call, method = clean
-        if method.search(arg):
-            return False
+        if re.search(rf"{method.pattern}\s*(?:\([^()]*\))?\s*$", arg.strip()):
+            return False  # `params[:id].to_i` (the whole value), not `"cp #{f} #{Time.now.to_i}"`
         for m in reversed(list(call.finditer(arg))):
             d, j = 0, m.end() - 1
             while j < len(arg):
@@ -518,6 +518,15 @@ def _carries(project, f, c, source, clean, tainted: set, sink: bool = False) -> 
     if not args:
         return False
     first = args[0].strip()
+    cm_ = re.fullmatch(r"([A-Za-z_$][\w$]*)\(\s*\)", first)
+    if sink and cm_ and m is not None:
+        # `find(searchCriteria())`: a closure of this function's, built from its tainted names
+        # (`const searchCriteria = () => ({ $where: `... ${threshold}` })`)
+        for g in project.by_name.get(cm_.group(1), ()):
+            if g.file == f.file and f.start < g.start <= f.end and g.id != f.id:
+                body = "\n".join(m.raw[g.start:g.end])  # (after its head: the value it builds)
+                if any(_names(t, body) for t in tainted) or source.search(body):
+                    return True
     if sink and f.file.endswith(".rb") and re.match(r":?\w+\s*(?::(?!:)|=>)", first):
         return False  # Rails: `where(id: params[:id])`, a bound value
     if sink and not _SHELLS.match(first) and (_LITERAL.match(first) or re.match(r"""^[fbru]*["'`]/(?!/)""", first)
