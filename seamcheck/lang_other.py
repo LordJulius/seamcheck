@@ -608,7 +608,7 @@ def _py_types(f: Func, lines: list[str], a: int, b: int, test_file: bool, fixtur
     for nm_, held in _assignments("py", body):
         if nm_ != f.name or held.split("\x1f")[0] not in (f"expr:{f.name}", f"expr:{f.name}()"):  # (`app = create_app()` in `def app()`)
             f.bound.setdefault(nm_, held)
-    for m in re.finditer(r"\bwith[ \t]+((?:[^:\n]|\([^()]*\))+?)\s+as[ \t]+([A-Za-z_]\w*)[ \t]*[:,)]", body):
+    for m in re.finditer(r"\bwith[ \t]+((?:[^:\n()]|\((?:[^()]|\([^()]*\))*\))+?)\s+as[ \t]+([A-Za-z_]\w*)[ \t]*[:,)]", body):
         ch = expression(m.group(1) + "\n", 0)  # `with httpx.Client() as client:` (a context manager gives itself)
         if ch:
             f.bound.setdefault(m.group(2), "expr:" + "\x1f".join(ch))

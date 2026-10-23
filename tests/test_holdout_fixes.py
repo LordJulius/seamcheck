@@ -841,3 +841,12 @@ class LocalImportAndShorthandFixes(unittest.TestCase):
         self.assertEqual([("pkg/_impl.get_pager_file", 3, True)], p.edges["pkg/termui.get_pager_file"])
         self.assertEqual([("pkg/termui.get_pager_file", 6, True)], p.edges["pkg/termui.again"])
         self.assertFalse(p.edges.get("a.<top>"))  # (`set(headerValue) {` defines, calls nothing)
+
+
+class PyMultilineWith(unittest.TestCase):
+    def test_with_over_lines_binds_its_target(self):
+        p = load({"pkg/__init__.py": "", "pkg/c.py": "class Client:\n    def __init__(self, transport=None):\n        pass\n"
+                                                    "    def get(self, url):\n        return url\n\ndef mock(app):\n    return app\n",
+                  "tests/test_x.py": "from pkg.c import Client, mock\n\ndef test_a():\n    with Client(\n        transport=mock(1)\n"
+                                     "    ) as http:\n        http.get('/')\n"})
+        self.assertIn(("pkg/c.Client.get", 7, True), p.edges["tests/test_x.test_a"])
