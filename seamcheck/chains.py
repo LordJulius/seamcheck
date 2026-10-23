@@ -120,6 +120,9 @@ def receiver(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
                 i = j
                 ch = code[i - 1]
                 closure_call = ch != ")"  # (`xs.map { ... }`: called with the closure alone)
+        if ch == "/" and re.search(r"(?:^|[=(,:!&|?{};\s])/(?:[^/\\\n]|\\.)+/[a-z]*$", code[max(0, i - 300):i]):
+            segs.append("<literal>")  # `/^0[0-9]+$/.test(x)`: a regex literal, the runtime's RegExp
+            break
         if ch == ")":
             k = _match_back(code, i, ")", "(")
             if k < 0:

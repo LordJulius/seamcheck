@@ -641,6 +641,9 @@ class Types:
             if v[0] == "ext":
                 hits = (self.ext_fns.get((v[1][0], name)) or self.ext_fns.get((v[1][0].split("`")[0], name), [])) if v[1] else []
                 shift = 1  # (C#: `this T x` is the first parameter)
+                if not hits and mod.file.endswith(_JS_EXTS[:-1]):
+                    self.cache[key] = EXT  # `http.createServer((req, res) => ...)`: what a library hands its callback
+                    return EXT
             elif v[0] == "static":
                 hits = [h for mn in v[1] for h in _in_scope(self.p, mn, name)] or self.method(list(v[1]), name)[0]
             elif v[0] == "inst":
@@ -1078,6 +1081,10 @@ class Types:
             # RSpec: the class the (outermost) `describe Foo do` names
             dm = re.search(r"^\s*(?:RSpec\.)?describe\s*\(?\s*((?:::)?[A-Z][\w:]*)", "\n".join(fm.raw), re.M)
             return self.chain(fm, None, (dm.group(1).lstrip(":"),), depth + 1) if dm else None
+        if seg.split("(")[0].removeprefix("new ") in _JS_BUILTINS and fm.file.endswith(_JS_EXTS) \
+                and seg.split("(")[0].removeprefix("new ") not in self.by_type and seg.split("(")[0] not in fm.imported \
+                and not (f is not None and seg in f.bound):
+            return EXT  # `Buffer.from(x)`, `new URL(u)`, `JSON.parse(s)`: the runtime's
         if seg.endswith("!()") and fm.file.endswith(".rs"):
             return self._rs_macro_value(fm, seg[:-3])
         if seg.endswith("()"):
@@ -1697,6 +1704,12 @@ _JS_EXTS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".qml"
 _JS_GLOBALS = {"console", "window", "document", "navigator", "localStorage", "sessionStorage", "globalThis",
                "location", "history", "process", "performance", "crypto",
                "vi", "jest", "expect", "cy"}  # (test runners' globals: vitest / jest `globals`, cypress)
+# JS / TS built-in objects and constructors (a value of one is the runtime's, unless the project declares the name)
+_JS_BUILTINS = {"Buffer", "URL", "URLSearchParams", "Promise", "Math", "JSON", "Object", "Array", "Date", "RegExp",
+                "Map", "Set", "WeakMap", "WeakSet", "Error", "TypeError", "RangeError", "Symbol", "Reflect", "Intl",
+                "Number", "String", "Boolean", "BigInt", "AbortController", "AbortSignal", "TextEncoder", "TextDecoder",
+                "Uint8Array", "ArrayBuffer", "DataView", "Proxy", "Atomics", "WebAssembly", "Blob", "FormData",
+                "ReadableStream", "WritableStream", "EventEmitter", "Function", "structuredClone"}
 _DOM_PROPS = {"classList", "style", "dataset"}
 _EXPLICIT_SELF = (".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".php")
 _PY_BUILTIN_NAMES = set(dir(__import__("builtins")))
