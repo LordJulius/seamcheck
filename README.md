@@ -250,6 +250,9 @@ Precision / recall, October 2026:
 \* below the true figure: sites CodeQL misses count against seamcheck. koa's
 `ctx.set(...)` reaches `response.set` through `delegates(proto, 'response')`;
 seamcheck follows it and CodeQL doesn't (10 of 10 sampled were right).
+In flask's tests `app` is a pytest fixture (`app.register_blueprint(bp)`,
+`@app.route("/")`), which seamcheck types and CodeQL doesn't: 15 of 15 of the
+sites only seamcheck has, sampled across three targets, were right.
 † Semgrep took about five minutes a question, so it answered only the first one
 or two targets per repo; its figures are over those, not the ten.
 
