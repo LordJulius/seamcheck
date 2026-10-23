@@ -240,6 +240,7 @@ _SW_TYPED = re.compile(r"(?:\b(?:let|var)\s+|[(,]\s*(?:[A-Za-z_]\w*\s+)?)([a-z_]
 _SW_NEW = re.compile(r"\b(?:let|var)\s+([a-z_]\w*)\s*=\s*(?:try[?!]?\s+|await\s+)*([A-Z]\w*)\s*\(")
 _PHP_TYPED = re.compile(r"(?:[(,]\s*|\b(?:public|private|protected|readonly)\s+)(?:(?:public|private|protected|readonly)\s+)*"
                         r"\??([A-Z\\][\\\w]*)\s+&?(?:\.\.\.)?(\$\w+)")
+_PHP_FIELD = re.compile(r"\b(?:public|private|protected)(?:\s+readonly|\s+static)*\s+\??\\?((?:[A-Za-z_]\w*\\)*[A-Za-z_]\w*)\s+\$([A-Za-z_]\w*)")
 _PHP_NEW = re.compile(r"(\$\w+)\s*=\s*new\s+([\\\w]+)")
 
 
@@ -1710,7 +1711,8 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
         code = re.sub(r"(?m)^[ \t]*#[ \t]*(?:pragma|region|endregion|nullable|if|elif|else|endif|define|undef|warning|error|line)\b[^\n]*",
                       lambda m: " " * len(m.group()), code)
     if ext in (".swift", ".kt", ".kts"):  # `default`, `is`: a quoted identifier is the identifier
-        code = re.sub(r"`([A-Za-z_]\w*)`", r" \1 ", code)
+        # (any characters: Kotlin's `-JsonUtf8Writer` reads as _JsonUtf8Writer, everywhere it is named)
+        code = re.sub(r"`([^`\n]+)`", lambda m: " " + re.sub(r"\W", "_", m.group(1)) + " ", code)
     raw, lines = text.split("\n"), code.split("\n")
     mod = Module(_modname(rel), rel, len(raw), raw, lines)
     line_start = [0]
@@ -2108,6 +2110,8 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                 pats_ = [] if inside[i] else [_KT_FIELD, _KT_NEW]
             elif fam == "js":
                 pats_ = [_TS_PARAM_FIELD] + ([] if inside[i] else [_TS_FIELD, _TS_NEW, _TS_CONST, _TS_INSTANCE_TYPE])
+            elif php:  # `private S3ClientInterface $client;` and a promoted `__construct(private Config $config)`
+                pats_ = [_PHP_FIELD]
             if not inside[i] and tk in ("cpp", "jvm", "kotlin", "js", "swift"):
                 for nm_, ty in _elements(tk, ln):  # `QHash<QString, Player*> m_players;`: its elements
                     got_fields.setdefault(nm_, set()).add(ty)
@@ -2178,6 +2182,12 @@ def _parse_brace(path: str, rel: str, text: str, res_of=None) -> list[Module]:
                         got_fields.setdefault(m.group(2), set()).add(t)
             for pat_ in pats_:
                 for m in pat_.finditer(ln):
+                    if pat_ is _PHP_FIELD:
+                        t_ = m.group(1).split("\\")[-1]
+                        if t_.lower() not in ("string", "int", "float", "bool", "array", "mixed", "callable", "iterable",
+                                              "object", "void", "null", "false", "true", "self", "static"):
+                            got_fields.setdefault(m.group(2).lstrip("$"), set()).add(t_)
+                        continue
                     t_ = type_name(m.group(2)) if "<" in m.group(2) else m.group(2)
                     if t_:
                         got_fields.setdefault(m.group(1), set()).add(t_)
