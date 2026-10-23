@@ -368,7 +368,8 @@ class Types:
         impls = []
         for mn in mods:
             m = self.p.modules.get(mn)
-            if m is not None and m.methods and m.file.endswith(".go") and name in m.methods:
+            if m is not None and m.methods and m.file.endswith(".go") and (name in m.methods or self._go_embeds_lib(m)):
+                # (`Write` of an interface embedding `http.ResponseWriter`: the implementing types' Write)
                 impls += [g for g in self._go_impls(m, name) if g not in impls]
             for sub in self.p.children.get(mn, ()):
                 got_ = None
@@ -411,6 +412,18 @@ class Types:
     def one_type(self, funcs) -> bool:
         """These functions are one type's (overloads, or its parts)."""
         return len({self._primary(g.module) for g in funcs}) == 1
+
+    def _go_embeds_lib(self, iface) -> bool:
+        """A Go interface embedding a library interface (`http.ResponseWriter` on a line of its own)."""
+        if iface.kind != "interface" or not iface.raw:
+            return False
+        text = "\n".join(iface.raw)
+        hm = re.search(rf"\btype\s+{re.escape(iface.decls[0] if iface.decls else '')}\s+interface\s*\{{", text)
+        if hm is None:
+            return False
+        from . import lambdas
+        close = lambdas.matching(text, hm.end() - 1)
+        return bool(re.search(r"^[ \t]*[a-z]\w*\.[A-Z]\w*[ \t]*$", text[hm.end():close if close > 0 else len(text)], re.M))
 
     def _go_impls(self, iface, name: str) -> list:
         """A Go interface's implementations: every project type whose methods

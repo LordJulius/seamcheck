@@ -243,6 +243,11 @@ def main() -> None:
             picks.append((g, set(sites)))
         if len(picks) == n:
             break
+    # a function's overloads are one function to seamcheck (and one name to a search): CodeQL's
+    # callers of each overload in that file count for it
+    picks = [(g, set().union(t, *(sites for (tf, tl, name), sites in callers.items()
+                                  if tf == g.file and name == g.name and func_at(tf, tl, name) in (None, g))))
+             for g, t in picks]
     tools = {"seamcheck": [0, 0, 0], "ast-grep": [0, 0, 0], "semgrep": [0, 0, 0], "scip": [0, 0, 0]}
     docs = _scip(opt("--scip"), opt("--scip-prefix", "")) if opt("--scip") else None
     if docs is not None:  # (every tool scored on the files both CodeQL and the SCIP indexer read)
