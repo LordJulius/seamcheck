@@ -1958,6 +1958,16 @@ def _build_edges(project: Project) -> None:
                     # declares on that library type is the one exception
                     exts = (types.ext_fns.get((v[1][0], c.name), []) or
                             types.ext_fns.get((v[1][0].split("`")[0], c.name), [])) if v[1] else []
+                    if not exts and v[1] and f.file.endswith(".cs"):
+                        # `connection.Execute(...)` on a DbConnection with Dapper's `Execute(this IDbConnection cnn)`:
+                        # a library interface the value's library class implements, by .NET's naming
+                        # (IDbConnection / DbConnection, SqlConnection; IDataReader / DbDataReader)
+                        last = re.findall(r"[A-Z][a-z0-9]*", v[1][0].split("`")[0])[-1:]
+                        cand = [g for (rt, nm), gs in types.ext_fns.items() if nm == c.name and rt.split("`")[0] not in types.by_type
+                                and re.match(r"I[A-Z]", rt) and re.findall(r"[A-Z][a-z0-9]*", rt.split("`")[0])[-1:] == last
+                                for g in gs]
+                        if cand and last and types.one_type(cand):
+                            exts = cand
                     if not exts and v[1] and f.file.endswith(".swift"):
                         # `sample.wrapped(to:)` on a String: an extension of a protocol String conforms to
                         exts = next((types.ext_fns[(pr, c.name)] for pr in _SWIFT_CONFORMS.get(v[1][0], ())
