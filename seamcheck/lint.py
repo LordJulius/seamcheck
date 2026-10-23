@@ -233,7 +233,8 @@ def inert_control(rel, raw, code, o, project=None):
     lang = _lang(rel)
     out = []
     if lang in ("jsx",):
-        for n in _jsx(raw, project, rel):
+        nodes = _jsx(raw, project, rel)
+        for i, n in enumerate(nodes):
             if n.kind != "el" or n.name not in ("button", "input", "select", "textarea"):
                 continue
             head = st.jsx_attrs(raw, n)
@@ -246,6 +247,10 @@ def inert_control(rel, raw, code, o, project=None):
             if n.name == "button":
                 if _HANDLER.search(head) or re.search(r"""\btype=["']submit|\bform=|\bdisabled(?:[\s/>]|=\{?true)""", head):
                     continue
+                if re.search(r"""\btabIndex=\{?\s*["']?-1|\baria-hidden""", head):
+                    continue  # deliberately out of reach: a focus target, a decoration
+                if any(nodes[k].kind == "el" and _HANDLER.search(st.jsx_attrs(raw, nodes[k])) for k in st.ancestors(nodes, i)):
+                    continue  # a wrapper's onClick handles it (the click bubbles)
                 label = re.sub(r"\s+", " ", re.sub(r"<[^>]*>|\{[^}]*\}", " ", raw[n.head_end:n.end])).strip()
                 label = label.removesuffix("</button>").strip()[:40]
                 out.append((ln, f"<button>{label and ' ' + repr(label)} has no handler: it does nothing when clicked. "
@@ -560,12 +565,18 @@ def id_kind_mix(rel, raw, code, o, project=None):
 
 _OWNER_FUNCS = re.compile(r"^(init|start|handle_\w+|terminate|code_change)$")
 _PROCESS = re.compile(r"^\s*use\s+(?:GenServer|Supervisor|DynamicSupervisor|Agent|GenStage|Application|Oban\.Worker)\b"
-                      r"|@behaviou?r\s+(?:GenServer|:gen_server|Supervisor|Application)\b", re.M)
+                      r"|@behaviou?r\s+(?:GenServer|:gen_\w+|Supervisor|Application)\b"
+                      # started as a process by some other behaviour (`:gen_cycle`, `:gen_statem`...):
+                      # a child_spec / start_link that starts this very module
+                      r"|:start_link,\s*\[[^\]]*__MODULE__|\.start_link\(\s*(?:\{[^}]*\},\s*)?__MODULE__", re.M)
 
 
 def _is_owner(project, g, owners) -> bool:
-    """A process callback (init, handle_*) of a module that is a process."""
-    if not owners.match(g.name):
+    """A process callback of a module that is a process: init / handle_*, or
+    any `@impl` callback (`init_cycle` of a :gen_cycle, a :gen_statem state)."""
+    mod = project.modules.get(g.module)
+    impl = mod is not None and any(re.match(r"\s*@impl\b", mod.raw[i]) for i in range(max(0, g.start - 3), g.start - 1))
+    if not (owners.match(g.name) or impl):
         return False
     return bool(_PROCESS.search(project.text(g.file)))
 
@@ -581,8 +592,8 @@ def _owner_path(project, f, owners, depth, tests) -> tuple[bool, str]:
                 if not ex or h is None or c in seen or tests(h.file):
                     continue
                 seen.add(c)
-                if _is_owner(project, h, owners):
-                    return True, ""
+                if _is_owner(project, h, owners) or (h.kind == "top" and h.file.endswith(".exs")):
+                    return True, ""  # (a boot script, test_helper.exs: its process lives the whole run)
                 if not culprit and (h.module != f.module or h.kind != "private"):
                     culprit = f"{h.module}.{h.name}"
                 nxt.append(h)
@@ -610,6 +621,9 @@ def ets_owner(rel, raw, code, o, project=None):
         owned, culprit = _owner_path(project, f, owners, int(o.get("depth", 5)), tests)
         if owned:
             continue
+        callers = [project.funcs.get(c) for c, _, ex in project.redges.get(f.id, []) if ex]
+        if not culprit and callers and all(h is not None and tests(h.file) for h in callers):
+            continue  # only test setup makes it (test_helper.exs): the test run's process owns it
         who = f"reached from {culprit}" if culprit else "no process's init or handle_* reaches it"
         out.append((ln, f"ETS table created in {f.name} ({who}): a table dies with the process that made it, so "
                     f"whichever request comes first owns the cache and takes it down when it ends (PMTiles: \"the table "

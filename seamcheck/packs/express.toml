@@ -1,0 +1,12 @@
+# Express: true for any Express app. Its type knowledge (below) applies
+# whenever package.json names express; its rules (none yet) with
+# `[project] packs = ["express"]`.
+
+# Express hands every route handler and middleware the request and the
+# response: `(req, res, next)`, `(err, req, res, next)`. Their methods are
+# express's own (lib/request.js and lib/response.js of the express package):
+# in an app, library calls; in express itself, project code.
+[[param]]
+id = "handler"
+names = ["req", "res"]
+types = { req = "express:lib/request", res = "express:lib/response" }

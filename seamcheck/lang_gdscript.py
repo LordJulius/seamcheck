@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 
+from .chains import expression, receiver, type_name
 from .model import Call, Func, Module
 from .scan import blank
 
@@ -35,6 +36,33 @@ _KEYWORDS = {
     "Time", "OS", "Engine", "self", "lerp_angle", "smoothstep", "is_equal_approx", "is_zero_approx",
 }
 _INDIRECT = {"rpc", "rpc_id", "call", "call_deferred", "callv", "bind"}
+# declared types: `var x: Timer`, `var x := Foo.new()`, `x: Foo` parameters, `-> Foo`
+_TYPED_VAR = re.compile(r"\bvar\s+([A-Za-z_]\w*)\s*:\s*([A-Z][\w.]*(?:\[[^\]]*\])?)")
+_INFER_VAR = re.compile(r"\bvar\s+([A-Za-z_]\w*)\s*:?=(?!=)")
+_PARAM = re.compile(r"[(,]\s*([A-Za-z_]\w*)\s*:\s*([A-Z][\w.]*)")
+_CAST = re.compile(r"[^\n#]*?\sas\s+([A-Z]\w*)[ \t]*(?:#[^\n]*)?$", re.M)
+_RETURNS = re.compile(r"\)\s*->\s*([A-Z][\w.]*)\s*:")
+
+
+def _types(held: dict, text: str) -> None:
+    for m in _TYPED_VAR.finditer(text):
+        t = type_name(m.group(2))
+        if t and not held.get(m.group(1), "").startswith("group:"):  # (a group binding says more than `Node`)
+            held[m.group(1)] = "type:" + t
+        em = re.match(r"(?:Array|PackedArray)\[\s*([A-Z][\w.]*)\s*\]$", m.group(2))
+        if em:  # `var frames: Array[Frame]`: frames[i] is a Frame
+            held[m.group(1) + "[]"] = "type:" + em.group(1)
+        dm = re.match(r"Dictionary\[\s*[\w.]+\s*,\s*([A-Z][\w.]*)\s*\]$", m.group(2))
+        if dm:  # `Dictionary[String, Layer]`: a value is a Layer
+            held[m.group(1) + "[]"] = "type:" + dm.group(1)
+    for m in _INFER_VAR.finditer(text):
+        cast = _CAST.match(text, m.end())  # `var x := $Path/To as Type`
+        if cast and m.group(1) not in held:
+            held[m.group(1)] = "type:" + cast.group(1)
+            continue
+        ch = expression(text, m.end())
+        if ch and m.group(1) not in held:
+            held[m.group(1)] = "expr:" + "\x1f".join(ch)
 
 
 def _module_name(path: str, text: str) -> str:
@@ -42,17 +70,34 @@ def _module_name(path: str, text: str) -> str:
     return m.group(1) if m else os.path.splitext(os.path.basename(path))[0]
 
 
+def _res(rel: str, path: str, res_of) -> str:
+    """The module a script path names: `res://x/y.gd` from the Godot project
+    `rel` is in (any folder above it may hold its project.godot), or
+    `"../motion.gd"` relative to `rel` itself."""
+    here = os.path.dirname(rel)
+    if not path.startswith("res://"):
+        return res_of("res://" + os.path.normpath(os.path.join(here, path)).replace(os.sep, "/"))
+    tail = path[6:]
+    while True:
+        got = res_of("res://" + (here + "/" if here else "") + tail)
+        if got or not here:
+            return got
+        here = os.path.dirname(here)
+
+
 def parse(path: str, rel: str, text: str, res_of) -> list[Module]:
     """`res_of(res_path)` maps a "res://..." path to a module name (or "")."""
     code, strings = blank(text, "gdscript")
     raw = text.split("\n")
     lines = code.split("\n")
-    mod = Module(_module_name(path, text), rel, len(raw), raw, lines)
+    mod = Module(_module_name(path, text), rel, len(raw), raw, lines, kind="class")
+    if _CLASS_NAME.search(text):
+        mod.decls = [mod.name]  # `class_name Player`: a type other scripts name
     ext = _EXTENDS.search(text)
     if ext:
-        mod.parent = res_of(ext.group(1)) if ext.group(1) else ext.group(2)
+        mod.parent = _res(rel, ext.group(1), res_of) if ext.group(1) else ext.group(2)
     for m in _PRELOAD.finditer(text):
-        target = res_of(m.group(2))
+        target = _res(rel, m.group(2), res_of)
         if target:
             mod.aliases[m.group(1)] = target
     # Function spans: a func runs until the next non-blank line indented at
@@ -68,7 +113,15 @@ def parse(path: str, rel: str, text: str, res_of) -> list[Module]:
     covered = set()
     for si, (idx, indent, name) in enumerate(starts):
         end = len(lines) - 1
-        for j in range(idx + 1, len(lines)):
+        # a signature over several lines (`func f(\n\timage: Image,\n) -> void:`): the body after it
+        hdr_end, depth = idx, 0
+        for j in range(idx, min(len(lines), idx + 40)):
+            depth += lines[j].count("(") - lines[j].count(")")
+            hdr_end = j
+            if depth <= 0:
+                break
+        header = " ".join(lines[idx:hdr_end + 1])
+        for j in range(hdr_end + 1, len(lines)):
             t = lines[j]
             if t.strip() == "":
                 continue
@@ -81,9 +134,32 @@ def parse(path: str, rel: str, text: str, res_of) -> list[Module]:
             end -= 1
         f = Func(mod.name, name, rel, idx + 1, end + 1, "\n".join(lines[idx:end + 1]))
         _collect(f, lines, idx, end, str_by_line)
+        for m in _PARAM.finditer(header):
+            f.bound["" + m.group(1)] = "type:" + m.group(2)
+        for m in re.finditer(r"[(,]\s*([A-Za-z_]\w*)\s*:=\s*", header):  # `project := Global.current_project`: its default's type
+            ch = expression(header, m.end())
+            if ch:
+                f.bound.setdefault(m.group(1), "expr:" + "\x1f".join(ch))
+        _types(f.bound, f.code)
+        rm = _RETURNS.search(header)
+        if rm:
+            f.returns = type_name(rm.group(1))
+        em_ = re.search(r"\)\s*->\s*Array\[\s*([A-Z][\w.]*)\s*\]\s*:", header)
+        if em_:  # `-> Array[PixelCel]`: iterating it gives PixelCels
+            f.relem = em_.group(1)
+        for lm in re.finditer(r"^[ \t]*for[ \t]+([A-Za-z_]\w*)(?:[ \t]*:[ \t]*([A-Z][\w.]*))?[ \t]+in[ \t]+", f.code, re.M):
+            if lm.group(2):  # `for cel: PixelCel in cels:`
+                f.bound.setdefault(lm.group(1), "type:" + lm.group(2))
+                continue
+            eol = f.code.find("\n", lm.end())
+            src_ = f.code[lm.end():eol if eol >= 0 else len(f.code)].rstrip()
+            ch = expression(src_[:-1] if src_.endswith(":") else src_, 0)  # (the loop's `:` is no part of it)
+            if ch and not (len(ch) == 1 and ch[0].endswith("()") and ch[0][:-2] in ("range",)):
+                f.bound.setdefault(lm.group(1), "elem:" + "\x1f".join(ch))  # `for cel in project.get_all_pixel_cels():`
         mod.funcs.append(f)
         covered.update(range(idx, end + 1))
     top_lines = [ln if i not in covered else "" for i, ln in enumerate(lines)]
+    _types(mod.bound, "\n".join(top_lines))  # the script's own variables, for its every function
     top = Func(mod.name, "<top>", rel, 1, len(lines), "\n".join(top_lines), kind="top")
     _collect(top, top_lines, 0, len(lines) - 1, str_by_line, skip=covered)
     mod.funcs.append(top)
@@ -97,6 +173,7 @@ def _collect(f: Func, lines, a: int, b: int, str_by_line, skip=None) -> None:
         t = lines[i]
         if i == a and f.kind != "top":
             t = t.split("(", 1)[1] if "(" in t else ""  # skip the def itself
+        cut = len(lines[i]) - len(t)
         for m in _CALL.finditer(t):
             qual, name = m.group(1) or "", m.group(2)
             if name in _INDIRECT and qual:
@@ -104,7 +181,10 @@ def _collect(f: Func, lines, a: int, b: int, str_by_line, skip=None) -> None:
                 continue
             if not qual and name in _KEYWORDS:
                 continue
-            f.calls.append(Call(name, qual, i + 1))
+            chain = receiver(lines[i], cut + m.start(2)) if qual or t[:m.start(2)].rstrip().endswith(".") else ()
+            if chain and not qual:
+                qual = "."
+            f.calls.append(Call(name, qual, i + 1, chain, cut + m.start(2)))
         if f.kind != "top":
             g = _GROUP_VAR.search(t)
             if g and str_by_line.get(i + 1):
