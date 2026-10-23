@@ -414,6 +414,50 @@ class Types:
                 if held:
                     got = self.held(m, None, held, depth + 1, self_mods=[mn])
                     return UNKNOWN if got is None else got
+        if mods and self.p.modules[mods[0]].file.endswith(_JS_EXTS) and depth < _MAX:
+            for mn in mods:
+                for a in self.ancestors(mn):
+                    sets = self._expando().get((a, name))
+                    if sets:  # `context.response = Object.create(this.response)` where context is one of these
+                        got = {self.chain(m_, f_, ch, depth + 1) for m_, f_, ch in sets}
+                        return got.pop() if len(got) == 1 and None not in got else None
+        return None
+
+    def _expando(self) -> dict:
+        """JS: (module, property) -> where code sets that property on an object
+        of that module (`const ctx = Object.create(this.context); ctx.request = ...`):
+        (module, function, the value's chain)."""
+        idx = self.cache.get("\0expando")
+        if idx is not None:
+            return idx
+        from .chains import expression
+        idx = self.cache["\0expando"] = {}  # (while it builds, a lookup sees none)
+        for m in list(self.p.modules.values()):
+            if not m.file.endswith(_JS_EXTS) or m.file.endswith(".d.ts"):
+                continue
+            for f in m.funcs:
+                for x in _EXPANDO.finditer(f.code):
+                    loc = x.group(1)
+                    if loc == "this" or not f.bound.get(loc, "").startswith("expr:"):
+                        continue
+                    ch = expression(f.code, x.end())
+                    if not ch:
+                        continue
+                    v = self.chain(m, f, (loc,), 1)
+                    if v and v[0] in ("static", "inst") and len(v[1]) == 1 and \
+                            self.p.modules[v[1][0]].file.endswith(_JS_EXTS):
+                        idx.setdefault((v[1][0], x.group(2)), []).append((m, f, ch))
+        return idx
+
+    def forward(self, mod, cur, name: str, depth: int = 0):
+        """JS `delegate(proto, 'response').method(name)`: the value of the
+        property a member is forwarded to, or None."""
+        for mn in cur[1]:
+            for a in self.ancestors(mn):
+                h = self.p.modules[a].bound.get(name, "")
+                if h.startswith("deleg:"):
+                    got = self.step(mod, cur, h[6:], depth + 1)
+                    return got if got and got[0] in ("static", "inst") else None
         return None
 
     # --- the walk -----------------------------------------------------------------
@@ -919,6 +963,12 @@ class Types:
                 return EXT
             return ("inst", tuple(mods), True) if mods else None
         mods, exact, declared = self.type_modules(mod, ty)
+        if not declared and mod.file.endswith(_JS_EXTS) and ty in self._file_mod(mod).imported:
+            from .core import _defining_module  # `const Koa = require('../lib/application')`; `new Koa()`
+            w, n = self._file_mod(mod).imported[ty]
+            dm = _defining_module(self.p, w, n)
+            if dm:
+                return ("inst", (f"{dm}.{n}" if f"{dm}.{n}" in self.p.modules else dm,), True)
         if not declared:
             if mod.file.endswith(_DYNAMIC) and ty in self.extended:
                 # `image: Image` with `ImageExtended extends Image` in the project: that subclass or the
@@ -1167,7 +1217,7 @@ class Types:
                 # (Ruby: a value we can't type says nothing; the name may still)
         # a bare name is a field only where `this` is implicit: never in Python,
         # JS/TS or PHP (`cli` in a Flask method is the module, not self.cli)
-        own = self_mods or (None if fm.file.endswith(_EXPLICIT_SELF) else self.own_class(mod, f))
+        own = None if fm.file.endswith(_EXPLICIT_SELF) else (self_mods or self.own_class(mod, f))
         if own:
             got = self.field(list(own), seg, depth)
             if got is UNKNOWN:
@@ -1175,6 +1225,8 @@ class Types:
             if got is not None:
                 return got
         held = mod.bound.get(seg) or fm.bound.get(seg)
+        if held == "expr:" + seg:  # a file-named JS class's `this.context = Object.create(context)`: the import
+            held = None
         if held and not held.startswith("group:"):
             return self.held(fm, None, held, depth + 1)
         if fm.file.endswith(".go") and fm.package:  # a package-level var another file of the package declares
@@ -1493,6 +1545,10 @@ class Types:
 
     def step(self, mod, cur, seg: str, depth: int):
         kind, mods, exact = cur
+        if kind in ("static", "inst") and mod.file.endswith(_JS_EXTS) and depth < _MAX:
+            fw = self.forward(mod, cur, seg.removesuffix("()"), depth)
+            if fw is not None:
+                kind, mods, exact = cur = fw
         if seg.startswith("new ") and seg.endswith("()"):
             seg = seg[4:]  # `new express.Router()`: the member, constructed
         if kind == "wrap":  # a Rust Option / Result: unwrapping gives the value, any other method is std's
@@ -1577,6 +1633,9 @@ class Types:
                 vm = self._var_module(mn, seg) if not m.owner else None
                 if vm is not None:  # `flask.g`: the package re-exports globals.g
                     return self.held(vm[0], None, vm[0].bound[vm[1]], depth + 1)
+            if mod.file.endswith(_JS_EXTS):  # a module's object given a property elsewhere (`ctx.response = ...`)
+                got = self.field(list(mods), seg, depth)
+                return None if got is UNKNOWN else got
             return None
         got = self.field(list(mods), seg, depth)
         if got is None:
@@ -1716,6 +1775,7 @@ _JS_BUILTINS = {"Buffer", "URL", "URLSearchParams", "Promise", "Math", "JSON", "
                 "Uint8Array", "ArrayBuffer", "DataView", "Proxy", "Atomics", "WebAssembly", "Blob", "FormData",
                 "ReadableStream", "WritableStream", "EventEmitter", "Function", "structuredClone"}
 _DOM_PROPS = {"classList", "style", "dataset"}
+_EXPANDO = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)[ \t]*=(?![=>])")
 _EXPLICIT_SELF = (".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".php")
 _PY_BUILTIN_NAMES = set(dir(__import__("builtins")))
 _PY_BUILTIN_CALLS = {"vars", "dict", "list", "set", "frozenset", "tuple", "str", "bytes", "bytearray", "sorted",

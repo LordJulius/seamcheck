@@ -259,6 +259,8 @@ def expression(code: str, pos: int, max_segs: int = 40) -> tuple[str, ...]:
         i = am.end()
     while i < n and code[i] in " \t":
         i += 1
+    if code.startswith("Object.create(", i):  # JS: an object whose prototype is the argument (its methods)
+        return expression(code, i + 14, max_segs)
     segs: list[str] = []
     new = False
     # `if let x = f() {`: that brace opens the block, not a trailing closure
