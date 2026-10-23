@@ -829,3 +829,15 @@ class CsExpressionBodies(unittest.TestCase):
                          else [(c.name, c.line) for c in p.find("W.Read")[0].calls])
         mk = p.find("W.Make")[0]
         self.assertEqual((6, 8), (mk.start, mk.end))  # (to its `;`, over lines)
+
+
+class LocalImportAndShorthandFixes(unittest.TestCase):
+    def test_python_local_import_shadows_and_js_shorthand_is_no_call(self):
+        p = load({"pkg/__init__.py": "", "pkg/termui.py": "def get_pager_file(color=None):\n    from ._impl import get_pager_file\n"
+                                                          "    return get_pager_file(color=color)\n\ndef again():\n    return get_pager_file()\n",
+                  "pkg/_impl.py": "def get_pager_file(color=None):\n    return 1\n",
+                  "a.js": "class H {\n  set(v) {\n    return v;\n  }\n}\nreduce(H.prototype, (k) => {\n  return {\n    set(headerValue) {\n"
+                          "      this.x = headerValue;\n    },\n  };\n});\n"})
+        self.assertEqual([("pkg/_impl.get_pager_file", 3, True)], p.edges["pkg/termui.get_pager_file"])
+        self.assertEqual([("pkg/termui.get_pager_file", 6, True)], p.edges["pkg/termui.again"])
+        self.assertFalse(p.edges.get("a.<top>"))  # (`set(headerValue) {` defines, calls nothing)

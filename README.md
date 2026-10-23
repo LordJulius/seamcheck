@@ -234,9 +234,9 @@ that name on library-typed values):
 | requests | Python | 100% / 100% | 88.0% / 100% | 100% / 95.5% | 51.2% / 100% | 52.6% / 100% |
 | httpx | Python | 96.4% / 96.8% | 64.7% / 100% | 96.1% / 98.8% | 40.0% / 100% | 33.7% / 100% |
 | flask | Python | 46.5%* / 86.4% | 27.2% / 86.4% | 66.7% / 0.7% | 18.3% / 44.1% | 96.2% / 28.9% |
-| click (held out) | Python | 97.4% / 100% | 82.6% / 100% | 100% / 71.1% | 76.0% / 100% | 75.9% / 100% |
+| click (held out) | Python | 100% / 100% | 84.4% / 100% | 100% / 71.1% | 76.0% / 100% | 75.9% / 100% |
 | koa (held out) | JavaScript | 22.1%* / 94.4% | 6.5% / 100% | 47.1% / 44.4% | 5.0% / 100% | 9.9% / 100% |
-| axios (held out) | JavaScript | 94.3% / 90.0% | 32.7% / 94.9% | 100% / 65.5% | 31.2% / 93.8% | 69.1% / 100% |
+| axios (held out) | JavaScript | 94.5%* / 90.0% | 32.8% / 94.9% | 100% / 65.5% | 31.2% / 93.8% | 69.1% / 100% |
 | ky (held out) | TypeScript | 100% / 80.0% | 66.7% / 80.0% | 100% / 80.0% | 57.1% / 80.0% | – |
 | zod (held out) | TypeScript | 100% / 99.2% | 78.8% / 99.9% | 99.2% / 83.1% | 46.2% / 89.3% | 75.6% / 99.0% |
 | javapoet (held out) | Java | 90.7% / 98.4% | 76.1% / 100% | – | 27.5% / 100% | 37.7% / 100% |
@@ -251,6 +251,12 @@ seamcheck follows it and CodeQL doesn't (10 of 10 sampled were right).
 In flask's tests `app` is a pytest fixture (`app.register_blueprint(bp)`,
 `@app.route("/")`), which seamcheck types and CodeQL doesn't: 15 of 15 of the
 sites only seamcheck has, sampled across three targets, were right.
+On axios the rest are `axios.create(...)` in the CommonJS smoke tests and the
+typing tests, which load the package by its name (`require('axios')`): CodeQL
+leaves them unlinked, and all 25 call `lib/axios.create`. Against SCIP, then,
+seamcheck finds more callers on every repo but httpx (96.8% against 98.8%), and
+every caller it names was right in each repo checked by hand (koa, flask,
+axios, click).
 † Semgrep took about five minutes a question, so it answered only the first one
 or two targets per repo; its figures are over those, not the ten.
 

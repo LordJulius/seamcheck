@@ -2317,6 +2317,18 @@ def _build_edges(project: Project) -> None:
                         if hits:
                             targets = [(t, len(hits) == 1) for t in hits]
                             break
+            elif not q and mod and f.file.endswith(".py") and f.kind != "top" and re.search(
+                    rf"^[ \t]+(?:from[ \t]+[\w.]+[ \t]+)?import[ \t][^\n]*(?:(?<![\w.]){re.escape(c.name)}\b(?![ \t]+as\b)|\bas[ \t]+{re.escape(c.name)}\b)",
+                    f.code, re.M) and c.name in project.modules.get(mod.owner, mod).imported:
+                # `from ._termui_impl import get_pager_file` inside the function: that one, not the
+                # module's own function of the same name (Python scoping: the local binding wins)
+                w_, n_ = project.modules.get(mod.owner, mod).imported[c.name]
+                hits = _in_scope(project, w_, n_)
+                if len(hits) == 1:
+                    targets = [(hits[0], True)]
+                else:
+                    _nothing(project, f, c)
+                    continue
             elif not q and mod and _shadowed(f, c.name):
                 # a parameter or local holding a function: the helper the
                 # caller itself defines (`const nudge = () => ...` inside a
