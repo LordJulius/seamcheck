@@ -12,6 +12,7 @@ use crate::model::Module;
 use crate::project::ext_of;
 
 pub mod assign;
+pub mod brace;
 pub mod chains;
 pub mod elixir;
 pub mod gdscript;
@@ -38,7 +39,7 @@ pub trait Adapter: Sync + Send {
     fn parse(&self, ctx: &ParseCtx, rel: &str, text: &str) -> Vec<Module>;
 }
 
-static ADAPTERS: &[&dyn Adapter] = &[&elixir::Elixir, &python::Python, &gdscript::GdScript, &ruby::Ruby];
+static ADAPTERS: &[&dyn Adapter] = &[&elixir::Elixir, &python::Python, &gdscript::GdScript, &ruby::Ruby, &brace::Brace];
 
 /// The ported adapter for a file, if any.
 pub fn adapter_for(rel: &str) -> Option<&'static dyn Adapter> {
