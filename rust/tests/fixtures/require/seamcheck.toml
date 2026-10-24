@@ -1,0 +1,32 @@
+[project]
+name = "r"
+include = ["lib/**"]
+
+[[rule]]
+id = "inject-first"
+kind = "require"
+in = ["lib/session.ex"]
+func = "start"
+pattern = ['maybe_inject\(', 'enqueue\(']
+ordered = true
+
+[[rule]]
+id = "reversed"
+kind = "require"
+in = ["lib/session.ex"]
+func = "start"
+pattern = ['enqueue\(', 'maybe_inject\(']
+ordered = true
+
+[[rule]]
+id = "gone"
+kind = "require"
+in = ["lib/removed.ex", "lib/nothing/*.ex"]
+pattern = 'x'
+
+[[rule]]
+id = "no-func"
+kind = "require"
+in = ["lib/session.ex"]
+func = "stop"
+pattern = 'x'

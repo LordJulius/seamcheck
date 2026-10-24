@@ -1,0 +1,10 @@
+[project]
+name = "t"
+
+[[rule]]
+id = "writes-go-through-store"
+kind = "forbid"
+pattern = 'db\.execute'
+allow = ["src/app/store.py"]
+why = "the store clears the cache"
+fix = "call save()"

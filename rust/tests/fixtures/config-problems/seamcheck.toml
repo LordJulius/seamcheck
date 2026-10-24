@@ -1,0 +1,16 @@
+[[rule]]
+id = "a"
+wehre = 1
+pattern = 'x'
+severity = "loud"
+gate = "maybe"
+
+[[rule]]
+id = "bad"
+pattern = '(unclosed'
+
+[[rule]]
+id = "nokey"
+kind = "together"
+scope = "file"
+then = 'x'

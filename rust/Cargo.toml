@@ -1,0 +1,36 @@
+[package]
+name = "seamcheck"
+version = "0.3.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "See a whole codebase at once and check the contracts between its parts (Rust port)."
+default-run = "seamcheck"
+
+[lib]
+name = "seamcheck"
+path = "src/lib.rs"
+
+[[bin]]
+name = "seamcheck"
+path = "src/main.rs"
+
+[[bin]]
+name = "parity"
+path = "src/bin/parity.rs"
+
+[dependencies]
+fancy-regex = "0.19"
+regex = "1.13"
+toml = { version = "1.1", features = ["preserve_order"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+ignore = "0.4"
+rayon = "1.12"
+sha1 = "0.11"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4

@@ -1,0 +1,44 @@
+[project]
+name = "f"
+include = ["**"]
+
+[[rule]]
+id = "sections"
+kind = "fanout"
+check = ["missing", "extra"]
+source = { in = ["hub/spec.ex"], within = '(?s)@types ~w\((.*?)\)', pattern = '(\w+)', text = "raw" }
+[rule.views.osa]
+in = ["a/Spec.kt"]
+within = '(?s)enum class T\b.*?\n\s*;'
+pattern = '\("(\w+)"\)'
+except = { video = "the phone plays video in its own player" }
+[rule.views.surface]
+in = ["s/spec.tsx"]
+within = '(?s)function r\(.*?\n\}'
+pattern = 'case "(\w+)":'
+[rule.views.osd]
+in = ["d/host.cpp"]
+mtach = "exact"
+within = '(?s)QString kind\(.*?\n\}'
+pattern = 'contains\("(\w+)"\)'
+match = "contains"
+fallback = "generic host"
+
+[[rule]]
+id = "types"
+kind = "fanout"
+source = { in = ["hub/types.ex"], within = '@known ~w\((.*?)\)', pattern = '(\w+)', text = "raw" }
+[rule.views.osa]
+in = ["a/Kinds.kt"]
+pattern = '"(\w+)" ->'
+normalize = [['_embed$', ''], ['^quiz_question$', 'quiz']]
+
+[[rule]]
+id = "routes"
+kind = "fanout"
+source = { in = ["c/api.ts"], pattern = '''["'`](/api/(?:[\w/.-]|\$\{[^}]*\})*)(["'`]\s*\+)?''', rewrite = [['\$\{[^}]*\}', ':p']] }
+[rule.views.hub]
+run = "cat routes.txt"
+pattern = '(?m)^\w+ (/api/\S*)'
+rewrite = [[':\w+', ':p']]
+match = "segments"

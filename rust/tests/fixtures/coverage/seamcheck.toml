@@ -1,0 +1,6 @@
+[[rule]]
+id = "keys"
+kind = "coverage"
+defined = { in = ["defs.ex"], pattern = ':(\w+) =>' }
+used = { in = ["use.ex"], pattern = 'key\(:(\w+)\)' }
+ignore = ["skip"]

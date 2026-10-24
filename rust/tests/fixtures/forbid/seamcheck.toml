@@ -1,0 +1,10 @@
+[[rule]]
+id = "no-print"
+pattern = 'print\('
+allow = ["ok/**"]
+
+[[rule]]
+id = "spans"
+scope = "file"
+pattern = '(?s)open\(.*?close'
+message = "opened then closed"

@@ -1,0 +1,15 @@
+[[rule]]
+id = "logged"
+kind = "together"
+in = ["lib/**"]
+if = 'rescue'
+then = ['Logger\.']
+
+[[rule]]
+id = "near"
+kind = "together"
+scope = "near"
+window = [1, 1]
+in = ["lib/**"]
+if = 'push\('
+then = 'ack'

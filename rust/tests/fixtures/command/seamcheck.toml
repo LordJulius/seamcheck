@@ -1,0 +1,12 @@
+[[rule]]
+id = "kit"
+kind = "command"
+run = "echo 'heading:'; echo 'grew ui/a.qml 3'; echo whole; exit 1"
+files = '(ui/[\w.]+)'
+prefix = "app/"
+fix = "shrink it"
+
+[[rule]]
+id = "env"
+kind = "command"
+run = "echo \"Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'x'\" >&2; echo at foo; exit 1"
