@@ -3,10 +3,12 @@
 //! the Python test suite are the contract (see PORT.md).
 
 pub mod config;
-pub mod elixir;
 pub mod gate;
 pub mod glob;
+pub mod graph;
+pub mod lang;
 pub mod lint;
+pub mod model;
 pub mod output;
 pub mod project;
 pub mod pyre;

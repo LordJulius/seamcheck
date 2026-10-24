@@ -353,6 +353,11 @@ pub fn translate(pat: &str) -> String {
             let n = c[i + 1];
             match n {
                 'Z' if !in_class => out.push_str(r"\z"),
+                // Python's \w is str.isalnum() or "_": letters and every number
+                // (`₀` too), no combining marks or other connectors
+                'w' if in_class => out.push_str(r"\p{L}\p{N}_"),
+                'w' => out.push_str(r"[\p{L}\p{N}_]"),
+                'W' => out.push_str(r"[^\p{L}\p{N}_]"),
                 // Python: an escaped punctuation mark is itself (Rust reads `\<` `\>` as word boundaries)
                 '<' | '>' | '/' | '\'' | '"' | '`' | '@' | '%' | '=' | ':' | ',' | ';' | '!' => out.push(n),
                 _ => {
@@ -603,6 +608,17 @@ mod tests {
     fn sub_template() {
         assert_eq!(Rx::lit(r":(\w+)").sub(r"<\1>", "/a/:id/b"), "/a/<id>/b");
         assert_eq!(Rx::lit(r"(?P<n>\d)").sub(r"\g<n>\g<1>", "a1"), "a11");
+    }
+
+    #[test]
+    fn word_chars_like_python() {
+        // `₀` is a number (Python: isalnum), a combining mark is not
+        assert!(Rx::lit(r"^[a-z_]\w*$").is_match("h₀"));
+        assert!(!Rx::lit(r"^\w+$").is_match("e\u{301}"));
+        assert!(Rx::lit(r"(?<![.\w:])x").is_match("-x"));
+        assert!(!Rx::lit(r"(?<![.\w:])x").is_match("₀x"));
+        assert!(Rx::lit(r"[\W]").is_match(" "));
+        assert!(Rx::lit(r"a\Wb").is_match("a-b"));
     }
 
     #[test]

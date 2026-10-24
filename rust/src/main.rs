@@ -15,7 +15,7 @@ use seamcheck::rules::{deferred_rules, picked, run_rules};
 const COMMANDS: &[&str] = &[
     "init", "serve", "check", "map", "callers", "callees", "path", "find", "context", "dead", "stats", "deps", "matrix",
     "tidy", "tests", "test-only", "unused", "dups", "split", "hotspots", "remove", "refs", "impact", "gate", "trace",
-    "run", "fuzz", "tighten", "graph", "search", "port-status",
+    "run", "fuzz", "tighten", "graph", "search", "port-status", "port-dump",
 ];
 
 #[derive(Default)]
@@ -31,6 +31,7 @@ struct Args {
     since: Option<String>,
     errors_only: bool,
     all: bool,
+    ext: Option<String>,
 }
 
 fn usage_error(msg: &str) -> ! {
@@ -80,6 +81,7 @@ fn parse(argv: Vec<String>) -> Args {
             "--since" => a.since = Some(val(&mut i)),
             "--errors-only" => a.errors_only = true,
             "--all" => a.all = true,
+            "--ext" => a.ext = Some(val(&mut i)),
             "--no-cache" | "--exact" | "--precise" | "--fuzzy" | "--wide" | "--ids" | "--apply" | "--code"
             | "--strict" | "--echo" | "--hook" | "--force" => {}
             "--html" | "--depth" | "--log" | "--timeout" | "--seeds" | "--jobs" | "--limit" | "--level" | "--via" => {
@@ -136,6 +138,7 @@ fn main() {
         "check" => check(&a, &root, t0),
         "gate" => gate(&a, &root, t0),
         "port-status" => port_status(&a, &root),
+        "port-dump" => port_dump(&a, &root),
         "matrix" => matrix(&a, &root),
         "tighten" => tighten(&a, &root),
         other => {
@@ -199,7 +202,7 @@ fn check(a: &Args, root: &Path, t0: Instant) -> i32 {
     }
     let errs = findings.iter().filter(|f| f.severity == "error").count();
     // (phase 1 parses Elixir only: the count is of Elixir functions)
-    let nfuncs: usize = p.files.iter().filter(|f| seamcheck::project::is_elixir(f)).map(|f| p.modules(f).iter().map(|m| m.funcs.len()).sum::<usize>()).sum();
+    let nfuncs: usize = p.files.iter().filter(|f| seamcheck::lang::ported(f)).map(|f| p.modules(f).iter().map(|m| m.funcs.len()).sum::<usize>()).sum();
     println!(
         "\nseamcheck: {} rules, {} files, {} functions; {} errors, {} warnings  ({} ms)",
         p.config.list("rule").len(),
@@ -288,6 +291,40 @@ fn port_status(a: &Args, root: &Path) -> i32 {
             println!("  {id}: {why}");
         }
     }
+    0
+}
+
+/// `port-dump parse|edges [--ext .ex,.exs]`: what `parity --parse` /
+/// `--edges` compare, one JSON value per line. parse: each file's modules
+/// as its adapter gives them; edges: [caller, callee, line, exact] for the
+/// callers in files with those extensions.
+fn port_dump(a: &Args, root: &Path) -> i32 {
+    use seamcheck::project::ext_of;
+    let p = Project::load(root, &a.config);
+    let exts: Option<Vec<String>> = a.ext.as_ref().map(|e| e.split(',').map(String::from).collect());
+    let want = |rel: &str| exts.as_ref().map(|e| e.iter().any(|x| x == ext_of(rel))).unwrap_or(true);
+    let t = Instant::now();
+    match a.args.first().map(|s| s.as_str()) {
+        Some("parse") => {
+            for (rel, got) in seamcheck::graph::parse_all(&p, exts.as_deref()) {
+                let v = match got {
+                    Ok(mods) => json!({"file": rel, "modules": mods.iter().map(|m| m.dump()).collect::<Vec<_>>()}),
+                    Err(e) => json!({"file": rel, "error": e}),
+                };
+                println!("{v}");
+            }
+        }
+        Some("edges") => {
+            let g = seamcheck::graph::Graph::load(&p);
+            for (caller, callee, line, exact) in g.edge_rows() {
+                if g.func(&caller).map(|f| want(&f.file)).unwrap_or(false) {
+                    println!("{}", json!([caller, callee, line, exact]));
+                }
+            }
+        }
+        _ => usage_error("port-dump: parse | edges"),
+    }
+    eprintln!("port-dump: {} ms", t.elapsed().as_millis());
     0
 }
 

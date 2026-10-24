@@ -1,7 +1,8 @@
 //! Parity harness: run the Python seamcheck and this port on the same
 //! projects and diff their findings.
 //!
-//!   parity [--python DIR] [--rust BIN] [--gate] [--staged] [--fixtures DIR] [REPO...]
+//!   parity [--python DIR] [--rust BIN] [--gate] [--staged] [--fixtures DIR]
+//!          [--parse] [--edges] [--ext .ex,.exs] [--check] [REPO...]
 //!
 //! For each REPO (and each sub-directory of --fixtures): `check --format json`
 //! from both (Python with `--skip` for the rules `port-status` defers), and
@@ -9,6 +10,15 @@
 //! set aside). Findings compare on (rule, severity, file, line, message,
 //! snippet), plus `func` where phase 1 knows the file's functions. Prints the
 //! differences and both wall times; exits 1 on any difference.
+//!
+//! --parse: each file's modules as its adapter gives them (every model
+//! field but the text), compared file by file; --edges: the call graph's
+//! edges (caller, callee, line, exact) from callers in those files, bridges
+//! left out. Both for the extensions in --ext (default: every ported one).
+//! The Python side runs inline (`python3 -c`, PY_PARSE / PY_EDGES). An edge
+//! Python draws into a language not ported yet is listed apart and is no
+//! failure: that language's lane closes it. With either flag the `check`
+//! comparison runs only when --check is given too.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,6 +32,10 @@ struct Opts {
     rust: PathBuf,
     gate: bool,
     staged: bool,
+    parse: bool,
+    edges: bool,
+    check: bool,
+    ext: Vec<String>,
     repos: Vec<PathBuf>,
 }
 
@@ -32,6 +46,10 @@ fn opts() -> Opts {
         rust: exe.with_file_name("seamcheck"),
         gate: false,
         staged: false,
+        parse: false,
+        edges: false,
+        check: false,
+        ext: seamcheck::lang::ported_exts().iter().map(|s| s.to_string()).collect(),
         repos: vec![],
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -48,6 +66,13 @@ fn opts() -> Opts {
             }
             "--gate" => o.gate = true,
             "--staged" => o.staged = true,
+            "--parse" => o.parse = true,
+            "--edges" => o.edges = true,
+            "--check" => o.check = true,
+            "--ext" => {
+                i += 1;
+                o.ext = args[i].split(',').map(String::from).collect();
+            }
             "--fixtures" => {
                 i += 1;
                 let mut subs: Vec<PathBuf> = std::fs::read_dir(&args[i])
@@ -60,12 +85,18 @@ fn opts() -> Opts {
                 o.repos.extend(subs);
             }
             "-h" | "--help" => {
-                println!("parity [--python DIR] [--rust BIN] [--gate] [--staged] [--fixtures DIR] [REPO...]");
+                println!(
+                    "parity [--python DIR] [--rust BIN] [--gate] [--staged] [--fixtures DIR] \
+                     [--parse] [--edges] [--ext .ex,.exs] [--check] [REPO...]"
+                );
                 std::process::exit(0);
             }
             other => o.repos.push(PathBuf::from(other)),
         }
         i += 1;
+    }
+    if !o.parse && !o.edges {
+        o.check = true;
     }
     if o.repos.is_empty() {
         eprintln!("parity: no repo given (REPO... or --fixtures DIR)");
@@ -106,7 +137,7 @@ fn parse(r: &Ran, who: &str) -> Value {
 }
 
 fn func_known(file: &str) -> bool {
-    seamcheck::project::is_elixir(file) || !seamcheck::project::has_adapter(file)
+    seamcheck::lang::ported(file) || !seamcheck::project::has_adapter(file)
 }
 
 type Key = (String, String, String, u64, String, String, String);
@@ -187,12 +218,236 @@ fn show(k: &Key) -> String {
     )
 }
 
+/// Python's side of --parse: argv root, exts; one JSON object per file.
+const PY_PARSE: &str = r#"
+import sys, json, os, multiprocessing
+from seamcheck import core, config as config_mod
+root = os.path.abspath(sys.argv[1]); exts = tuple(sys.argv[2].split(","))
+config, _ = config_mod.load(root, [])
+pc = config.get("project", {})
+inc = pc.get("include", ["**/*"])
+files = core.list_files(root, inc, core.default_exclude(inc) + pc.get("exclude", []))
+res = core._res_map(files)
+todo = [(root, r, res) for r in files if os.path.splitext(r)[1] in exts and core.adapter_for(r)]
+out = core._parse_parallel(todo, multiprocessing.get_context("fork")) if len(todo) > 64 else dict(core._parse_one(t) for t in todo)
+def fd(f):
+    return {"name": f.name, "kind": f.kind, "start": f.start, "end": f.end,
+            "calls": [[c.name, c.qual, c.line, list(c.chain), c.col, c.targs] for c in f.calls],
+            "refs": sorted(f.refs), "bound": f.bound, "recv": f.recv, "returns": f.returns, "targs": f.targs,
+            "ptypes": f.ptypes, "relem": f.relem, "ns": f.ns}
+def md(m):
+    return {"name": m.name, "lines": m.lines, "parent": m.parent, "aliases": m.aliases, "decls": m.decls,
+            "package": m.package, "uses": m.uses, "imported": {k: list(v) for k, v in m.imported.items()},
+            "bound": m.bound, "using": m.using, "owner": m.owner, "bases": m.bases, "kind": m.kind,
+            "methods": m.methods, "reexports": m.reexports, "funcs": [fd(f) for f in m.funcs]}
+for _, rel, _ in todo:
+    mods = out.get(rel, [])
+    errs = [m[1] for m in mods if isinstance(m, tuple)]
+    print(json.dumps({"file": rel, "error": errs[0]} if errs else {"file": rel, "modules": [md(m) for m in mods]}))
+"#;
+
+/// Python's side of --edges: the linked graph without bridges (and without
+/// reading or writing a cached graph); [caller, callee, line, exact, callee's file].
+const PY_EDGES: &str = r#"
+import sys, json, os
+from seamcheck import core, fingerprint as fp
+root = os.path.abspath(sys.argv[1]); exts = tuple(sys.argv[2].split(","))
+core._apply_bridges = lambda p: None
+_load = fp.load
+fp.load = lambda name, default: default if "-graph" in name else _load(name, default)
+fp.save = lambda *a, **k: None
+fp.prune = lambda *a, **k: None
+p = core.load(root)
+for fid, es in p.edges.items():
+    f = p.funcs.get(fid)
+    if f is None or os.path.splitext(f.file)[1] not in exts:
+        continue
+    for t, line, ex in es:
+        g = p.funcs.get(t)
+        print(json.dumps([fid, t, line, bool(ex), g.file if g else ""]))
+"#;
+
+fn py_inline(o: &Opts, repo: &Path, script: &str, exts: &str) -> Ran {
+    run(Command::new("python3")
+        .args(["-c", script])
+        .arg(repo)
+        .arg(exts)
+        .current_dir(repo)
+        .env("PYTHONPATH", &o.python))
+}
+
+fn json_lines(r: &Ran, who: &str) -> Vec<Value> {
+    let out: Vec<Value> = r.out.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    if out.is_empty() && !r.err.trim().is_empty() {
+        eprintln!("parity: {who} printed nothing; stderr:\n{}", r.err);
+    }
+    out
+}
+
+/// Where two JSON values first differ, as a path.
+fn first_diff(a: &Value, b: &Value, path: String) -> Option<String> {
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => {
+            for (k, v) in x {
+                match y.get(k) {
+                    Some(w) => {
+                        if let Some(d) = first_diff(v, w, format!("{path}.{k}")) {
+                            return Some(d);
+                        }
+                    }
+                    None => return Some(format!("{path}.{k}: only python")),
+                }
+            }
+            y.keys().find(|k| !x.contains_key(*k)).map(|k| format!("{path}.{k}: only rust"))
+        }
+        (Value::Array(x), Value::Array(y)) => {
+            for (i, (v, w)) in x.iter().zip(y).enumerate() {
+                let label = v.get("name").and_then(|n| n.as_str()).map(|n| format!("[{n}]")).unwrap_or(format!("[{i}]"));
+                if let Some(d) = first_diff(v, w, format!("{path}{label}")) {
+                    return Some(d);
+                }
+            }
+            (x.len() != y.len()).then(|| format!("{path}: {} items vs {}", x.len(), y.len()))
+        }
+        _ => (a != b).then(|| format!("{path}: {a} vs {b}")),
+    }
+}
+
+fn parse_parity(o: &Opts, repo: &Path, name: &str) -> usize {
+    let exts = o.ext.join(",");
+    let pr = py_inline(o, repo, PY_PARSE, &exts);
+    let rr = rs(o, repo, &["port-dump", "parse", "--ext", &exts]);
+    let by_file = |v: Vec<Value>| -> BTreeMap<String, Value> {
+        v.into_iter().map(|x| (x.get("file").and_then(|f| f.as_str()).unwrap_or("").to_string(), x)).collect()
+    };
+    let (pm, rm) = (by_file(json_lines(&pr, "python parse")), by_file(json_lines(&rr, "rust parse")));
+    let mut n = 0;
+    for (f, pv) in &pm {
+        match rm.get(f) {
+            None => {
+                n += 1;
+                println!("  parse only python: {f}");
+            }
+            Some(rv) => {
+                if let Some(d) = first_diff(pv, rv, String::new()) {
+                    n += 1;
+                    if n <= 40 {
+                        println!("  parse {f}: {d}");
+                    }
+                }
+            }
+        }
+    }
+    for f in rm.keys().filter(|f| !pm.contains_key(*f)) {
+        n += 1;
+        println!("  parse only rust: {f}");
+    }
+    let funcs = |m: &BTreeMap<String, Value>| -> usize {
+        m.values()
+            .filter_map(|v| v.get("modules").and_then(|x| x.as_array()))
+            .flatten()
+            .filter_map(|m| m.get("funcs").and_then(|x| x.as_array()).map(|a| a.len()))
+            .sum()
+    };
+    println!(
+        "{:<40} {:>9} {:>9} {:>9} {:>9}  ({} files, {} differ)",
+        format!("{name} parse"),
+        funcs(&pm),
+        funcs(&rm),
+        pr.ms,
+        rr.ms,
+        pm.len(),
+        n
+    );
+    n
+}
+
+fn edge_parity(o: &Opts, repo: &Path, name: &str) -> usize {
+    let exts = o.ext.join(",");
+    let pr = py_inline(o, repo, PY_EDGES, &exts);
+    let rr = rs(o, repo, &["port-dump", "edges", "--ext", &exts]);
+    type E = (String, String, u64, bool);
+    let row = |v: &Value| -> E {
+        (
+            v[0].as_str().unwrap_or("").into(),
+            v[1].as_str().unwrap_or("").into(),
+            v[2].as_u64().unwrap_or(0),
+            v[3].as_bool().unwrap_or(false),
+        )
+    };
+    let pv = json_lines(&pr, "python edges");
+    let rv = json_lines(&rr, "rust edges");
+    let mut pb: BTreeMap<E, usize> = BTreeMap::new();
+    let mut into: BTreeMap<E, String> = BTreeMap::new();
+    for v in &pv {
+        let e = row(v);
+        into.insert(e.clone(), v[4].as_str().unwrap_or("").to_string());
+        *pb.entry(e).or_insert(0) += 1;
+    }
+    let mut rb: BTreeMap<E, usize> = BTreeMap::new();
+    for v in &rv {
+        *rb.entry(row(v)).or_insert(0) += 1;
+    }
+    let (mut n, mut unported) = (0, 0);
+    let show = |e: &E| format!("{} -> {} :{}{}", e.0, e.1, e.2, if e.3 { "" } else { " (guess)" });
+    for (e, c) in &pb {
+        let rc = rb.get(e).copied().unwrap_or(0);
+        if *c > rc {
+            let callee_file = into.get(e).map(|s| s.as_str()).unwrap_or("");
+            if !callee_file.is_empty() && !seamcheck::lang::ported(callee_file) {
+                unported += c - rc;
+                println!("  edge into an unported language ({callee_file}): {}", show(e));
+                continue;
+            }
+            n += c - rc;
+            if n <= 60 {
+                println!("  edge only python ({}x): {}", c - rc, show(e));
+            }
+        }
+    }
+    for (e, c) in &rb {
+        let pc = pb.get(e).copied().unwrap_or(0);
+        if *c > pc {
+            n += c - pc;
+            if n <= 60 {
+                println!("  edge only rust   ({}x): {}", c - pc, show(e));
+            }
+        }
+    }
+    let exact = |b: &BTreeMap<E, usize>| b.iter().filter(|(e, _)| e.3).map(|(_, c)| c).sum::<usize>();
+    println!(
+        "{:<40} {:>9} {:>9} {:>9} {:>9}  ({} / {} exact; {} into unported languages)",
+        format!("{name} edges"),
+        pv.len(),
+        rv.len(),
+        pr.ms,
+        rr.ms,
+        exact(&pb),
+        exact(&rb),
+        unported
+    );
+    n
+}
+
 fn main() {
     let o = opts();
     let mut total = 0;
     println!("{:<40} {:>9} {:>9} {:>9} {:>9}", "project", "py n", "rs n", "py ms", "rs ms");
     for repo in &o.repos {
         let name = repo.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let before = total;
+        if o.parse {
+            total += parse_parity(&o, repo, &name);
+        }
+        if o.edges {
+            total += edge_parity(&o, repo, &name);
+        }
+        if !o.check {
+            if total == before {
+                println!("  identical");
+            }
+            continue;
+        }
         let status = rs(&o, repo, &["port-status", "--format", "json"]);
         let deferred: Vec<String> = parse(&status, "rust port-status")
             .as_array()
@@ -213,7 +468,6 @@ fn main() {
             .filter(|f| phase1(f, &[]))
             .collect();
         let rv: Vec<Value> = parse(&rc, "rust check").as_array().cloned().unwrap_or_default();
-        let before = total;
         println!(
             "{:<40} {:>9} {:>9} {:>9} {:>9}  ({} rules deferred)",
             format!("{name} check"),

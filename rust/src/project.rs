@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use crate::config::{self, Config};
-use crate::elixir;
+use crate::lang;
+use crate::model::{Module, Span};
 use crate::scan::blank_text;
 use crate::walk;
 
@@ -69,7 +70,7 @@ pub struct Project {
     pub gate_changed: Option<HashSet<String>>,
     raw: RwLock<HashMap<String, Arc<String>>>,
     texts: RwLock<HashMap<(String, Mode), Arc<Vec<String>>>>,
-    ex: RwLock<HashMap<String, Arc<Vec<elixir::Module>>>>,
+    ex: RwLock<HashMap<String, Arc<Vec<Module>>>>,
     all_modules: OnceLock<Vec<String>>,
     memo: Memo,
 }
@@ -111,10 +112,6 @@ pub fn scan_family(rel: &str) -> &'static str {
 pub fn has_adapter(rel: &str) -> bool {
     let ext = ext_of(rel);
     matches!(ext, ".gd" | ".ex" | ".exs" | ".py" | ".rb" | ".rake" | ".ru") || brace_family(ext).is_some()
-}
-
-pub fn is_elixir(rel: &str) -> bool {
-    matches!(ext_of(rel), ".ex" | ".exs")
 }
 
 /// Python's text-mode read: undecodable bytes replaced, newlines universal.
@@ -192,32 +189,37 @@ impl Project {
         self.text_for(rel, mode).join("\n")
     }
 
-    /// Do we know this file's functions in phase 1? (Elixir parsed, or no adapter at all.)
+    /// Do we know this file's functions? (Its adapter is ported, or it has none at all.)
     pub fn funcs_known(&self, rel: &str) -> bool {
-        is_elixir(rel) || !has_adapter(rel)
+        lang::ported(rel) || !has_adapter(rel)
     }
 
-    /// The file's modules (project.by_file): Elixir only in phase 1.
-    pub fn modules(&self, rel: &str) -> Arc<Vec<elixir::Module>> {
-        if !is_elixir(rel) || !self.file_set.contains(rel) {
+    /// The file's modules as its adapter gives them (project.by_file, before
+    /// the graph renames a second module of one name): ported languages only.
+    pub fn modules(&self, rel: &str) -> Arc<Vec<Module>> {
+        if !lang::ported(rel) || !self.file_set.contains(rel) {
             return Arc::new(Vec::new());
         }
         if let Some(m) = self.ex.read().unwrap().get(rel) {
             return m.clone();
         }
-        let raw = self.text(rel);
-        let code = self.joined(rel, Mode::Code);
-        let mods = Arc::new(elixir::parse(rel, &raw, &code));
+        static NO_RES: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();
+        let res = NO_RES.get_or_init(HashMap::new); // (Godot res:// paths: only the graph needs them)
+        let mods = Arc::new(crate::graph::parse_file(self, res, rel).unwrap_or_default());
+        if let Some(m) = mods.first() {
+            // the adapter blanked the file already: that is its code text
+            self.texts.write().unwrap().entry((rel.to_string(), Mode::Code)).or_insert_with(|| m.code.clone());
+        }
         self.ex.write().unwrap().insert(rel.to_string(), mods.clone());
         mods
     }
 
     /// The innermost real function around a line (core._enclosing).
-    pub fn enclosing(&self, rel: &str, line: usize) -> Option<elixir::Func> {
+    pub fn enclosing(&self, rel: &str, line: usize) -> Option<Span> {
         let mods = self.modules(rel);
-        let inside: Vec<&elixir::Func> =
+        let inside: Vec<&crate::model::Func> =
             mods.iter().flat_map(|m| m.funcs.iter()).filter(|f| f.start <= line && line <= f.end).collect();
-        let real: Vec<&&elixir::Func> = inside.iter().filter(|f| f.kind != "top").collect();
+        let real: Vec<&&crate::model::Func> = inside.iter().filter(|f| f.kind != "top").collect();
         if !real.is_empty() {
             // max by (start, -end): the latest start, then the shortest; first such in order
             let mut best = real[0];
@@ -226,23 +228,23 @@ impl Project {
                     best = f;
                 }
             }
-            return Some((**best).clone());
+            return Some(best.span());
         }
-        inside.first().map(|f| (*f).clone())
+        inside.first().map(|f| f.span())
     }
 
     /// The function holding a line as forbid/together see it (the last module's func_at wins).
-    pub fn func_at(&self, rel: &str, line: usize) -> Option<elixir::Func> {
+    pub fn func_at(&self, rel: &str, line: usize) -> Option<Span> {
         let mut f = None;
         for m in self.modules(rel).iter() {
             if let Some(g) = m.func_at(line) {
-                f = Some(g.clone());
+                f = Some(g.span());
             }
         }
         f
     }
 
-    /// Every module name the project defines (Elixir in phase 1), with
+    /// Every module name the project defines (ported languages), with
     /// `name@file` for a second definition of one name (core.load).
     pub fn module_names(&self) -> &Vec<String> {
         if let Some(v) = self.all_modules.get() {
@@ -252,8 +254,8 @@ impl Project {
         // asking for the names mid-computation must not wait on itself
         // (two first callers may both compute; the files' parses are cached)
         use rayon::prelude::*;
-        let ex: Vec<&String> = self.files.iter().filter(|f| is_elixir(f)).collect();
-        let per: Vec<Arc<Vec<elixir::Module>>> = ex.par_iter().map(|f| self.modules(f)).collect();
+        let ex: Vec<&String> = self.files.iter().filter(|f| lang::ported(f)).collect();
+        let per: Vec<Arc<Vec<Module>>> = ex.par_iter().map(|f| self.modules(f)).collect();
         let mut seen: HashSet<String> = HashSet::new();
         let mut out = Vec::new();
         for (rel, mods) in ex.iter().zip(per) {

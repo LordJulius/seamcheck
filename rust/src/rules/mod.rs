@@ -54,7 +54,7 @@ pub fn picked(rid: &str, ids: Option<&[String]>) -> bool {
     }
 }
 
-pub fn allowed(p: &Project, rel: &str, func: Option<&crate::elixir::Func>, allow: &[String]) -> bool {
+pub fn allowed(p: &Project, rel: &str, func: Option<&crate::model::Span>, allow: &[String]) -> bool {
     for a in allow {
         let (pg, fg) = match a.find(':') {
             Some(k) => (&a[..k], &a[k + 1..]),
@@ -486,14 +486,14 @@ fn together(p: &Project, r: &Rule) -> Res<Vec<Finding>> {
                 }
                 return out;
             }
-            let mut units: Vec<(Option<crate::elixir::Func>, usize, usize)> = Vec::new();
+            let mut units: Vec<(Option<crate::model::Span>, usize, usize)> = Vec::new();
             if scope == "file" || mods.is_empty() {
                 units.push((None, 1, lines.len()));
             } else {
                 for m in mods.iter() {
                     for f in &m.funcs {
                         if f.kind != "top" && funcs.as_ref().map(|fs| fs.iter().any(|g| fnmatchcase(&f.name, g))).unwrap_or(true) {
-                            units.push((Some(f.clone()), f.start, f.end));
+                            units.push((Some(f.span()), f.start, f.end));
                         }
                     }
                 }
