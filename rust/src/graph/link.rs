@@ -19,6 +19,8 @@ use crate::pyre::Rx;
 type Targets = Vec<(String, bool)>;
 
 const SELF: &[&str] = &["self", "this", "Self", "cls"];
+/// core.EXTERNAL: an import from outside the project
+const EXTERNAL: &str = "ext:";
 const CTOR_NAMES: &[&str] = &["init", "__init__", "constructor", "__construct", "initialize"];
 
 /// Which files a call can land in (core._FAMILIES): a Kotlin call never
@@ -146,6 +148,7 @@ fn resolve_where(where_: &str) -> String {
 
 /// core._resolve_imports, for what the ported adapters produce.
 fn resolve_imports(g: &mut Graph) {
+    crate::lang::ruby::link::link(g); // Ruby: requires, constants and supertypes, across files
     let names: Vec<String> = g.modules.keys().cloned().collect();
     for n in &names {
         let m = g.modules.get_mut(n).unwrap();
@@ -156,10 +159,15 @@ fn resolve_imports(g: &mut Graph) {
     }
     for n in &names {
         let m = g.modules.get_mut(n).unwrap();
+        let mut ext: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         m.aliases = std::mem::take(&mut m.aliases)
             .into_iter()
             .filter_map(|(k, v)| {
                 let r = resolve_where(&v);
+                if r == EXTERNAL {
+                    ext.insert(k);
+                    return None;
+                }
                 (!r.is_empty()).then_some((k, r))
             })
             .collect();
@@ -167,11 +175,16 @@ fn resolve_imports(g: &mut Graph) {
             .into_iter()
             .filter_map(|(k, (v, nm))| {
                 let r = resolve_where(&v);
+                if r == EXTERNAL {
+                    ext.insert(k);
+                    return None;
+                }
                 (!r.is_empty()).then_some((k, (r, nm)))
             })
             .collect();
-        m.uses = m.uses.iter().map(|u| resolve_where(u)).filter(|r| !r.is_empty()).collect();
-        m.reexports = m.reexports.iter().map(|u| resolve_where(u)).filter(|r| !r.is_empty()).collect();
+        m.uses = m.uses.iter().map(|u| resolve_where(u)).filter(|r| !r.is_empty() && r != EXTERNAL).collect();
+        m.reexports = m.reexports.iter().map(|u| resolve_where(u)).filter(|r| !r.is_empty() && r != EXTERNAL).collect();
+        m.external = ext.into_iter().filter(|k| !m.aliases.contains_key(k) && !m.imported.contains_key(k)).collect();
     }
     // lane: Ruby link, Qt D-Bus / QML page props, Python names, QML context
     let mut add: Vec<(String, Vec<String>)> = Vec::new();
