@@ -14,8 +14,10 @@ use crate::project::ext_of;
 pub mod assign;
 pub mod chains;
 pub mod elixir;
+pub mod gdscript;
 pub mod lambdas;
 pub mod probe;
+pub mod python;
 
 /// What an adapter may consult besides the file's text.
 pub struct ParseCtx<'a> {
@@ -35,7 +37,7 @@ pub trait Adapter: Sync + Send {
     fn parse(&self, ctx: &ParseCtx, rel: &str, text: &str) -> Vec<Module>;
 }
 
-static ADAPTERS: &[&dyn Adapter] = &[&elixir::Elixir];
+static ADAPTERS: &[&dyn Adapter] = &[&elixir::Elixir, &python::Python, &gdscript::GdScript];
 
 /// The ported adapter for a file, if any.
 pub fn adapter_for(rel: &str) -> Option<&'static dyn Adapter> {
