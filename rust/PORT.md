@@ -44,12 +44,12 @@ mostly parsing and linking: phase 1 takes the first, phase 2 the second.
 | `scan.py` | 396 | blank comments and strings, keep layout; string literals | `scan.rs` | 1 |
 | `core.py` (globs, walker, `_text_for`, rules) | ~900 of 3,692 | `glob_re`, `list_files` (rg), `_one_copy`, forbid / require / together / coverage / fanout / command / lint / essential, harvest, `run_rules` | `glob.rs`, `walk.rs`, `project.rs`, `rules/` | 1 |
 | `core.py` (load, resolution, bridges, reach, dead) | ~2,800 | parse fan-out + caches, import resolution per language, `_build_edges` (550 lines), param flow, `[[bridge]]`, `reach` / `path` / `dead` | `graph/` | 2 |
-| `model.py` | 106 | Module / Func / Call | `model.rs` | 2 (phase 1 has a span-only Elixir model in `elixir.rs`) |
-| `lang_elixir.py` | 237 | Elixir adapter | `elixir.rs` (spans now, calls in 2) | 1 / 2 |
+| `model.py` | 106 | Module / Func / Call | `model.rs` | 2 (done) |
+| `lang_elixir.py` | 237 | Elixir adapter | `lang/elixir.rs` | 2 (done) |
 | `lang_other.py` | 3,012 | Python + brace languages (JS/TS/QML, Rust, Kotlin, Java, C#, Go, C/C++, Swift, PHP) | `lang/` | 2 |
 | `lang_ruby.py` | 1,971 | Ruby adapter | `lang/ruby.rs` | 2 |
 | `lang_gdscript.py` | 198 | GDScript adapter | `lang/gdscript.rs` | 2 |
-| `chains.py`, `lambdas.py` | 782 | receiver chains, lambda parameter types | `graph/` | 2 |
+| `chains.py`, `lambdas.py` | 782 | receiver chains, lambda parameter types | `lang/chains.rs`, `lang/lambdas.rs` (+ `_assignments`: `lang/assign.rs`) | 2 (done) |
 | `infer.py` | 2,166 | receiver type inference over the graph | `graph/infer.rs` | 2 |
 | `precise.py` | 848 | language servers settle guessed calls | `precise.rs` | 4 |
 | `lint.py`, `lint_infra.py`, `lint_qml.py`, `structure.py`, `css.py` | 2,241 | `kind = "lint"` checks, `essential`, brace / JSX trees, CSS index | `lint/` | 1 (all but `auth-in-background` and `ets-owner`, which walk the graph: 2) |
@@ -91,7 +91,8 @@ mostly parsing and linking: phase 1 takes the first, phase 2 the second.
    every adapter, import resolution, `_build_edges`, chains, lambdas, infer,
    bridges, `reach` / `path`. Exit: per-file parse dumps and the edge set
    match Python's on elixir-pot and the held-out repos (`bench/`), and the
-   deferred rules run. Parallel lanes, see below.
+   deferred rules run. The core (model, registry, graph, Elixir, the shared
+   text helpers, the harness modes) is done; the adapter lanes are below.
 3. **Graph consumers.** Gate's dead-code / test-only / test-audit / dups /
    exactness halves, tidy commands, deps, arch, queries. Exit: `gate`
    and `check` parity with nothing deferred; the Python suite's gate, tidy,
@@ -127,9 +128,16 @@ side by side:
 
 `tests/fixtures/*` are small projects from the Python tests (each Rust test
 that uses one says which Python test it ports); the harness runs both
-implementations on them too. Phase 2 adds `--parse` (per-file module / func /
-call dumps: Python's via `python3 -c` inline, no new Python file) and `--edges`
-(the edge set), so each adapter lane proves parity file by file.
+implementations on them too.
+
+Phase 2 modes (Python's side runs inline through `python3 -c`, no new
+Python file): `--parse` compares each file's modules as its adapter gives
+them, `--edges` the linked graph's edges from callers in those files
+(bridges off, an edge into a language not ported yet listed apart), and
+`--chains` the shared text helpers on every call site, assignment, declared
+type and bracket of real files (Python answers the same sites on Rust's
+blanked code). `--ext` picks the languages; `--check` adds the phase 1
+comparison back.
 
 ## Known differences (by design or not worth matching)
 
@@ -192,25 +200,118 @@ both pay alike. Rust's gate numbers leave out the graph half (dead code,
 test-only, dups, test audit), which is about 4 s of Python's warm gate and
 most of its cold one.
 
-## Phase 2 lanes
+## Phase 2 status (core lane, 2026-10-24)
 
-The graph is the work: adapters (Python 1 + brace 3,012 lines, Ruby 1,971,
-GDScript 198, Elixir calls 237), `_build_edges` and import resolution,
-chains / lambdas (782), infer (2,166), bridges. Proven file by file with
-`parity --parse` (module / func / call dumps; Python's side through inline
-`python3 -c`) and `--edges`.
+**In.** `model.rs` (model.py field for field), `lang::Adapter` and its
+registry, the Elixir adapter (modules, functions, aliases, imports, `use`s,
+calls, references), `graph/` (every ported file parsed in parallel, modules
+indexed with `name@file` for a second one, calls linked in the Python
+resolver's order: `graph/link.rs` keeps each branch where `_build_edges` has
+it and marks the language- and type-specific ones `lane:`), and the text
+helpers every other adapter shares: `lang/chains.rs` (receiver, expression,
+type_name, elem_type, generic_name), `lang/lambdas.rs`, `lang/assign.rs`
+(`_assignments`). `seamcheck port-dump parse|edges|chains` prints what the
+harness compares.
 
-- **Core lane** (first, alone for a day): `model.rs`, the parse fan-out,
-  `--parse` / `--edges` in the harness, Elixir calls. Everything else
-  builds on its types.
-- Then in parallel, each owning its own `lang/*.rs` and fixture set:
-  1. JS / TS / QML (the biggest share of elixir-pot's calls),
-  2. Kotlin / Java / C# / Go / Swift / PHP / C / C++ / Rust (one brace
-     reader, per-language tables),
-  3. Ruby + GDScript,
-  4. Python.
-- **Resolution lane** (after the core lane, beside the adapters):
-  `_build_edges`, chains, lambdas, infer, bridges; it takes each adapter's
-  parse dumps as input, so it never waits on a whole language.
-- Phase 3 starts once the edge set matches: gate's graph half, tidy, deps,
-  arch and queries split cleanly by command.
+**Parity.**
+
+| what | where | result |
+|------|-------|--------|
+| `--parse` (every model field) | elixir-pot, 1,852 Elixir files | 0 differ |
+| `--edges` | elixir-pot | 56,716 / 56,716 identical (56,652 exact) |
+| `--parse` + `--edges` | ecto, hexpm, phoenix, plausible, oban | 0 differ (64,402 edges) |
+| `--chains` (+ assignments) | elixir-pot (1,910 non-Elixir files, 929k sites) | 0 differ |
+| `--chains` | SwiftyJSON, Dapper, urfave/cli, Slim, rack, fd | 0 differ (131k sites) |
+
+Python's `\w` is emulated (`[\p{L}\p{N}_]`: `h₀` is a word, a combining
+mark isn't); the parse parity found it.
+
+**Time** (Pylon Primos, load 13-20): elixir-pot `--edges` Python 34.8 s
+(warm parse cache, the whole project linked, bridges off) vs Rust 2.0 s
+(everything from cold, Elixir only); `--parse` 9.3 s vs 1.8 s.
+
+**Not yet:** `[[bridge]]` edges, supertypes / `children` / virtual dispatch
+(the infer lane), parameter flow, the resolution counters (`stats`), and
+every adapter but Elixir.
+
+## Adapter lanes: the contract
+
+Stable now: `model.rs` (every Python field is there; a lane that thinks it
+needs another asks first), `lang::{Adapter, ParseCtx, ADAPTERS}`,
+`graph::{Graph, parse_all, parse_file}`, `lang::{chains, lambdas, assign}`.
+
+**What a lane implements.**
+
+```rust
+// src/lang/<name>.rs (or src/lang/<name>/mod.rs), plus one entry in lang::ADAPTERS
+pub struct Kotlin;
+impl Adapter for Kotlin {
+    fn family(&self) -> &'static str { "kotlin" }           // its scan family
+    fn exts(&self) -> &'static [&'static str] { &[".kt", ".kts"] }
+    fn parse(&self, ctx: &ParseCtx, rel: &str, text: &str) -> Vec<Module>;
+}
+```
+
+`parse` returns what the Python adapter returns, field for field
+(`Module::dump` is the comparison). Rules of the road:
+
+- Blank with `scan::blank(text, family, false)` (code + string literals).
+  The Rust scan keeps bytes in place, so positions are byte offsets; pass
+  them to `chains` / `lambdas` / `assign` as they are. Where Python counts
+  characters into the output (`Call.col` is a character column, windows
+  like `text[k:k + 300]`), count characters (`pyre::take_chars`).
+- Every regex goes through `pyre::Rx` (Python's syntax and `\w`), never
+  the `regex` crate directly. `Rx::match_at` searches forward from `pos`
+  and keeps a match only if it starts there: fine for correctness, slow on
+  a miss in a big file; add an anchored engine to pyre if a profile says so.
+- Python's module flags `chains.CALL_TARGS` / `TRAILING_CLOSURES` are
+  `chains::Opts::for_file(rel)`.
+- Every Python dict that reaches the output is an `IndexMap` (insertion
+  order); where Python's output order leaks from a `set`, say so in the
+  lane's notes rather than guessing.
+- A panic is caught and reported as Python's "parser error"; where the
+  Python adapter raises on some input, panic with Python's message (see
+  `lambdas::brace_lambda`).
+
+**Tests.** The language's Python tests (test_kotlin.py, test_swift.py...),
+parse-level asserts first, in `rust/tests/lang_<name>.rs`, with inline file
+maps (as `tests/graph_elixir.rs` does) or `rust/tests/fixtures/lang/<name>/`.
+Each test names the Python test it ports.
+
+**Proof.** On Pylon-style setups (the Python repo at the lane's commit, the
+bench clones as `owner__repo` in one directory):
+
+```
+cargo run --release --bin parity -- --parse --ext <exts> <elixir-pot copy> <bench repos...>
+cargo run --release --bin parity -- --chains --ext <exts> <same repos>
+```
+
+Both 0 differences on elixir-pot (where the language is in it) and the
+language's CORPUS and HOLDOUT repos (`bench/bench.py`). Then the same lane
+takes its language's resolution: the `lane: <language>` branches in
+`graph/link.rs`, its import form in `resolve_where` (`js:`, `py:`, `rs:`,
+`go:`, `inc:`), and its project-wide passes (`lang_ruby.link`,
+`qml_page_props`, `qt_dbus_interfaces`, `_python_names`, `_qml_context`);
+proof `parity --edges --ext <exts>` 0 differences. Branches that need a
+receiver's type wait for the infer lane.
+
+**The lanes.**
+
+| lane | Python | Rust home | exts | bench repos (CORPUS + HOLDOUT) |
+|------|--------|-----------|------|------|
+| A: brace | `lang_other.parse_brace` and everything it calls but the `_py_*` functions (~2,500 lines; `_parse_brace` alone is 905) | `lang/brace/` | .js .jsx .mjs .cjs .ts .tsx .mts .qml .rs .kt .kts .java .cs .go .c .cpp .cc .cxx .h .hpp .hh .swift .php | excalidraw, hono, plausible, express, hexpm, nowinandroid, okhttp, gson, jsoup, Polly, Newtonsoft.Json, cobra, fzf, ripgrep, bat, jq, redis, flameshot, kdeconnect, cool-retro-term, neochat, Alamofire, swift-argument-parser, Slim, guzzle; zod, ky, axios, koa, commons-lang, javapoet, moshi, Dapper, AutoMapper, gin, urfave/cli, clap, fd, lua, cJSON, fmt, spdlog, Kingfisher, SwiftyJSON, monolog, flysystem |
+| B: Python + GDScript | `parse_python` and `_py_*` in lang_other; `lang_gdscript.py` | `lang/python.rs`, `lang/gdscript.rs` | .py .gd | flask, httpx, requests, click, rich; godot-demo-projects, tps-demo, Pixelorama |
+| C: Ruby | `lang_ruby.py` | `lang/ruby.rs` | .rb .rake .ru | sinatra, jekyll, rack, sidekiq |
+| D: types | `infer.py`, `core.resolve_bases`, the chain / typed-local / constructor / dispatch branches of `_build_edges`, `_param_flow` | `graph/infer.rs`, `graph/link.rs` | (all) | starts when lane A has JS/TS or Kotlin at parse parity |
+
+Lane A is one function in Python (`_parse_brace` reads every brace language
+through one walker and per-language tables), so it is one owner at first.
+Once its walker, `_classes`, `_returns` and the JS/TS/QML parts are at
+parity, a second lane can take the per-language import readers
+(`_rs_imports`, `_kt_imports`, `_cs_imports`, `_swift_imports`,
+`_php_imports`, `_go_imports`, `_rs_tree`) as `lang/brace/imports_<lang>.rs`.
+Lanes B and C share nothing with A but the helpers already ported, so A, B
+and C can start the same day on three machines; D starts later.
+
+Phase 3 starts once the edge set matches for every language: gate's graph
+half, tidy, deps, arch and queries split cleanly by command.

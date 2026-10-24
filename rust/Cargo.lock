@@ -369,6 +369,7 @@ dependencies = [
  "indexmap",
  "rayon",
  "regex",
+ "serde",
  "serde_json",
  "sha1",
  "tempfile",

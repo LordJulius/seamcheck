@@ -322,7 +322,28 @@ fn port_dump(a: &Args, root: &Path) -> i32 {
                 }
             }
         }
-        _ => usage_error("port-dump: parse | edges"),
+        Some("chains") => {
+            // (a helper that panics answers "error", as Python's raising one does)
+            std::panic::set_hook(Box::new(|_| {}));
+            let todo: Vec<&String> = p
+                .files
+                .iter()
+                .filter(|r| want(r) && seamcheck::project::has_adapter(r) && !matches!(ext_of(r), ".ex" | ".exs"))
+                .collect();
+            use rayon::prelude::*;
+            let out: Vec<String> = todo
+                .par_iter()
+                .map(|rel| {
+                    let raw = p.text(rel);
+                    let code = seamcheck::scan::blank_text(&raw, seamcheck::project::scan_family(rel), false);
+                    seamcheck::lang::probe::probe(rel, &code).to_string()
+                })
+                .collect();
+            for line in out {
+                println!("{line}");
+            }
+        }
+        _ => usage_error("port-dump: parse | edges | chains"),
     }
     eprintln!("port-dump: {} ms", t.elapsed().as_millis());
     0

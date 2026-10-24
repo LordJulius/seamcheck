@@ -17,8 +17,12 @@
 //! left out. Both for the extensions in --ext (default: every ported one).
 //! The Python side runs inline (`python3 -c`, PY_PARSE / PY_EDGES). An edge
 //! Python draws into a language not ported yet is listed apart and is no
-//! failure: that language's lane closes it. With either flag the `check`
-//! comparison runs only when --check is given too.
+//! failure: that language's lane closes it. --chains: the shared text
+//! helpers (lang::chains, lang::lambdas) on every call site, assignment,
+//! declared type and bracket of the files with those extensions (default:
+//! every non-Elixir adapter's), Python answering the same sites on the same
+//! blanked code (PY_CHAINS, fed Rust's lang::probe output). With any of the
+//! three the `check` comparison runs only when --check is given too.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -34,6 +38,7 @@ struct Opts {
     staged: bool,
     parse: bool,
     edges: bool,
+    chains: bool,
     check: bool,
     ext: Vec<String>,
     repos: Vec<PathBuf>,
@@ -48,6 +53,7 @@ fn opts() -> Opts {
         staged: false,
         parse: false,
         edges: false,
+        chains: false,
         check: false,
         ext: seamcheck::lang::ported_exts().iter().map(|s| s.to_string()).collect(),
         repos: vec![],
@@ -68,6 +74,7 @@ fn opts() -> Opts {
             "--staged" => o.staged = true,
             "--parse" => o.parse = true,
             "--edges" => o.edges = true,
+            "--chains" => o.chains = true,
             "--check" => o.check = true,
             "--ext" => {
                 i += 1;
@@ -95,7 +102,7 @@ fn opts() -> Opts {
         }
         i += 1;
     }
-    if !o.parse && !o.edges {
+    if !o.parse && !o.edges && !o.chains {
         o.check = true;
     }
     if o.repos.is_empty() {
@@ -266,6 +273,115 @@ for fid, es in p.edges.items():
         g = p.funcs.get(t)
         print(json.dumps([fid, t, line, bool(ex), g.file if g else ""]))
 "#;
+
+/// Python's side of --chains: reads lang::probe's objects on stdin and
+/// answers the same sites on the same code.
+const PY_CHAINS: &str = r#"
+import sys, json
+from seamcheck import chains, lambdas, lang_other
+TKS = ["jvm", "rust", "kotlin", "js", "swift"]
+ASSIGN_TKS = ["js", "kotlin", "swift", "rust", "go", "jvm", "cpp", "php", "py"]
+FAMS = ["js", "kotlin", "swift", "rust"]
+def g(f):
+    try:
+        return f()
+    except Exception:
+        return "error"
+for line in sys.stdin:
+    d = json.loads(line)
+    chains.CALL_TARGS, chains.TRAILING_CLOSURES = d["opts"]
+    code = d["code"]
+    out = {
+        "file": d["file"],
+        "recv": [[p, g(lambda: list(chains.receiver(code, p)))] for p, _ in d["recv"]],
+        "expr": [[p, g(lambda: list(chains.expression(code, p)))] for p, _ in d["expr"]],
+        "types": [[t, chains.type_name(t), chains.elem_type(t), chains.generic_name(t), lambdas.lambda_params(t),
+                   lambdas.generic_param(t)] for t, *_ in d["types"]],
+        "parens": [[s, [lambdas.param_types(tk, s) for tk in TKS],
+                    [g(lambda: [[i, n] for i, n in lambdas.lambda_args(f, lambdas.split_top(s))]) for f in FAMS]]
+                   for s, *_ in d["parens"]],
+        "braces": [[s, g(lambda: lambdas.brace_lambda("kotlin", s)), g(lambda: lambdas.brace_lambda("swift", s))]
+                   for s, *_ in d["braces"]],
+        "assign": [g(lambda: [list(x) for x in lang_other._assignments(tk, code)]) for tk in ASSIGN_TKS],
+    }
+    print(json.dumps(out))
+"#;
+
+fn chain_parity(o: &Opts, repo: &Path, name: &str) -> usize {
+    let exts = if o.ext.iter().all(|e| e == ".ex" || e == ".exs") {
+        ".js,.jsx,.mjs,.cjs,.ts,.tsx,.mts,.qml,.rs,.kt,.kts,.java,.cs,.go,.c,.cpp,.cc,.cxx,.hpp,.hh,.h,.swift,.php,.py,.gd,.rb,.rake,.ru".to_string()
+    } else {
+        o.ext.join(",")
+    };
+    let rr = rs(o, repo, &["port-dump", "chains", "--ext", &exts]);
+    let t = Instant::now();
+    let mut child = Command::new("python3")
+        .args(["-c", PY_CHAINS])
+        .current_dir(repo)
+        .env("PYTHONPATH", &o.python)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("python3");
+    {
+        use std::io::Write;
+        let mut sin = child.stdin.take().unwrap();
+        let input = rr.out.clone();
+        std::thread::spawn(move || {
+            let _ = sin.write_all(input.as_bytes());
+        });
+    }
+    let po = child.wait_with_output().expect("python3");
+    let pr = Ran {
+        out: String::from_utf8_lossy(&po.stdout).into_owned(),
+        err: String::from_utf8_lossy(&po.stderr).into_owned(),
+        ms: t.elapsed().as_millis(),
+    };
+    let by_file = |v: Vec<Value>| -> BTreeMap<String, Value> {
+        v.into_iter().map(|x| (x.get("file").and_then(|f| f.as_str()).unwrap_or("").to_string(), x)).collect()
+    };
+    let (pm, rm) = (by_file(json_lines(&pr, "python chains")), by_file(json_lines(&rr, "rust chains")));
+    let (mut n, mut sites) = (0, 0);
+    for (f, rv) in &rm {
+        let Some(pv) = pm.get(f) else {
+            n += 1;
+            println!("  chains only rust: {f}");
+            continue;
+        };
+        for part in ["recv", "expr", "types", "parens", "braces", "assign"] {
+            let (a, b) = (pv[part].as_array().cloned().unwrap_or_default(), rv[part].as_array().cloned().unwrap_or_default());
+            sites += b.len();
+            for (x, y) in a.iter().zip(&b) {
+                if x != y {
+                    n += 1;
+                    if n <= 40 {
+                        let shorten = |v: &Value| {
+                            let s = v.to_string();
+                            if s.len() > 300 { format!("{}...", &s[..s.floor_char_boundary(300)]) } else { s }
+                        };
+                        println!("  chains {f} {part}: python {} | rust {}", shorten(x), shorten(y));
+                    }
+                }
+            }
+            if a.len() != b.len() {
+                n += 1;
+                println!("  chains {f} {part}: {} sites vs {}", a.len(), b.len());
+            }
+        }
+    }
+    println!(
+        "{:<40} {:>9} {:>9} {:>9} {:>9}  ({} files, {} sites)",
+        format!("{name} chains"),
+        pm.len(),
+        rm.len(),
+        pr.ms,
+        rr.ms,
+        rm.len(),
+        sites
+    );
+    n
+}
 
 fn py_inline(o: &Opts, repo: &Path, script: &str, exts: &str) -> Ran {
     run(Command::new("python3")
@@ -441,6 +557,9 @@ fn main() {
         }
         if o.edges {
             total += edge_parity(&o, repo, &name);
+        }
+        if o.chains {
+            total += chain_parity(&o, repo, &name);
         }
         if !o.check {
             if total == before {

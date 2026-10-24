@@ -11,7 +11,11 @@ use std::path::Path;
 use crate::model::Module;
 use crate::project::ext_of;
 
+pub mod assign;
+pub mod chains;
 pub mod elixir;
+pub mod lambdas;
+pub mod probe;
 
 /// What an adapter may consult besides the file's text.
 pub struct ParseCtx<'a> {
