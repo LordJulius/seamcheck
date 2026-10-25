@@ -22,11 +22,11 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 
 from . import config as config_mod
-from . import lang_elixir, lang_gdscript, lang_other, lang_ruby
+from . import lang_elixir, lang_gdscript, lang_other, lang_ruby, lang_slint
 from .model import Func, Module
 from .scan import blank
 
-CACHE_VERSION = 34
+CACHE_VERSION = 35
 
 
 def _code_version() -> str:
@@ -70,6 +70,8 @@ def adapter_for(rel: str):
         return lang_other.parse_python
     if ext in lang_ruby.EXT:
         return lang_ruby.parse
+    if ext in lang_slint.EXT:
+        return lang_slint.parse
     if ext in lang_other.LANGS:
         return lang_other.parse_brace
     return None
@@ -85,6 +87,8 @@ def scan_family(rel: str) -> str:
         return "python"
     if ext in lang_ruby.EXT:
         return "ruby"
+    if ext in lang_slint.EXT:
+        return "slint"
     if ext in lang_other.LANGS:
         return lang_other.LANGS[ext][0]
     return "python"  # '#' comments are the safest guess
@@ -543,6 +547,8 @@ def _resolve_where(project: Project, where: str, cache: dict) -> str:
         return _resolve_rs(project, where, cache)
     if where.startswith("inc:"):
         return _resolve_include(project, where, cache)
+    if where.startswith("sl:"):
+        return _resolve_slint(project, where, cache)
     if where.startswith(("go:", "go?:")):
         return _resolve_go(project, where.split(":", 1)[1], cache)
     if not where.startswith("js:"):
@@ -670,6 +676,32 @@ def _resolve_go(project: Project, path: str, cache: dict) -> str:
             keys = [k for k in cache["\0godirs"].get(d, []) if not k.endswith("_test")]
             return f"pkg:{keys[0]}" if len(keys) == 1 else ""
     return EXTERNAL
+
+
+def _resolve_slint(project: Project, where: str, cache: dict) -> str:
+    """A Slint `import {..} from "x.slint"`: beside the file, else the one
+    project file whose path ends with it (`@lib/x.slint` names a library path
+    the build registers: its tail); std-widgets and other missing files are
+    the toolkit's."""
+    d, _, spec = where[3:].partition("\0")
+    if spec.startswith("."):
+        base = os.path.normpath(os.path.join(d, spec)).replace(os.sep, "/")
+        base = re.sub(r"\.slint$", "", base)
+        return base if base in project.modules else EXTERNAL
+    tail = re.sub(r"\.slint$", "", spec.split("/", 1)[1] if spec.startswith("@") and "/" in spec else spec)
+    base = os.path.normpath(os.path.join(d, tail)).replace(os.sep, "/")
+    if base in project.modules:
+        return base
+    idx = cache.get("\0slint")
+    if idx is None:
+        idx = cache["\0slint"] = defaultdict(list)
+        for m in project.modules.values():
+            if m.file.endswith(".slint"):
+                parts = m.name.split("/")
+                for k in range(len(parts)):
+                    idx["/".join(parts[k:])].append(m.name)
+    hits = idx.get(tail, [])
+    return hits[0] if len(hits) == 1 else (EXTERNAL if not hits else "")
 
 
 def _resolve_include(project: Project, where: str, cache: dict) -> str:
@@ -1378,7 +1410,7 @@ _FAMILIES = {
     ".ts": {"web"}, ".tsx": {"web"}, ".jsx": {"web"}, ".mjs": {"web"}, ".cjs": {"web"}, ".js": {"web", "qt"},
     ".qml": {"qt"}, ".c": {"qt"}, ".cpp": {"qt"}, ".cc": {"qt"}, ".cxx": {"qt"}, ".h": {"qt"}, ".hpp": {"qt"}, ".hh": {"qt"},
     ".py": {"py"}, ".gd": {"gd"}, ".rs": {"rs"}, ".go": {"go"}, ".cs": {"cs"},
-    ".rb": {"rb"}, ".rake": {"rb"}, ".ru": {"rb"},
+    ".rb": {"rb"}, ".rake": {"rb"}, ".ru": {"rb"}, ".slint": {"sl"},
 }
 
 
