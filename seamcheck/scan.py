@@ -25,7 +25,7 @@ def blank(text: str, lang: str, keep_strings: bool = False) -> tuple[str, list[t
             if out[k] != "\n":
                 out[k] = " "
 
-    cfam = lang in ("c", "rust", "kotlin", "js", "swift", "php")
+    cfam = lang in ("c", "rust", "kotlin", "js", "swift", "php", "slint")
     while i < n:
         c = text[i]
         if c == "\n":
@@ -158,7 +158,7 @@ def blank(text: str, lang: str, keep_strings: bool = False) -> tuple[str, list[t
             line += text.count("\n", i, j)
             i = min(n, j + 1)
             continue
-        if c in "\"'" or (lang == "js" and c == "`"):
+        if c == '"' or (c == "'" and lang != "slint") or (lang == "js" and c == "`"):
             triple = text[i:i + 3] == c * 3
             q = c * 3 if triple else c
             j = i + len(q)
@@ -168,7 +168,7 @@ def blank(text: str, lang: str, keep_strings: bool = False) -> tuple[str, list[t
                     continue
                 if text.startswith(q, j):
                     break
-                if not triple and text[j] == "\n" and lang in ("gdscript", "python", "js", "kotlin", "swift") and c != "`":
+                if not triple and text[j] == "\n" and lang in ("gdscript", "python", "js", "kotlin", "swift", "slint") and c != "`":
                     break  # unterminated (or not a string at all): stop at end of line
                 j += 1
             end = min(n, j + len(q))
