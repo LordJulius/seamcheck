@@ -2,7 +2,7 @@
 //! projects and diff their findings.
 //!
 //!   parity [--python DIR] [--rust BIN] [--gate] [--staged] [--fixtures DIR]
-//!          [--parse] [--edges] [--ext .ex,.exs] [--check] [REPO...]
+//!          [--parse] [--edges] [--untyped] [--ext .ex,.exs] [--check] [REPO...]
 //!
 //! For each REPO (and each sub-directory of --fixtures): `check --format json`
 //! from both (Python with `--skip` for the rules `port-status` defers), and
@@ -39,6 +39,7 @@ struct Opts {
     parse: bool,
     edges: bool,
     chains: bool,
+    untyped: bool,
     check: bool,
     ext: Vec<String>,
     repos: Vec<PathBuf>,
@@ -54,6 +55,7 @@ fn opts() -> Opts {
         parse: false,
         edges: false,
         chains: false,
+        untyped: false,
         check: false,
         ext: seamcheck::lang::ported_exts().iter().map(|s| s.to_string()).collect(),
         repos: vec![],
@@ -75,6 +77,7 @@ fn opts() -> Opts {
             "--parse" => o.parse = true,
             "--edges" => o.edges = true,
             "--chains" => o.chains = true,
+            "--untyped" => o.untyped = true,
             "--check" => o.check = true,
             "--ext" => {
                 i += 1;
@@ -94,7 +97,7 @@ fn opts() -> Opts {
             "-h" | "--help" => {
                 println!(
                     "parity [--python DIR] [--rust BIN] [--gate] [--staged] [--fixtures DIR] \
-                     [--parse] [--edges] [--ext .ex,.exs] [--check] [REPO...]"
+                     [--parse] [--edges] [--untyped] [--ext .ex,.exs] [--check] [REPO...]"
                 );
                 std::process::exit(0);
             }
@@ -260,6 +263,12 @@ import sys, json, os
 from seamcheck import core, fingerprint as fp
 root = os.path.abspath(sys.argv[1]); exts = tuple(sys.argv[2].split(","))
 core._apply_bridges = lambda p: None
+if os.environ.get("SEAMCHECK_UNTYPED"):
+    # no type inference and no parameter flow: the infer lane's, not yet in Rust
+    from seamcheck import infer
+    infer.Types.chain = lambda self, *a, **k: None
+    core._param_flow = lambda *a, **k: None
+    core._param_receivers = lambda *a, **k: None
 _load = fp.load
 fp.load = lambda name, default: default if "-graph" in name else _load(name, default)
 fp.save = lambda *a, **k: None
@@ -389,7 +398,8 @@ fn py_inline(o: &Opts, repo: &Path, script: &str, exts: &str) -> Ran {
         .arg(repo)
         .arg(exts)
         .current_dir(repo)
-        .env("PYTHONPATH", &o.python))
+        .env("PYTHONPATH", &o.python)
+        .env("SEAMCHECK_UNTYPED", if o.untyped { "1" } else { "" }))
 }
 
 fn json_lines(r: &Ran, who: &str) -> Vec<Value> {

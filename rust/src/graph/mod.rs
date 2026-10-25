@@ -8,6 +8,7 @@
 //! no edge here; `parity --edges` reports any such difference.
 
 pub mod link;
+pub mod pylink;
 
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
