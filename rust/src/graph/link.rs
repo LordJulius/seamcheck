@@ -10,10 +10,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use crate::gate::is_test;
+use crate::graph::pylink::{self, PyIndex, EXTERNAL};
 use crate::graph::Graph;
 use crate::model::{Call, Func, Module};
 use crate::project::{ext_of, Project};
 use crate::pyre::Rx;
+
+mod gd;
 
 /// (callee id, exact)
 type Targets = Vec<(String, bool)>;
@@ -41,7 +44,7 @@ pub fn family(rel: &str) -> Vec<&str> {
     }
 }
 
-fn shares_family(a: &str, b: &str) -> bool {
+pub(super) fn shares_family(a: &str, b: &str) -> bool {
     let fb = family(b);
     family(a).iter().any(|x| fb.contains(x))
 }
@@ -133,10 +136,14 @@ fn injected_imports(g: &Graph, use_: &str, depth: i32) -> Vec<String> {
 }
 
 /// A module name for an adapter's import (core._resolve_where): "" when it
-/// can't be found. Plain names stand for themselves; the prefixed forms
-/// ("js:", "py:", "rs:", "inc:", "go:") are their languages' lanes.
-fn resolve_where(where_: &str) -> String {
-    for pre in ["js:", "py:", "rs:", "inc:", "go:", "go?:"] {
+/// can't be found, EXTERNAL for a package from outside the project. Plain
+/// names stand for themselves; the prefixed forms ("js:", "rs:", "inc:",
+/// "go:") are their languages' lanes.
+fn resolve_where(g: &Graph, py: &PyIndex, where_: &str) -> String {
+    if where_.starts_with("py:") {
+        return py.resolve(g, where_);
+    }
+    for pre in ["js:", "rs:", "inc:", "go:", "go?:"] {
         if where_.starts_with(pre) {
             return String::new(); // lane: that language's import resolution
         }
@@ -154,26 +161,55 @@ fn resolve_imports(g: &mut Graph) {
             g.packages.entry(pk).or_default().push(nm);
         }
     }
+    let py = PyIndex::new(g);
+    type Resolved = (
+        indexmap::IndexMap<String, String>,
+        indexmap::IndexMap<String, (String, String)>,
+        Vec<String>,
+        Vec<String>,
+        std::collections::BTreeSet<String>,
+    );
+    let mut done: Vec<(String, Resolved)> = Vec::new();
     for n in &names {
-        let m = g.modules.get_mut(n).unwrap();
-        m.aliases = std::mem::take(&mut m.aliases)
-            .into_iter()
-            .filter_map(|(k, v)| {
-                let r = resolve_where(&v);
-                (!r.is_empty()).then_some((k, r))
-            })
-            .collect();
-        m.imported = std::mem::take(&mut m.imported)
-            .into_iter()
-            .filter_map(|(k, (v, nm))| {
-                let r = resolve_where(&v);
-                (!r.is_empty()).then_some((k, (r, nm)))
-            })
-            .collect();
-        m.uses = m.uses.iter().map(|u| resolve_where(u)).filter(|r| !r.is_empty()).collect();
-        m.reexports = m.reexports.iter().map(|u| resolve_where(u)).filter(|r| !r.is_empty()).collect();
+        let m = &g.modules[n];
+        let mut ext: std::collections::BTreeSet<String> = Default::default();
+        let mut aliases = indexmap::IndexMap::new();
+        for (k, v) in &m.aliases {
+            let r = resolve_where(g, &py, v);
+            if r == EXTERNAL {
+                ext.insert(k.clone());
+            } else if !r.is_empty() {
+                aliases.insert(k.clone(), r);
+            }
+        }
+        let mut imported = indexmap::IndexMap::new();
+        for (k, (v, nm)) in &m.imported {
+            let r = resolve_where(g, &py, v);
+            if r == EXTERNAL {
+                ext.insert(k.clone());
+            } else if !r.is_empty() {
+                imported.insert(k.clone(), (r, nm.clone()));
+            }
+        }
+        let uses: Vec<String> =
+            m.uses.iter().map(|u| resolve_where(g, &py, u)).filter(|r| !r.is_empty() && r != EXTERNAL).collect();
+        // (lane JS: `export * from "@scope/pkg"` marks the module `_ext_star`)
+        let reexports: Vec<String> =
+            m.reexports.iter().map(|u| resolve_where(g, &py, u)).filter(|r| !r.is_empty() && r != EXTERNAL).collect();
+        let external = ext.into_iter().filter(|k| !aliases.contains_key(k) && !imported.contains_key(k)).collect();
+        done.push((n.clone(), (aliases, imported, uses, reexports, external)));
     }
-    // lane: Ruby link, Qt D-Bus / QML page props, Python names, QML context
+    for (n, (aliases, imported, uses, reexports, external)) in done {
+        let m = g.modules.get_mut(&n).unwrap();
+        m.aliases = aliases;
+        m.imported = imported;
+        m.uses = uses;
+        m.reexports = reexports;
+        m.external = external;
+    }
+    // lane JS: `export { a as b }` aliases and libraries re-exported wholesale
+    pylink::python_names(g);
+    // lane: Ruby link, Qt D-Bus / QML page props, QML context
     let mut add: Vec<(String, Vec<String>)> = Vec::new();
     for n in &names {
         let m = &g.modules[n];
@@ -203,6 +239,14 @@ struct Resolver<'a> {
     locals: HashMap<String, HashSet<String>>,
     tests: HashMap<String, bool>,
     module_js: HashMap<String, bool>,
+    /// [project.groups]: "group:<id>" -> module
+    groups: HashMap<String, String>,
+    /// names project classes extend that the project doesn't declare (infer.Types.extended)
+    extended: HashSet<String>,
+    /// type name -> modules declaring it (infer.Types.by_type)
+    by_type: HashMap<String, Vec<String>>,
+    /// directory -> its Godot project root
+    godot: HashMap<String, String>,
 }
 
 impl<'a> Resolver<'a> {
@@ -375,7 +419,7 @@ impl<'a> Resolver<'a> {
 
     /// One call's callees, as _build_edges's loop body finds them; empty:
     /// it reaches no project function.
-    fn resolve(&mut self, f: &Func, m: &Module, c: &Call) -> Targets {
+    fn resolve(&mut self, f: &Func, m: &'a Module, c: &Call) -> Targets {
         let g = self.g;
         let q = c.qual.as_str();
         let ext = ext_of(&f.file);
@@ -384,8 +428,30 @@ impl<'a> Resolver<'a> {
         // chains through the type inference, JS lambda parameters, a bare
         // call in a class (own methods, constructors). None applies to a call
         // without a chain from a file that isn't .py / .ex / .exs.
-        let _ = &c.chain;
-        if q == "super" && !m.parent.is_empty() {
+        if c.chain.len() == 1 && c.chain[0] == "<implicit>" {
+            // `.name(...)`: a static member of the type the context expects. (lane Swift:
+            // _implicit_member reads the type; without one, the project's static functions
+            // of that name are the guess, and none means a library's or a pattern)
+            let stat: Vec<&Func> = g
+                .by_name
+                .get(&c.name)
+                .map(|ids| ids.iter().filter_map(|id| g.func(id)).filter(|h| is_static(g, h)).collect())
+                .unwrap_or_default();
+            if stat.is_empty() {
+                return Vec::new();
+            }
+            targets = stat.into_iter().map(|h| (h, false)).collect();
+        }
+        if q.is_empty() && targets.is_empty() && ext == ".gd" {
+            // a bare call in a script: its own (or an inherited) method first
+            match self.gd_bare(f, m, c) {
+                gd::Bare::Nothing => return Vec::new(),
+                gd::Bare::Targets(t) => targets = t,
+                gd::Bare::Go => {}
+            }
+        }
+        if !targets.is_empty() {
+        } else if q == "super" && !m.parent.is_empty() {
             if let Some(t) = g.lookup(&m.parent, &c.name) {
                 targets.push((t, true));
             }
@@ -400,9 +466,32 @@ impl<'a> Resolver<'a> {
             return Vec::new(); // a library the file imports
         } else if !q.is_empty() {
             // each way to name the qualifier, most certain first
-            let held = f.bound.get(q).or_else(|| m.bound.get(q)).map(|s| s.as_str()).unwrap_or("");
-            // lane (GDScript): [project.groups] bindings; lane (types): `type:` locals
-            let _ = held;
+            let held = f.bound.get(q).filter(|s| !s.is_empty()).or_else(|| m.bound.get(q)).map(|s| s.as_str()).unwrap_or("");
+            // a local the project says what it is ([project.groups]): exact
+            if let Some(mn) = self.groups.get(held) {
+                if let Some(t) = g.lookup(mn, &c.name) {
+                    targets.push((t, true));
+                }
+            } else if let Some(ty) = held.strip_prefix("type:") {
+                // a declared type: its module's function, or a Kotlin extension on it. A
+                // type outside the project: nothing (a `String`'s `split` is not ours); a
+                // project type that misses, or a library type a project class extends in a
+                // dynamic language (`n: Node` may hold a project script): the usual ways
+                let (mut hits, in_project) = pylink::typed_targets(g, m, ty, &c.name);
+                let own: Vec<&Func> = hits.iter().copied().filter(|t| t.file == f.file).collect();
+                if own.len() == 1 {
+                    hits = own;
+                }
+                if !hits.is_empty() {
+                    let one = hits.len() == 1;
+                    targets = hits.into_iter().map(|t| (t, one)).collect();
+                } else if !in_project
+                    && !(matches!(ext, ".gd" | ".py" | ".js" | ".mjs" | ".cjs" | ".rb" | ".php" | ".qml")
+                        && self.extended.contains(ty))
+                {
+                    return Vec::new();
+                }
+            }
             if targets.is_empty() {
                 if let Some(a) = m.aliases.get(q) {
                     let hits = self.in_scope(a, &c.name, 0);
@@ -442,8 +531,27 @@ impl<'a> Resolver<'a> {
                     }
                 }
             }
-        } else if ext == ".py" {
-            // lane (Python): a name imported inside the function
+        } else if ext == ".py"
+            && f.kind != "top"
+            && c.name.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+            && m_or_owner_imports(g, m, &c.name)
+            && crate::pyre::rx(&format!(
+                r"(?m)^[ \t]+(?:from[ \t]+[\w.]+[ \t]+)?import[ \t][^\n]*(?:(?<![\w.]){n}\b(?![ \t]+as\b)|\bas[ \t]+{n}\b)",
+                n = regex::escape(&c.name)
+            ))
+            .unwrap()
+            .search(&f.code)
+            .is_some()
+        {
+            // `from ._termui_impl import get_pager_file` inside the function: that one, not
+            // the module's own function of the same name (Python scoping: the local binding wins)
+            let (w_, n_) = file_mod_of(g, m).imported[&c.name].clone();
+            let hits = self.in_scope(&w_, &n_, 0);
+            if hits.len() == 1 {
+                targets.push((hits[0], true));
+            } else {
+                return Vec::new();
+            }
         } else if self.shadowed(f, &c.name) {
             // a parameter or local holding a function: the helper the caller
             // itself defines when there is one, else a name guess at most
@@ -490,7 +598,16 @@ impl<'a> Resolver<'a> {
             if hits.is_empty() && !smod.package.is_empty() {
                 hits = self.in_scope(&format!("pkg:{}", smod.package), &c.name, 0);
             }
-            // lane (Python): `Foo(...)` builds a Foo; lane (Go): build variants
+            if hits.is_empty() && ext == ".py" {
+                // `Foo(...)` builds a Foo: its __init__
+                let cls = pylink::py_class(g, m, &c.name, 0);
+                match (!cls.is_empty()).then(|| g.lookup(&cls, "__init__")).flatten() {
+                    Some(t) => hits = vec![t],
+                    None if !cls.is_empty() => return Vec::new(), // a project class with no __init__ of its own
+                    None => {}
+                }
+            }
+            // lane (Go): build variants
             let mut seen = HashSet::new();
             hits.retain(|t| seen.insert(t.id.clone()));
             let exact = hits.len() == 1 || self.one_type(&hits);
@@ -504,7 +621,16 @@ impl<'a> Resolver<'a> {
                 return Vec::new();
             }
         }
-        // lane (Python): `module.Class()` runs Class.__init__
+        if targets.is_empty() && !q.is_empty() && ext == ".py" && c.name.chars().next().is_some_and(|ch| ch.is_uppercase()) {
+            let cls = pylink::py_class(g, m, &format!("{q}.{}", c.name), 0);
+            if !cls.is_empty() {
+                // `sessions.Session()`: a class through its module builds one, so its __init__ runs
+                match g.lookup(&cls, "__init__") {
+                    Some(t) => targets.push((t, true)),
+                    None => return Vec::new(),
+                }
+            }
+        }
         if targets.is_empty() && !q.is_empty() && module_q(q) && q != "Self" {
             // a module qualifier that misses: outside the project, not a guess
             return Vec::new();
@@ -527,6 +653,18 @@ impl<'a> Resolver<'a> {
                 if let Some(o) = g.func(&format!("{sub}.{}", t.name)) {
                     more.push((o, *exact));
                 }
+            }
+        }
+        if ext == ".py"
+            && c.line > 0
+            && c.line <= m.raw.len()
+            && m.raw[c.line - 1].trim_start().starts_with('@')
+            && targets.len() == 1
+            && targets[0].1
+        {
+            // `@app.route("/")`: route() runs, then the function it returns gets the decorated one
+            if let Some(inner) = pylink::returned_closure(g, targets[0].0) {
+                more.push((inner, true));
             }
         }
         let mut seen: HashSet<String> = targets.iter().map(|(t, _)| t.id.clone()).collect();
@@ -555,6 +693,7 @@ impl<'a> Resolver<'a> {
         }
         // lane (C#): type-argument counts
         let vague = cands.len() > 8;
+
         // lane (JS): scoped patches, test files no module imports
         if !q.is_empty() && c.line > 0 && c.line <= m.raw.len() && m.raw[c.line - 1].contains(&format!("{q}::{}", c.name)) {
             let named: Vec<&Func> = cands
@@ -585,7 +724,10 @@ impl<'a> Resolver<'a> {
         } else {
             cands.iter().copied().filter(|h| h.file == f.file && !h.recv.is_empty()).collect()
         };
-        // lane (GDScript): a declared engine type's one subclass; lane (Kotlin): an imported extension
+        if let Some(t) = self.gd_engine_script(f, m, c, &cands) {
+            return vec![t];
+        }
+        // lane (Kotlin): an imported extension
         if own.len() == 1 && !q.is_empty() && cands.len() > 1 {
             return vec![(own[0], true)];
         }
@@ -604,6 +746,24 @@ impl<'a> Resolver<'a> {
         }
         cands.into_iter().map(|h| (h, false)).collect()
     }
+}
+
+/// core._is_static: declared `static` / `class func`.
+fn is_static(g: &Graph, h: &Func) -> bool {
+    let line = g.modules.get(&h.module).and_then(|m| m.raw.get(h.start.wrapping_sub(1))).map(|s| s.as_str()).unwrap_or("");
+    crate::pyre::rx(r"\b(?:static|class)\s+(?:func|var|let)\b").unwrap().search(line).is_some()
+}
+
+fn file_mod_of<'a>(g: &'a Graph, m: &'a Module) -> &'a Module {
+    if m.owner.is_empty() {
+        m
+    } else {
+        g.modules.get(&m.owner).unwrap_or(m)
+    }
+}
+
+fn m_or_owner_imports(g: &Graph, m: &Module, name: &str) -> bool {
+    file_mod_of(g, m).imported.contains_key(name)
 }
 
 /// core.walk_order: innermost function first (shortest span), so a call in
@@ -640,13 +800,34 @@ pub fn build_edges(g: &mut Graph, p: &Project) {
         }
     }
     g.short = short;
-    // lane (C++): headers' fields for their .cpp; lane (types): supertypes,
-    // descendants (`children`)
+    // lane (C++): headers' fields for their .cpp; lane (types): supertypes
+    // of the other languages. GDScript's engine classes leave a script's
+    // inherited methods possibly the library's; then every module's descendants.
+    pylink::engine_parents(g);
+    pylink::build_children(g);
+    let groups = pylink::groups(g, p);
+    let extended = pylink::extended(g);
+    let mut by_type: HashMap<String, Vec<String>> = HashMap::new();
+    for m in g.modules.values() {
+        for d in &m.decls {
+            by_type.entry(d.clone()).or_default().push(m.name.clone());
+        }
+    }
     let order = walk_order(g);
     let mut site_out: HashMap<(String, usize, i64, String), Targets> = HashMap::new();
     let mut found: Vec<(String, usize, Targets)> = Vec::new();
     {
-        let mut r = Resolver { g, p, locals: HashMap::new(), tests: HashMap::new(), module_js: HashMap::new() };
+        let mut r = Resolver {
+            g,
+            p,
+            locals: HashMap::new(),
+            tests: HashMap::new(),
+            module_js: HashMap::new(),
+            groups,
+            extended,
+            by_type,
+            godot: HashMap::new(),
+        };
         for fid in &order {
             let Some(f) = g.func(fid) else { continue };
             let Some(m) = g.modules.get(&f.module) else { continue };

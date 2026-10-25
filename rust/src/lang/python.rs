@@ -453,7 +453,7 @@ pub fn parse_python(rel: &str, text: &str) -> Vec<Module> {
         };
         let cm = mods.get_mut(&mname).unwrap();
         let mut seen: IndexMap<String, Vec<String>> = IndexMap::new();
-        let mut add = |seen: &mut IndexMap<String, Vec<String>>, k: &str, v: &str| {
+        let add = |seen: &mut IndexMap<String, Vec<String>>, k: &str, v: &str| {
             let e = seen.entry(k.to_string()).or_default();
             if !e.iter().any(|x| x == v) {
                 e.push(v.to_string());
