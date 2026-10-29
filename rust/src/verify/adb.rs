@@ -266,7 +266,8 @@ impl Driver for Adb {
             }
         }
         self.log_since = self.shell("date +'%m-%d %H:%M:%S.000'")?.trim().to_string();
-        let running = self.pid().is_some();
+        // Cold: verify stopped it, so this launch is verify's even if the system brought it straight back (a HOME app).
+        let running = !cold && self.pid().is_some();
         if self.start && !self.activity.is_empty() {
             let comp = if self.activity.contains('/') { self.activity.clone() } else { format!("{}/{}", self.package, self.activity) };
             let out = self.shell(&format!("am start -W -n {comp}"))?;
