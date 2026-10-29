@@ -93,7 +93,7 @@ when = "'stash.pin_pad' in ids"
 assert = "outside.ids == 0 and outside.texts == 0"
 ```
 
-Steps: `tap`, `long_press`, `type` (with `text`, sent a key at a time), `swipe`
+Steps: `tap`, `long_press`, `type` (with `text`; `pace` "person", a key every 150 ms, or "burst"), `swipe`
 (with `dir`), `back`, `key` (a KEYCODE name), `open` (a URI), `wait`, `gone`,
 `probe`. Options: `at` (where on the element: center, top, bottom, left, right,
 or a corner like top-left, 12 px inside), `expect` (`changed`, the default for
@@ -178,6 +178,8 @@ seamcheck verify --prove TARGET [FEATURE...]
                                            re-judge it from disk; clean -> proof.toml records the hash
 seamcheck verify --check [--staged | --since REF]
                                            offline, for the gate (below)
+--cold                                     with a run or --prove: stop the app first, so the run launches it
+                                           from nothing (and, having started it, cleanup stops it again)
 ```
 
 ## The gate
@@ -198,6 +200,8 @@ kind = "command"
 run = "seamcheck verify --check --staged"
 when = ["android/veridian-mob/lib/**", "seamcheck.d/verify/**"]
 files = '^([\w./-]+):\d+:'
-severity = "warn"              # first; error once the map is complete
-gate = "touched"
+severity = "warn"              # reported, never blocks; error once the map is complete
 ```
+
+Keep it a warning while features are added: a new feature is a draft until the build that has it is on the
+test device, so a blocking rule would stop the land that ships it.

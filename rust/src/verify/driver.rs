@@ -17,8 +17,9 @@ pub struct Check {
 pub trait Driver {
     /// Read-only: is this instance worth driving? Never launches or touches anything.
     fn doctor(&mut self, checks: &[String]) -> Vec<Check>;
-    /// Reach a usable state from empty. Returns whether verify started the app (cleanup stops only that).
-    fn launch(&mut self) -> Result<bool, String>;
+    /// Reach a usable state from empty. `cold`: stop the app first, so the run starts it. Returns whether
+    /// verify started the app (cleanup stops only that).
+    fn launch(&mut self, cold: bool) -> Result<bool, String>;
     /// Bring the app back to its root (a reset link), without starting or stopping it.
     fn reset(&mut self) -> Result<(), String>;
     /// The screen now.

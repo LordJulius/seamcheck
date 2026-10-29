@@ -161,7 +161,7 @@ fn snapshot(rec: &IndexMap<String, Value>) -> Value {
 }
 
 /// Run each feature; with `prove`, also check its evidence after cleanup and record the proof.
-pub fn features(root: &Path, t: &Target, picked: &[&Feature], prove: bool) -> i32 {
+pub fn features(root: &Path, t: &Target, picked: &[&Feature], prove: bool, cold: bool) -> i32 {
     let base = match evidence::base(root, t) {
         Ok(b) => b,
         Err(e) => {
@@ -190,7 +190,7 @@ pub fn features(root: &Path, t: &Target, picked: &[&Feature], prove: bool) -> i3
             return 2;
         }
         println!("\n{} — {}\n  evidence: {}", f.id, f.title, dir.display());
-        let vs = one(t, f, d.as_mut(), &dir);
+        let vs = one(t, f, d.as_mut(), &dir, cold);
         let errs = vs.iter().filter(|v| v.severity == "error").count();
         let mut ok = errs == 0;
         if prove && !ok {
@@ -253,7 +253,7 @@ fn proof_check(f: &Feature, dir: &Path, vs: &[Violation]) -> Result<(), String> 
     Ok(())
 }
 
-fn one(t: &Target, f: &Feature, d: &mut dyn Driver, dir: &Path) -> Vec<Violation> {
+fn one(t: &Target, f: &Feature, d: &mut dyn Driver, dir: &Path, cold: bool) -> Vec<Violation> {
     let rules = rules_for(f);
     let prefix = t.raw.get("runtime").and_then(|r| r.get("prefix")).and_then(Value::as_str).unwrap_or("SEAMCHECK").to_string();
     let file = match std::fs::File::create(dir.join("stream.jsonl")) {
@@ -291,14 +291,14 @@ fn one(t: &Target, f: &Feature, d: &mut dyn Driver, dir: &Path) -> Vec<Violation
     };
 
     let driven = d.describe();
-    let started = match d.launch() {
+    let started = match d.launch(cold) {
         Ok(st) => st,
         Err(e) => {
             println!("  [error] launch: {e}");
             s.emit(IndexMap::from([("k".into(), json!("act")), ("act".into(), json!("launch")), ("ok".into(), json!(false)), ("expect".into(), json!("any")), ("changed".into(), json!(false)), ("error".into(), json!(e))]));
             // a launch that failed may still have started it
             let _ = d.cleanup(true);
-            return finish(t, f, d, s, dir, false, &driven, &[]);
+            return finish(t, f, d, s, dir, (false, false), &driven, &[]);
         }
     };
     let mut probes: IndexMap<String, Value> = IndexMap::new();
@@ -307,7 +307,7 @@ fn one(t: &Target, f: &Feature, d: &mut dyn Driver, dir: &Path) -> Vec<Violation
         Err(e) => {
             println!("  [error] observe: {e}");
             let _ = d.cleanup(started);
-            return finish(t, f, d, s, dir, started, &driven, &[]);
+            return finish(t, f, d, s, dir, (false, started), &driven, &[]);
         }
     };
     save(d, &screen, 0, "launch");
@@ -399,7 +399,7 @@ fn one(t: &Target, f: &Feature, d: &mut dyn Driver, dir: &Path) -> Vec<Violation
         Err(e) => println!("  [error] cleanup: {e}"),
     }
     let ended = cleaned.is_ok();
-    finish(t, f, d, s, dir, ended, &driven, &steps_note)
+    finish(t, f, d, s, dir, (ended, started), &driven, &steps_note)
 }
 
 /// The screen once the step's control holds still: a result list arriving can move a tab between the dump
@@ -441,7 +441,9 @@ fn settle(d: &mut dyn Driver, step: &Step, pkg: &str, sig: &str) -> Result<Scree
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finish(t: &Target, f: &Feature, d: &mut dyn Driver, mut s: Stream, dir: &Path, ended: bool, driven: &Value, steps: &[String]) -> Vec<Violation> {
+/// `run`: (ended cleanly, verify started the app).
+fn finish(t: &Target, f: &Feature, d: &mut dyn Driver, mut s: Stream, dir: &Path, run: (bool, bool), driven: &Value, steps: &[String]) -> Vec<Violation> {
+    let (ended, started) = run;
     let fail_on: Vec<Regex> = t
         .raw
         .get("runtime")
@@ -477,7 +479,7 @@ fn finish(t: &Target, f: &Feature, d: &mut dyn Driver, mut s: Stream, dir: &Path
     let _ = std::fs::write(dir.join("verdict.json"), serde_json::to_string_pretty(&json!({"findings": verdict, "summary": s.checker.summary()})).unwrap());
     let meta = json!({
         "target": t.name, "feature": f.id, "title": f.title, "capture": f.capture,
-        "hash": feature_hash(t, f), "driven": driven, "steps": steps,
+        "hash": feature_hash(t, f), "driven": driven, "steps": steps, "started": started,
         "rules": PathBuf::from(&f.file).display().to_string(),
     });
     let _ = std::fs::write(dir.join("meta.json"), serde_json::to_string_pretty(&meta).unwrap());

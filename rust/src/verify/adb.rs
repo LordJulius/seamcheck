@@ -254,10 +254,16 @@ impl Driver for Adb {
         out
     }
 
-    fn launch(&mut self) -> Result<bool, String> {
+    fn launch(&mut self, cold: bool) -> Result<bool, String> {
         let (_, locked) = self.window()?;
         if locked {
             return Err("the device is locked: verify never touches a lock screen".into());
+        }
+        if cold {
+            self.shell(&format!("am force-stop {}", self.package))?;
+            if self.pid().is_some() {
+                return Err(format!("{} still runs after force-stop", self.package));
+            }
         }
         self.log_since = self.shell("date +'%m-%d %H:%M:%S.000'")?.trim().to_string();
         let running = self.pid().is_some();
@@ -339,8 +345,11 @@ impl Driver for Adb {
                 let (x, y) = tree::point(node(&step.arg)?, &step.at)?;
                 self.input(&format!("tap {x} {y}"))?;
                 std::thread::sleep(Duration::from_millis(500));
-                // A key at a time, at a person's pace: a burst races an app that re-renders its field on every
-                // change (Mob's search bar came out as "LIBRARYLILIBRARYBRARY").
+                // `pace = "burst"`: the whole text in one go. Otherwise a key at a time at a person's pace; both
+                // must survive an app that re-renders its field mid-typing (Mob's Places bar lost keys to it).
+                if step.pace == "burst" {
+                    return self.input(&format!("text '{}'", step.text.replace(' ', "%s")));
+                }
                 for c in step.text.chars() {
                     let key = if c == ' ' { "%s".to_string() } else { c.to_string() };
                     self.input(&format!("text '{key}'"))?;

@@ -6,6 +6,7 @@
 //!   seamcheck verify --doctor TARGET
 //!   seamcheck verify TARGET [FEATURE...]
 //!   seamcheck verify --prove TARGET [FEATURE...]
+//!   (--cold: stop the app first, so the run launches it from nothing and cleanup stops it again)
 //!   seamcheck verify --check [--staged | --since REF]
 
 pub mod adb;
@@ -20,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use config::{load_features, load_target, targets, Feature, Target};
 
-const USAGE: &str = "usage: seamcheck verify [-C DIR] (--list [TARGET] | --doctor TARGET | --check [--staged | --since REF] | [--prove] TARGET [FEATURE...])";
+const USAGE: &str = "usage: seamcheck verify [-C DIR] (--list [TARGET] | --doctor TARGET | --check [--staged | --since REF] | [--prove] [--cold] TARGET [FEATURE...])";
 
 fn usage(msg: &str) -> i32 {
     eprintln!("{USAGE}");
@@ -45,7 +46,7 @@ fn find_root(start: &Path) -> PathBuf {
 
 pub fn main(argv: &[String]) -> i32 {
     let mut root = PathBuf::from(".");
-    let (mut list, mut doctor, mut prove, mut check, mut staged) = (false, false, false, false, false);
+    let (mut list, mut doctor, mut prove, mut check, mut staged, mut cold) = (false, false, false, false, false, false);
     let mut since: Option<String> = None;
     let mut pos: Vec<String> = Vec::new();
     let mut i = 0;
@@ -62,6 +63,7 @@ pub fn main(argv: &[String]) -> i32 {
             "--doctor" => doctor = true,
             "--prove" => prove = true,
             "--check" => check = true,
+            "--cold" => cold = true,
             "--staged" => staged = true,
             "--since" => {
                 i += 1;
@@ -127,7 +129,7 @@ pub fn main(argv: &[String]) -> i32 {
         println!("[error] {} has no features ({}/)", t.name, t.feature_dir().display());
         return 2;
     }
-    run::features(&root, &t, &picked, prove)
+    run::features(&root, &t, &picked, prove, cold)
 }
 
 fn list_targets(root: &Path, only: Option<&str>) -> i32 {

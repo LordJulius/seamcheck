@@ -12,7 +12,7 @@ pub const DIR: &str = "seamcheck.d/verify";
 
 /// The step kinds and their keys. There is no x/y step: a control is reached by its id or not at all.
 pub const ACTIONS: &[&str] = &["tap", "long_press", "type", "swipe", "back", "key", "open", "wait", "gone", "probe"];
-const STEP_KEYS: &[&str] = &["at", "text", "dir", "expect", "timeout", "scroll", "why"];
+const STEP_KEYS: &[&str] = &["at", "text", "pace", "dir", "expect", "timeout", "scroll", "why"];
 const EXPECTS: &[&str] = &["changed", "unchanged", "any"];
 
 const TARGET_KEYS: &[(&str, &[&str])] = &[
@@ -44,6 +44,8 @@ pub struct Step {
     pub dir: String,
     pub expect: String,
     pub timeout: f64,
+    /// type: "person" (the default, a key every 150 ms) or "burst" (the whole text at once, as a paste or a fast thumb).
+    pub pace: String,
     /// wait: swipe this container (by id) towards `dir` until the element shows.
     pub scroll: String,
 }
@@ -203,6 +205,9 @@ fn step(v: &Value, file: &Path, n: usize, problems: &mut Vec<String>) -> Option<
     if !s(v, "scroll").is_empty() && action != "wait" {
         problems.push(format!("{}: step {n}: scroll goes with wait (swipe a container until the element shows)", file.display()));
     }
+    if !matches!(s(v, "pace").as_str(), "" | "person" | "burst") || (!s(v, "pace").is_empty() && action != "type") {
+        problems.push(format!("{}: step {n}: pace is \"person\" or \"burst\", on a type step", file.display()));
+    }
     if action == "type" && s(v, "text").is_empty() {
         problems.push(format!("{}: step {n}: type needs text", file.display()));
     }
@@ -215,6 +220,7 @@ fn step(v: &Value, file: &Path, n: usize, problems: &mut Vec<String>) -> Option<
         expect,
         timeout: v.get("timeout").and_then(Value::as_f64).unwrap_or(8.0),
         scroll: s(v, "scroll"),
+        pace: s(v, "pace"),
     })
 }
 
