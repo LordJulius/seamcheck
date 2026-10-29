@@ -101,7 +101,7 @@ fn blank_chars(text: &str, lang: &str, keep_strings: bool) -> (String, Vec<(usiz
     let mut strings: Vec<(usize, String)> = Vec::new();
     let mut i = 0usize;
     let mut line = 1usize;
-    let cfam = matches!(lang, "c" | "rust" | "kotlin" | "js" | "swift" | "php");
+    let cfam = matches!(lang, "c" | "rust" | "kotlin" | "js" | "swift" | "php" | "slint");
     let at = |k: usize| -> Option<char> { t.get(k).copied() };
     while i < n {
         let c = t[i];
@@ -293,7 +293,7 @@ fn blank_chars(text: &str, lang: &str, keep_strings: bool) -> (String, Vec<(usiz
             i = n.min(j + 1);
             continue;
         }
-        if c == '"' || c == '\'' || (lang == "js" && c == '`') {
+        if c == '"' || (c == '\'' && lang != "slint") || (lang == "js" && c == '`') {
             let triple = i + 3 <= n && t[i] == c && t[i + 1] == c && t[i + 2] == c;
             let qlen = if triple { 3 } else { 1 };
             let mut j = i + qlen;
@@ -307,7 +307,7 @@ fn blank_chars(text: &str, lang: &str, keep_strings: bool) -> (String, Vec<(usiz
                 }
                 if !triple
                     && t[j] == '\n'
-                    && matches!(lang, "gdscript" | "python" | "js" | "kotlin" | "swift")
+                    && matches!(lang, "gdscript" | "python" | "js" | "kotlin" | "swift" | "slint")
                     && c != '`'
                 {
                     break; // unterminated: stop at end of line
@@ -495,7 +495,7 @@ fn blank_bytes(text: &str, lang: &str, keep_strings: bool, collect: bool) -> (St
     let mut out = t.to_vec();
     let mut strings: Vec<(usize, String)> = Vec::new();
     let (mut i, mut line) = (0usize, 1usize);
-    let cfam = matches!(lang, "c" | "rust" | "kotlin" | "js" | "swift" | "php");
+    let cfam = matches!(lang, "c" | "rust" | "kotlin" | "js" | "swift" | "php" | "slint");
     let (rust, php, elixir, c_lang, js) = (lang == "rust", lang == "php", lang == "elixir", lang == "c", lang == "js");
     let at = |k: usize| -> u8 { if k < n { t[k] } else { 0 } };
     let alnum_before = |k: usize| prev(t, k).map(|(_, c)| c.is_alphanumeric()).unwrap_or(false);
@@ -732,10 +732,10 @@ fn blank_bytes(text: &str, lang: &str, keep_strings: bool, collect: bool) -> (St
             i = n.min(j + 1);
             continue;
         }
-        if c == b'"' || c == b'\'' || (js && c == b'`') {
+        if c == b'"' || (c == b'\'' && lang != "slint") || (js && c == b'`') {
             let triple = t[i..].starts_with(&[c, c, c]);
             let ql = if triple { 3 } else { 1 };
-            let stop_at_nl = !triple && c != b'`' && matches!(lang, "gdscript" | "python" | "js" | "kotlin" | "swift");
+            let stop_at_nl = !triple && c != b'`' && matches!(lang, "gdscript" | "python" | "js" | "kotlin" | "swift" | "slint");
             let mut j = i + ql;
             while j < n {
                 let x = t[j];

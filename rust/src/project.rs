@@ -101,6 +101,7 @@ pub fn scan_family(rel: &str) -> &'static str {
     let ext = ext_of(rel);
     match ext {
         ".gd" => "gdscript",
+        ".slint" => "slint",
         ".ex" | ".exs" => "elixir",
         ".py" => "python",
         ".rb" | ".rake" | ".ru" => "ruby",
@@ -111,7 +112,7 @@ pub fn scan_family(rel: &str) -> &'static str {
 /// Does seamcheck parse this file into modules (core.adapter_for)?
 pub fn has_adapter(rel: &str) -> bool {
     let ext = ext_of(rel);
-    matches!(ext, ".gd" | ".ex" | ".exs" | ".py" | ".rb" | ".rake" | ".ru") || brace_family(ext).is_some()
+    matches!(ext, ".gd" | ".slint" | ".ex" | ".exs" | ".py" | ".rb" | ".rake" | ".ru") || brace_family(ext).is_some()
 }
 
 /// Python's text-mode read: undecodable bytes replaced, newlines universal.

@@ -267,7 +267,8 @@ const PY_EDGES: &str = r#"
 import sys, json, os
 from seamcheck import core, fingerprint as fp
 root = os.path.abspath(sys.argv[1]); exts = tuple(sys.argv[2].split(","))
-core._apply_bridges = lambda p: None
+if not os.environ.get("SEAMCHECK_BRIDGES"):
+    core._apply_bridges = lambda p: None
 if os.environ.get("SEAMCHECK_UNTYPED"):
     # no type inference and no parameter flow: the infer lane's, not yet in Rust
     from seamcheck import infer

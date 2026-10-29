@@ -7,6 +7,7 @@
 //! Elixir `Foo.bar()` landing on a Kotlin `Foo.kt` through its file stem) has
 //! no edge here; `parity --edges` reports any such difference.
 
+pub mod bridges;
 pub mod imports;
 pub mod infer;
 pub mod link;
@@ -51,6 +52,10 @@ pub struct Graph {
     pub qml_names: IndexMap<String, String>,
     /// the packs' `[[param]]` / `[[returns]]` entries (config.pack_params)
     pub params: IndexMap<String, serde_json::Value>,
+    /// edges a `[[bridge]]` drew: (from, to) -> the bridge's id
+    pub bridged: HashMap<(String, String), String>,
+    /// notes that a bridge couldn't be built here (warnings)
+    pub env_notes: Vec<String>,
 }
 
 /// Godot: "res://path" -> the script's module name (core._res_map).
@@ -92,6 +97,11 @@ impl Graph {
     /// The linked graph of a project (core.load, less the caches: parsing
     /// here is fast enough to do every run).
     pub fn load(p: &Project) -> Graph {
+        Graph::load_with(p, true)
+    }
+
+    /// `bridges` off: the call graph alone (parity compares it so).
+    pub fn load_with(p: &Project, bridges: bool) -> Graph {
         let mut g = Graph::assemble(parse_all(p, None));
         // what the frameworks in use hand the functions they call (packs' [[param]]):
         // type knowledge, so a detected framework's applies without being listed
@@ -102,6 +112,9 @@ impl Graph {
         packs.dedup();
         g.params = crate::config::pack_params(&packs);
         link::build_edges(&mut g, p);
+        if bridges {
+            bridges::apply_bridges(&mut g, p);
+        }
         g
     }
 

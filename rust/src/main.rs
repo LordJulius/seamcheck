@@ -320,7 +320,7 @@ fn port_dump(a: &Args, root: &Path) -> i32 {
             }
         }
         Some("edges") => {
-            let g = seamcheck::graph::Graph::load(&p);
+            let g = seamcheck::graph::Graph::load_with(&p, std::env::var_os("SEAMCHECK_BRIDGES").is_some());
             for (caller, callee, line, exact) in g.edge_rows() {
                 if g.func(&caller).map(|f| want(&f.file)).unwrap_or(false) {
                     println!("{}", json!([caller, callee, line, exact]));

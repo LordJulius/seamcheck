@@ -18,8 +18,9 @@ pub mod elixir;
 pub mod gdscript;
 pub mod lambdas;
 pub mod probe;
-pub mod ruby;
 pub mod python;
+pub mod ruby;
+pub mod slint;
 
 /// What an adapter may consult besides the file's text.
 pub struct ParseCtx<'a> {
@@ -39,7 +40,7 @@ pub trait Adapter: Sync + Send {
     fn parse(&self, ctx: &ParseCtx, rel: &str, text: &str) -> Vec<Module>;
 }
 
-static ADAPTERS: &[&dyn Adapter] = &[&elixir::Elixir, &python::Python, &gdscript::GdScript, &ruby::Ruby, &brace::Brace];
+static ADAPTERS: &[&dyn Adapter] = &[&elixir::Elixir, &python::Python, &gdscript::GdScript, &ruby::Ruby, &brace::Brace, &slint::Slint];
 
 /// The ported adapter for a file, if any.
 pub fn adapter_for(rel: &str) -> Option<&'static dyn Adapter> {

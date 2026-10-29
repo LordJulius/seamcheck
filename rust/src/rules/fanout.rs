@@ -14,7 +14,7 @@ use crate::glob::{close_match, fnmatchcase, Globs};
 use crate::project::{Finding, Mode, Project};
 use crate::pyre::{repr, Rx};
 
-const HARVEST_KEYS: &[&str] =
+pub const HARVEST_KEYS: &[&str] =
     &["in", "skip", "func", "within", "pattern", "values", "text", "run", "rewrite", "timeout", "join", "token", "inputs"];
 const VIEW_KEYS: &[&str] = &["match", "normalize", "fallback", "except", "ignore", "sep", "wildcard", "unhandled"];
 
@@ -26,6 +26,8 @@ pub struct Occ {
     pub file: String,
     pub line: usize,
     pub m: Option<(Arc<String>, usize, usize)>,
+    /// the match's groups, group 0 first (None where one didn't take part)
+    pub groups: Vec<Option<String>>,
 }
 
 fn pairs(v: Option<&Value>) -> Vec<(String, String)> {
@@ -44,6 +46,13 @@ fn pairs(v: Option<&Value>) -> Vec<(String, String)> {
     }
 }
 
+/// group 0, then each group's text.
+fn caps_of(m: &crate::pyre::Caps) -> Vec<Option<String>> {
+    let mut v = vec![Some(m.group0().to_string())];
+    v.extend(m.groups().into_iter().map(|g| g.map(String::from)));
+    v
+}
+
 fn token_of(spec: &Map<String, Value>, m: &crate::pyre::Caps) -> String {
     if let Some(t) = spec.get("token") {
         let i = t.as_u64().unwrap_or(0) as usize;
@@ -60,7 +69,32 @@ static RUN_CACHE: OnceLock<Mutex<HashMap<(String, String), Arc<String>>>> = Once
 
 fn cache_dir() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    std::path::Path::new(&home).join(".cache/seamcheck-rs")
+    std::path::Path::new(&home).join(".cache/seamcheck")
+}
+
+/// Python `json.dumps` of a string (ensure_ascii).
+fn py_json_str(s: &str) -> String {
+    let mut o = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\r' => o.push_str("\\r"),
+            '\t' => o.push_str("\\t"),
+            '\u{8}' => o.push_str("\\b"),
+            '\u{c}' => o.push_str("\\f"),
+            c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
+                let mut buf = [0u16; 2];
+                for u in c.encode_utf16(&mut buf) {
+                    o.push_str(&format!("\\u{u:04x}"));
+                }
+            }
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
 }
 
 fn main_checkout(root: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -92,15 +126,32 @@ fn run_output(p: &Project, cmd: &str, spec: &Map<String, Value>) -> Res<String> 
     let (timeout, _) = super::command::py_num(spec.get("timeout"), 300.0);
     let mut path = None;
     if let Some(inputs) = &inputs {
-        let files = crate::walk::list_files(&p.root, inputs, &[]);
-        let mut h = Sha1::new();
-        h.update(cmd.as_bytes());
-        for f in &files {
-            h.update(b"\0");
-            h.update(f.as_bytes());
-            h.update(b"\0");
-            h.update(std::fs::read(p.path(f)).unwrap_or_default());
+        // keyed by the inputs' content, not the checkout (and as Python names it, so
+        // the two share one cache): a lane's worktree with the main checkout's router
+        // gets the main checkout's `mix phx.routes`
+        let mut files = crate::walk::list_files(&p.root, inputs, &[]);
+        files.sort();
+        let mut dg = String::new();
+        for (i, f) in files.iter().enumerate() {
+            if i > 0 {
+                dg.push_str(", ");
+            }
+            match std::fs::read(p.path(f)) {
+                Ok(b) => {
+                    use blake2::digest::{Update, VariableOutput};
+                    let mut h = blake2::Blake2bVar::new(16).unwrap();
+                    h.update(&b);
+                    let mut out = [0u8; 16];
+                    h.finalize_variable(&mut out).unwrap();
+                    let hex: String = out.iter().map(|x| format!("{x:02x}")).collect();
+                    dg.push_str(&format!("[{}, \"{hex}\"]", py_json_str(f)));
+                }
+                Err(_) => dg.push_str(&format!("[{}, null]", py_json_str(f))),
+            }
         }
+        let key = format!("[{}, [{dg}]]", py_json_str(cmd));
+        let mut h = Sha1::new();
+        h.update(key.as_bytes());
         let d: String = h.finalize().iter().take(10).map(|b| format!("{b:02x}")).collect();
         let pth = cache_dir().join(format!("run-{d}.txt"));
         if let Ok(t) = std::fs::read_to_string(&pth) {
@@ -150,18 +201,18 @@ pub fn harvest_all(p: &Project, spec: &Map<String, Value>) -> Res<Vec<Occ>> {
     let rewrite: Vec<(Arc<Rx>, String)> =
         pairs(spec.get("rewrite")).into_iter().map(|(a, b)| Ok((compile(&a)?, b))).collect::<Res<Vec<_>>>()?;
     let mut found: Vec<Occ> = Vec::new();
-    let keep = |found: &mut Vec<Occ>, key: String, file: &str, line: usize, m: Option<(Arc<String>, usize, usize)>| {
+    let keep = |found: &mut Vec<Occ>, key: String, file: &str, line: usize, m: Option<(Arc<String>, usize, usize)>, groups: Vec<Option<String>>| {
         let mut key = key;
         for (pat, rep) in &rewrite {
             key = pat.sub(rep, &key);
         }
         if !key.is_empty() {
-            found.push(Occ { token: key, file: file.to_string(), line, m });
+            found.push(Occ { token: key, file: file.to_string(), line, m, groups });
         }
     };
     let vfile = s(spec, "_file").unwrap_or("seamcheck.toml").to_string();
     for v in list_or(spec, "values", &[]) {
-        keep(&mut found, v, &vfile, 0, None);
+        keep(&mut found, v, &vfile, 0, None, vec![]);
     }
     let Some(pv) = spec.get("pattern") else { return Ok(found) };
     let pat_list: Vec<String> = match pv {
@@ -185,7 +236,7 @@ pub fn harvest_all(p: &Project, spec: &Map<String, Value>) -> Res<Vec<Occ>> {
             for m in rx.find_iter(&out) {
                 let line = out[..m.start()].matches('\n').count() + 1;
                 let tok = token_of(spec, &m);
-                keep(&mut found, tok, &format!("$ {cmd}"), line, Some((out.clone(), m.start(), m.end())));
+                keep(&mut found, tok, &format!("$ {cmd}"), line, Some((out.clone(), m.start(), m.end())), caps_of(&m));
             }
         }
         return Ok(found);
@@ -243,7 +294,7 @@ pub fn harvest_all(p: &Project, spec: &Map<String, Value>) -> Res<Vec<Occ>> {
                 for m in pat.find_iter_range(&text, a, b) {
                     let line = starts.partition_point(|&x| x <= m.start());
                     let tok = token_of(spec, &m);
-                    keep(&mut found, tok, rel, line, Some((text.clone(), m.start(), m.end())));
+                    keep(&mut found, tok, rel, line, Some((text.clone(), m.start(), m.end())), caps_of(&m));
                 }
             }
         }
