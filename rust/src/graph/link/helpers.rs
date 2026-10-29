@@ -166,6 +166,16 @@ fn char_to_byte(s: &str, col: usize) -> usize {
     s.char_indices().nth(col).map(|x| x.0).unwrap_or(s.len())
 }
 
+/// The byte offset of character column `col` of `line` in the blanked code:
+/// the blanked text keeps the original's bytes in place, so the offset is
+/// counted in the original line's characters (Python counts characters in both).
+fn col_byte(md: &Module, line: usize, col: usize) -> usize {
+    match md.raw.get(line.wrapping_sub(1)) {
+        Some(raw) => char_to_byte(raw, col),
+        None => col,
+    }
+}
+
 impl<'a> Resolver<'a> {
     /// How many arguments a call passes, where overloads go by count (Java, C#,
     /// Kotlin, C++); None elsewhere or when it can't be read (core._argc).
@@ -176,7 +186,7 @@ impl<'a> Resolver<'a> {
         let hi = (c.line + 30).min(md.code.len());
         let text = md.code[c.line - 1..hi].join("\n");
         let col = if c.col >= 0 { c.col as usize } else { 0 };
-        let from = char_to_byte(&text, col);
+        let from = col_byte(md, c.line, col);
         let k = text[from..].find('(').map(|x| x + from)?;
         // text[c.col:k]
         let between: &str = if c.col >= 0 { &text[from..k] } else { "" };
@@ -573,8 +583,8 @@ impl<'a> Resolver<'a> {
         }
         {
             let cur = &code_[c.line - 1];
-            let upto = (c.col - 1).max(0) as usize;
-            before.push_str(crate::pyre::take_chars(cur, upto));
+            let upto = col_byte(md, c.line, (c.col - 1).max(0) as usize);
+            before.push_str(&cur[..upto.min(cur.len())]);
         }
         let case_re = re!(r"\bcase\s+(?:let\s+|var\s+)?$");
         let line_case = re!(r"\s*(?:case|if\s+case|guard\s+case|for\s+case)\b").match_start(line).is_some()

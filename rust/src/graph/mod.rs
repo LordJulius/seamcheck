@@ -93,6 +93,14 @@ impl Graph {
     /// here is fast enough to do every run).
     pub fn load(p: &Project) -> Graph {
         let mut g = Graph::assemble(parse_all(p, None));
+        // what the frameworks in use hand the functions they call (packs' [[param]]):
+        // type knowledge, so a detected framework's applies without being listed
+        let mut packs: Vec<String> =
+            p.config.table("project").get("packs").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect()).unwrap_or_default();
+        packs.extend(crate::init::detect_packs(&p.root, &p.files));
+        packs.sort();
+        packs.dedup();
+        g.params = crate::config::pack_params(&packs);
         link::build_edges(&mut g, p);
         g
     }

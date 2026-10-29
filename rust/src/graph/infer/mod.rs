@@ -33,7 +33,7 @@ mod held;
 pub(crate) mod scope;
 mod walk;
 
-pub use arity::{paren_close, top_split};
+pub use arity::{arities, paren_close, top_split};
 
 /// A pattern compiled once (Python's module-level `re.compile`).
 macro_rules! re {

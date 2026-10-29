@@ -6,6 +6,7 @@ pub mod config;
 pub mod gate;
 pub mod glob;
 pub mod graph;
+pub mod init;
 pub mod lang;
 pub mod lint;
 pub mod model;

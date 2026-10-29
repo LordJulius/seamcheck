@@ -327,6 +327,14 @@ fn port_dump(a: &Args, root: &Path) -> i32 {
                 }
             }
         }
+        Some("arities") => {
+            // port-dump arities MODULE NAME: the argument counts a module's declarations of NAME take
+            let g = seamcheck::graph::Graph::load(&p);
+            let (m, n) = (a.args.get(1).cloned().unwrap_or_default(), a.args.get(2).cloned().unwrap_or_default());
+            if let Some(md) = g.modules.get(&m) {
+                println!("{:?}", seamcheck::graph::infer::arities(md, &n));
+            }
+        }
         Some("chains") => {
             // (a helper that panics answers "error", as Python's raising one does)
             std::panic::set_hook(Box::new(|_| {}));

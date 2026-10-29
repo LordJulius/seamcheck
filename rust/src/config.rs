@@ -379,3 +379,28 @@ pub fn file_of(r: &Rule) -> String {
 pub fn severity(r: &Rule) -> String {
     r.get("severity").map(py_str).unwrap_or_else(|| "error".into())
 }
+
+/// The `[[param]]` entries of these packs, as {"<pack>/<id>": entry}: what a
+/// framework hands the functions it calls (Express's `req`, `res`); and the
+/// `[[returns]]` entries, marked `kind = "returns"` (config.pack_params).
+pub fn pack_params(names: &[String]) -> indexmap::IndexMap<String, Value> {
+    let mut out = indexmap::IndexMap::new();
+    for name in names {
+        let Some(text) = pack_text(name) else { continue };
+        let Ok(v) = toml::from_str::<toml::Value>(text) else { continue };
+        let v = toml_to_json(v);
+        for entry in v.get("param").and_then(|x| x.as_array()).map(|a| a.as_slice()).unwrap_or(&[]) {
+            let id = entry.get("id").and_then(|x| x.as_str()).unwrap_or("");
+            out.insert(format!("{name}/{id}"), entry.clone());
+        }
+        for entry in v.get("returns").and_then(|x| x.as_array()).map(|a| a.as_slice()).unwrap_or(&[]) {
+            let id = entry.get("id").and_then(|x| x.as_str()).unwrap_or("");
+            let mut e = entry.clone();
+            if let Some(o) = e.as_object_mut() {
+                o.insert("kind".into(), Value::String("returns".into()));
+            }
+            out.insert(format!("{name}/{id}"), e);
+        }
+    }
+    out
+}
