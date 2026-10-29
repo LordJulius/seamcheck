@@ -496,6 +496,10 @@ Runtime (the program reports itself; see "Runtime checks")
   seamcheck run [--log F] [--timeout S] -- CMD...
   seamcheck fuzz --seeds 1-8 [--jobs 4] -- CMD... {seed} ...
 
+Verify (drive the real app by its controls' ids, judge the evidence; see docs/verify.md)
+  seamcheck verify --list | --doctor TARGET | TARGET [FEATURE...] | --prove TARGET [FEATURE...]
+  seamcheck verify --check [--staged | --since REF]    the offline half, for a gate's command rule
+
 Options
   -C DIR          project root (default: the nearest parent with seamcheck.toml)
   --config PATH   more config: a .toml or a folder of them (repeatable)

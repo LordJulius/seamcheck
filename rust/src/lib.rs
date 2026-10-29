@@ -13,7 +13,9 @@ pub mod output;
 pub mod project;
 pub mod pyre;
 pub mod rules;
+pub mod runtime;
 pub mod scan;
+pub mod verify;
 pub mod walk;
 
 pub const VERSION: &str = "0.3.0";

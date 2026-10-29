@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -96,7 +97,21 @@ def _tighten(root: str, extra: list[str]) -> int:
     return 1 if failed or problems else 0
 
 
+def _verify(argv: list[str]) -> int:
+    """`seamcheck verify` lives in the Rust crate (docs/verify.md): hand it the arguments unchanged."""
+    exe = os.environ.get("SEAMCHECK_RUST") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "rust", "target", "release", "seamcheck")
+    if not os.access(exe, os.X_OK):
+        print(f"seamcheck verify needs the Rust binary ({exe}): cargo build --release --manifest-path "
+              f"{os.path.join(os.path.dirname(os.path.dirname(exe)), 'Cargo.toml')}", file=sys.stderr)
+        return 127
+    return subprocess.run([exe, "verify", *argv]).returncode
+
+
 def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["verify"]:
+        return _verify(argv[1:])
     try:
         rc = _main(argv)
         sys.stdout.flush()

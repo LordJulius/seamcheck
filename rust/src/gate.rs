@@ -29,7 +29,7 @@ const MANIFESTS: &[&str] = &[
 
 pub type Lines = BTreeMap<String, BTreeSet<usize>>;
 
-fn git(root: &std::path::Path, args: &[&str]) -> Option<String> {
+pub(crate) fn git(root: &std::path::Path, args: &[&str]) -> Option<String> {
     let o = Command::new("git").args(args).current_dir(root).output().ok()?;
     Some(String::from_utf8_lossy(&o.stdout).into_owned())
 }

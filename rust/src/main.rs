@@ -15,7 +15,7 @@ use seamcheck::rules::{deferred_rules, picked, run_rules};
 const COMMANDS: &[&str] = &[
     "init", "serve", "check", "map", "callers", "callees", "path", "find", "context", "dead", "stats", "deps", "matrix",
     "tidy", "tests", "test-only", "unused", "dups", "split", "hotspots", "remove", "refs", "impact", "gate", "trace",
-    "run", "fuzz", "tighten", "graph", "search", "port-status", "port-dump",
+    "run", "fuzz", "tighten", "graph", "search", "port-status", "port-dump", "verify",
 ];
 
 #[derive(Default)]
@@ -127,7 +127,12 @@ fn whys(p: &Project) -> std::collections::HashMap<String, (String, String)> {
 }
 
 fn main() {
-    let a = parse(std::env::args().skip(1).collect());
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    // `verify` has its own flags (docs/verify.md); the Python CLI hands it here unchanged.
+    if argv.first().map(String::as_str) == Some("verify") {
+        std::process::exit(seamcheck::verify::main(&argv[1..]));
+    }
+    let a = parse(argv);
     let root = if a.config.is_empty() {
         find_root(&a.root)
     } else {

@@ -63,9 +63,12 @@ mostly parsing and linking: phase 1 takes the first, phase 2 the second.
 | `fingerprint.py` | 143 | content hashes, shared on-disk cache | `cache.rs` | 2 (only once parsing is worth caching; phase 1 needs no cache) |
 | `serve.py` | 252 | MCP server over queries | `serve.rs` | 4 |
 | `report.py` | 118 | HTML map | `report.rs` | 4 |
-| `runtime.py`, `runcmd.py` | 559 | `trace` / `run` / `fuzz` (reads only config) | `runtime.rs` | 4 (independent, any time) |
+| `runtime.py`, `runcmd.py` | 559 | `trace` / `run` / `fuzz` (reads only config) | `runtime/` (the checker and its expressions: done, for `verify`; the commands still Python) | 4 (independent, any time) |
 | `init.py` | 203 | first seamcheck.toml, pack detection, hook | `init.rs` | 4 |
 | `output.py` | 72 | SARIF, GitHub annotations | `output.rs` | 1 |
+
+`verify` (docs/verify.md) is new work with no Python twin: it lives only in
+the crate (`src/verify/`), and the Python CLI forwards the command to it.
 
 ## What each command needs
 
