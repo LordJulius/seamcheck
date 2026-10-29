@@ -10,7 +10,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use crate::gate::is_test;
-use crate::graph::pylink::{self, PyIndex, EXTERNAL};
+use crate::graph::imports::{self, Imports, EXTERNAL};
+use crate::graph::pylink::{self, PyIndex};
 use crate::graph::Graph;
 use crate::model::{Call, Func, Module};
 use crate::project::{ext_of, Project};
@@ -139,25 +140,11 @@ fn injected_imports(g: &Graph, use_: &str, depth: i32) -> Vec<String> {
     out
 }
 
-/// A module name for an adapter's import (core._resolve_where): "" when it
-/// can't be found, EXTERNAL for a package from outside the project. Plain
-/// names stand for themselves; the prefixed forms ("js:", "rs:", "inc:",
-/// "go:") are their languages' lanes.
-fn resolve_where(g: &Graph, py: &PyIndex, where_: &str) -> String {
-    if where_.starts_with("py:") {
-        return py.resolve(g, where_);
-    }
-    for pre in ["js:", "rs:", "inc:", "go:", "go?:"] {
-        if where_.starts_with(pre) {
-            return String::new(); // lane: that language's import resolution
-        }
-    }
-    where_.to_string()
-}
-
-/// core._resolve_imports, for what the ported adapters produce.
-fn resolve_imports(g: &mut Graph) {
+/// core._resolve_imports.
+fn resolve_imports(g: &mut Graph, p: &Project) {
     crate::lang::ruby::link::link(g); // Ruby: requires, constants and supertypes, across files
+    crate::graph::qt::qt_dbus_interfaces(g); // Qt: a generated D-Bus proxy stands for the class it calls
+    crate::graph::qt::qml_page_props(g); // QML: what each page's untyped properties are handed
     let names: Vec<String> = g.modules.keys().cloned().collect();
     for n in &names {
         let m = g.modules.get_mut(n).unwrap();
@@ -173,48 +160,107 @@ fn resolve_imports(g: &mut Graph) {
         Vec<String>,
         Vec<String>,
         std::collections::BTreeSet<String>,
+        bool,
     );
     let mut done: Vec<(String, Resolved)> = Vec::new();
-    for n in &names {
-        let m = &g.modules[n];
-        let mut ext: std::collections::BTreeSet<String> = Default::default();
-        let mut aliases = indexmap::IndexMap::new();
-        for (k, v) in &m.aliases {
-            let r = resolve_where(g, &py, v);
-            if r == EXTERNAL {
-                ext.insert(k.clone());
-            } else if !r.is_empty() {
-                aliases.insert(k.clone(), r);
+    {
+        let imp = Imports::new(g, p);
+        for n in &names {
+            let m = &g.modules[n];
+            let mut ext: std::collections::BTreeSet<String> = Default::default();
+            let mut aliases = indexmap::IndexMap::new();
+            for (k, v) in &m.aliases {
+                let r = imp.resolve_where(&py, v);
+                if r == EXTERNAL {
+                    ext.insert(k.clone());
+                } else if !r.is_empty() {
+                    let mut k = k.clone();
+                    if v.starts_with("go?:") && r.starts_with("pkg:") {
+                        k = r.rsplit_once('#').map(|x| x.1.to_string()).unwrap_or_else(|| r.clone()); // imported without a name: the package's own name
+                    }
+                    aliases.insert(k, r);
+                }
             }
-        }
-        let mut imported = indexmap::IndexMap::new();
-        for (k, (v, nm)) in &m.imported {
-            let r = resolve_where(g, &py, v);
-            if r == EXTERNAL {
-                ext.insert(k.clone());
-            } else if !r.is_empty() {
-                imported.insert(k.clone(), (r, nm.clone()));
+            let jvm = matches!(ext_of(&m.file), ".kt" | ".kts" | ".java");
+            let mut imported = indexmap::IndexMap::new();
+            for (k, (v, nm)) in &m.imported {
+                let mut r = imp.resolve_where(&py, v);
+                if jvm && r.starts_with("pkg:") && !g.packages.contains_key(&r[4..]) {
+                    // `import okhttp3.TestUtil.headerEntries`: a member of object TestUtil in package
+                    // okhttp3 (or of a companion); a package the project doesn't have: a library's
+                    let h = imports::jvm_member_home(g, &r[4..]);
+                    r = if h.is_empty() { EXTERNAL.to_string() } else { h };
+                }
+                if r == EXTERNAL {
+                    ext.insert(k.clone());
+                } else if !r.is_empty() {
+                    imported.insert(k.clone(), (r, nm.clone()));
+                }
             }
+            let uses: Vec<String> =
+                m.uses.iter().map(|u| imp.resolve_where(&py, u)).filter(|r| !r.is_empty() && r != EXTERNAL).collect();
+            let rx: Vec<String> = m.reexports.iter().map(|u| imp.resolve_where(&py, u)).collect();
+            let ext_star = rx.iter().any(|r| r == EXTERNAL); // `export * from "@testing-library/react"`
+            let reexports: Vec<String> = rx.into_iter().filter(|r| !r.is_empty() && r != EXTERNAL).collect();
+            let external = ext.into_iter().filter(|k| !aliases.contains_key(k) && !imported.contains_key(k)).collect();
+            done.push((n.clone(), (aliases, imported, uses, reexports, external, ext_star)));
         }
-        let uses: Vec<String> =
-            m.uses.iter().map(|u| resolve_where(g, &py, u)).filter(|r| !r.is_empty() && r != EXTERNAL).collect();
-        // (lane JS: `export * from "@scope/pkg"` marks the module `_ext_star`)
-        let reexports: Vec<String> =
-            m.reexports.iter().map(|u| resolve_where(g, &py, u)).filter(|r| !r.is_empty() && r != EXTERNAL).collect();
-        let external = ext.into_iter().filter(|k| !aliases.contains_key(k) && !imported.contains_key(k)).collect();
-        done.push((n.clone(), (aliases, imported, uses, reexports, external)));
     }
-    for (n, (aliases, imported, uses, reexports, external)) in done {
+    for (n, (aliases, imported, uses, reexports, external, ext_star)) in done {
         let m = g.modules.get_mut(&n).unwrap();
         m.aliases = aliases;
         m.imported = imported;
         m.uses = uses;
         m.reexports = reexports;
         m.external = external;
+        if ext_star {
+            m.ext_star = true;
+        }
     }
-    // lane JS: `export { a as b }` aliases and libraries re-exported wholesale
+    // `export { renderApp as render }` in the module imported from
+    let mut fix: Vec<(String, String, (String, String))> = Vec::new();
+    for n in &names {
+        for (k, (w, nm)) in &g.modules[n].imported {
+            if let Some(src) = g.modules.get(w) {
+                if let Some(alias) = src.bound.get(&format!("\0export:{nm}")).and_then(|a| a.strip_prefix("export:")) {
+                    if alias != nm {
+                        fix.push((n.clone(), k.clone(), (w.clone(), alias.to_string())));
+                    }
+                }
+            }
+        }
+    }
+    for (n, k, v) in fix {
+        let m = g.modules.get_mut(&n).unwrap();
+        m.imported.insert(k.clone(), v);
+        m.external.remove(&k);
+    }
+    // a name imported from a module that re-exports a library wholesale, and that no
+    // project module defines (`fireEvent` through test-utils): the library's
+    let mut ext_names: Vec<(String, String)> = Vec::new();
+    {
+        let t = crate::graph::infer::Types::new(g, p);
+        for n in &names {
+            for (k, (w, nm)) in &g.modules[n].imported {
+                if let Some(src) = g.modules.get(w) {
+                    if src.ext_star
+                        && t.in_scope(w, nm, 0).is_empty()
+                        && t.defining_module(w, nm, 0).is_empty()
+                        && !g.modules.keys().any(|mn| *mn == format!("{w}.{nm}"))
+                    {
+                        ext_names.push((n.clone(), k.clone()));
+                    }
+                }
+            }
+        }
+    }
+    for (n, k) in ext_names {
+        let m = g.modules.get_mut(&n).unwrap();
+        m.external.insert(k.clone());
+        m.imported.shift_remove(&k);
+    }
     pylink::python_names(g);
-    // lane: Ruby link, Qt D-Bus / QML page props, QML context
+    crate::graph::qt::qml_context(g);
     let mut add: Vec<(String, Vec<String>)> = Vec::new();
     for n in &names {
         let m = &g.modules[n];
@@ -267,7 +313,7 @@ pub fn walk_order(g: &Graph) -> Vec<String> {
 
 /// Imports resolved, then every call of every function to edges.
 pub fn build_edges(g: &mut Graph, p: &Project) {
-    resolve_imports(g);
+    resolve_imports(g, p);
     // short names for qualifiers in path-named languages: the file's stem
     // and the types it declares (a class that is its own module: its types only)
     let mut short: HashMap<String, Vec<String>> = HashMap::new();

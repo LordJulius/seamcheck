@@ -7,9 +7,11 @@
 //! Elixir `Foo.bar()` landing on a Kotlin `Foo.kt` through its file stem) has
 //! no edge here; `parity --edges` reports any such difference.
 
+pub mod imports;
 pub mod infer;
 pub mod link;
 pub mod pylink;
+pub mod qt;
 
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};

@@ -31,6 +31,11 @@ use std::time::Instant;
 
 use serde_json::Value;
 
+/// How many differences to print (env PARITY_MAX, default 60).
+fn max_show() -> usize {
+    std::env::var("PARITY_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(60)
+}
+
 struct Opts {
     python: PathBuf,
     rust: PathBuf,
@@ -526,7 +531,7 @@ fn edge_parity(o: &Opts, repo: &Path, name: &str) -> usize {
                 continue;
             }
             n += c - rc;
-            if n <= 60 {
+            if n <= max_show() {
                 println!("  edge only python ({}x): {}", c - rc, show(e));
             }
         }
@@ -535,7 +540,7 @@ fn edge_parity(o: &Opts, repo: &Path, name: &str) -> usize {
         let pc = pb.get(e).copied().unwrap_or(0);
         if *c > pc {
             n += c - pc;
-            if n <= 60 {
+            if n <= max_show() {
                 println!("  edge only rust   ({}x): {}", c - pc, show(e));
             }
         }

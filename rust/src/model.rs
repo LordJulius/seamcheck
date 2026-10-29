@@ -160,6 +160,8 @@ pub struct Module {
     pub lib_bases: Vec<String>,
     /// C: files this one `#include`s (the C adapter)
     pub c_includes: Vec<String>,
+    /// JS: `export * from "pkg"` of a library (core fills it)
+    pub ext_star: bool,
 }
 
 impl Module {
