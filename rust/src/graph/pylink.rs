@@ -461,3 +461,8 @@ pub fn extended(g: &Graph) -> HashSet<String> {
     out
 }
 
+
+/// `name in dir(builtins)`
+pub fn is_py_builtin(name: &str) -> bool {
+    PY_BUILTINS.contains(&name)
+}

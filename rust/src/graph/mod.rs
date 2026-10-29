@@ -7,6 +7,7 @@
 //! Elixir `Foo.bar()` landing on a Kotlin `Foo.kt` through its file stem) has
 //! no edge here; `parity --edges` reports any such difference.
 
+pub mod infer;
 pub mod link;
 pub mod pylink;
 
@@ -44,6 +45,10 @@ pub struct Graph {
     pub packages: HashMap<String, Vec<String>>,
     /// adapter crashes and the like, as config notes
     pub problems: Vec<String>,
+    /// C++ classes registered under a QML name: QML name -> class (core._qml_context)
+    pub qml_names: IndexMap<String, String>,
+    /// the packs' `[[param]]` / `[[returns]]` entries (config.pack_params)
+    pub params: IndexMap<String, serde_json::Value>,
 }
 
 /// Godot: "res://path" -> the script's module name (core._res_map).

@@ -156,6 +156,10 @@ pub struct Module {
     pub reexports: Vec<String>,
     /// local names bound to imports from outside the project (core fills it)
     pub external: BTreeSet<String>,
+    /// supertypes written but not the project's (infer.resolve_bases): by name
+    pub lib_bases: Vec<String>,
+    /// C: files this one `#include`s (the C adapter)
+    pub c_includes: Vec<String>,
 }
 
 impl Module {
