@@ -51,10 +51,11 @@ fn json_is_pythons_indent_1_and_ascii() {
     assert_eq!(seamcheck::output::dumps(&v), "[\n {\n  \"a\": \"\\u00e9\",\n  \"b\": []\n }\n]");
 }
 
+// (every command is ported now: the last that said "phase 2", `split`, answers)
 #[test]
-fn graph_commands_say_they_are_phase_2() {
+fn split_answers() {
     let (d, _p) = common::fixture("cli");
     let o = Command::new(env!("CARGO_BIN_EXE_seamcheck")).args(["split", "src/app/view.py"]).current_dir(d.path()).output().unwrap();
-    assert_eq!(o.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&o.stderr).contains("phase 2"));
+    assert_eq!(o.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&o.stdout).starts_with("src/app/view.py: "));
 }

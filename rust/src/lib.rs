@@ -21,6 +21,7 @@ pub mod rules;
 pub mod runtime;
 pub mod scan;
 pub mod serve;
+pub mod tidy;
 pub mod verify;
 pub mod walk;
 

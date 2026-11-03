@@ -1,7 +1,7 @@
-//! The land gate (tidy.gate), phase 1: rule errors anywhere, names new
-//! code may not use (`[gate] forbid_added`), and checks pinned to a file the
-//! change split up. Dead code, copies, do-nothing tests and the exactness
-//! guard need the call graph and come with phase 2.
+//! The land gate (tidy.gate): rule errors anywhere, names new code may not
+//! use (`[gate] forbid_added`), checks pinned to a file the change split up,
+//! and, from the call graph, dead code, copies and do-nothing tests in the
+//! lines the change touched (`tidy/`), plus the exactness guard's warnings.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::process::Command;
@@ -289,20 +289,40 @@ pub struct Forbidden {
     pub word: String,
 }
 
+#[derive(Default)]
 pub struct Report {
     pub changed_files: Vec<String>,
     pub rules: Vec<Finding>,
     pub forbidden: Vec<Forbidden>,
+    pub unused: Vec<crate::tidy::dead::Row>,
+    pub test_only: Vec<crate::tidy::dead::Row>,
+    pub dups: Vec<crate::tidy::dups::Pair>,
+    pub tests: Vec<crate::tidy::audit::TestRow>,
     pub moved_refs: Vec<MovedRef>,
+    pub exactness: Vec<crate::tidy::exactness::Drop>,
 }
 
 impl Report {
     pub fn failed(&self) -> bool {
-        !self.rules.is_empty() || !self.forbidden.is_empty() || !self.moved_refs.is_empty()
+        !self.rules.is_empty()
+            || !self.forbidden.is_empty()
+            || !self.unused.is_empty()
+            || !self.test_only.is_empty()
+            || !self.dups.is_empty()
+            || !self.tests.is_empty()
+            || !self.moved_refs.is_empty()
     }
 }
 
 pub fn gate(p: &mut Project, r: &str, staged: bool) -> Report {
+    gate_with(p, r, staged, &[], &crate::tidy::exactness::Book::default())
+}
+
+/// `extra`: the run's --config files (the exactness guard measures a
+/// commit under them); `book`: where its records live.
+pub fn gate_with(p: &mut Project, r: &str, staged: bool, extra: &[String], book: &crate::tidy::exactness::Book) -> Report {
+    // (the graph loads once, when something asks for it: the rules that walk it share it)
+    let graph: std::cell::OnceCell<std::sync::Arc<crate::graph::Graph>> = std::cell::OnceCell::new();
     let lines = changed_lines(p, r, staged);
     let touched: BTreeSet<String> = lines.keys().filter(|rel| p.file_set.contains(*rel)).cloned().collect();
     let (moved, moved_from) = moved_lines(p, r, staged, &lines);
@@ -318,8 +338,13 @@ pub fn gate(p: &mut Project, r: &str, staged: bool) -> Report {
         .filter(|(rel, ln)| MANIFESTS.contains(&rel.rsplit('/').next().unwrap_or(rel)) && !version_only(p, rel, ln))
         .map(|(rel, _)| rel.clone())
         .collect();
-    let mut report =
-        Report { changed_files: lines.keys().cloned().collect(), rules: vec![], forbidden: vec![], moved_refs: vec![] };
+    let mut report = Report { changed_files: lines.keys().cloned().collect(), ..Default::default() };
+    {
+        let pr: &Project = p;
+        let g = || &**graph.get_or_init(|| pr.graph());
+        let changed: BTreeSet<String> = lines.keys().cloned().collect();
+        report.exactness = book.drops(pr, &g, r, &changed, extra);
+    }
     if touched.is_empty() && manifest_changed.is_empty() && !rule_scoped(p, &lines) {
         return report;
     }
@@ -398,6 +423,47 @@ pub fn gate(p: &mut Project, r: &str, staged: bool) -> Report {
             }
         }
     }
+    let p: &Project = p;
+    let g = graph.get_or_init(|| p.graph());
+    graph_half(p, g, &touched, &fresh, &mut report);
     report.moved_refs = moved_refs(p, &moved_from, &changed);
     report
+}
+
+/// Dead code, test-only code, copies and do-nothing tests in what the change touched.
+fn graph_half(p: &Project, g: &crate::graph::Graph, touched: &BTreeSet<String>, fresh: &HashMap<String, BTreeSet<usize>>, report: &mut Report) {
+    use crate::tidy::{audit, dead, dups, Corpus, Tidy};
+    let t = Tidy::new(p, g);
+    let mut new: HashSet<String> = HashSet::new();
+    let mut hit: HashSet<String> = HashSet::new();
+    for rel in touched {
+        let fr = fresh.get(rel).cloned().unwrap_or_default();
+        let raw = p.text_for(rel, Mode::Raw);
+        let generated = std::cell::OnceCell::new();
+        for m in g.by_file.get(rel).into_iter().flatten().filter_map(|n| g.modules.get(n)) {
+            for f in &m.funcs {
+                if f.kind == "top" || suppressed(&raw, f.start, "gate") {
+                    continue;
+                }
+                // new (or re-declared): judged for dead code and do-nothing tests; an edit
+                // inside an old function doesn't make its old debt yours
+                if fr.contains(&f.start) {
+                    new.insert(f.id.clone());
+                }
+                // touched anywhere (moved code aside): judged for copies; generated
+                // files repeat their generator's shapes by design
+                if fr.range(f.start..=f.end).next().is_some() && !*generated.get_or_init(|| is_generated(p, rel)) {
+                    hit.insert(f.id.clone());
+                }
+            }
+        }
+    }
+    if !new.is_empty() {
+        let corpus = Corpus::new(p);
+        report.unused = dead::unused(&t, &corpus).into_iter().filter(|r| new.contains(&r.id)).collect();
+        report.test_only = dead::test_only(&t, &corpus).into_iter().filter(|r| new.contains(&r.id)).collect();
+        report.tests =
+            audit::test_audit(&t, Some(&new)).into_iter().filter(|r| r.reach == 0 || !r.reads_source.is_empty()).collect();
+    }
+    report.dups = dups::dups(&t, 12, 0.45, Some(&hit)).into_iter().flat_map(|gr| gr.pairs).collect();
 }

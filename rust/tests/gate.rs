@@ -1,7 +1,7 @@
-//! The land gate, phase 1 (test_gate.py, test_gate_moves.py): rule errors,
+//! The land gate (test_gate.py, test_gate_moves.py): rule errors,
 //! `[gate] forbid_added` names in changed lines, moved code, generated names
-//! and checks pinned to a file the change split. The dead-code, copy and
-//! test-audit halves of these tests need the call graph (phase 2).
+//! and checks pinned to a file the change split. The graph half (dead code,
+//! copies, the tests audit, exactness) is in gate_graph.rs.
 
 mod common;
 

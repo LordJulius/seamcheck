@@ -46,6 +46,8 @@ struct Args {
     jobs: i64,
     hook: bool,
     force: bool,
+    ids: bool,
+    apply: bool,
 }
 
 fn usage_error(msg: &str) -> ! {
@@ -119,6 +121,8 @@ fn parse(argv: Vec<String>) -> Args {
                 let v = val(&mut i);
                 let n: i64 = v.parse().unwrap_or_else(|_| usage_error(&format!("argument {flag}: invalid int value: '{v}'")));
                 if flag == "--depth" { a.q.depth = n } else { a.q.limit = n }
+            "--ids" => a.ids = true,
+            "--apply" => a.apply = true,
             }
             "--strict" => a.strict = true,
             "--echo" => a.echo = true,
@@ -134,7 +138,7 @@ fn parse(argv: Vec<String>) -> Args {
             }
             "--precise" => a.precise = true,
             "--no-cache" => a.no_cache = true,
-            "--exact" | "--ids" | "--apply" => {}
+            "--exact" => {}
             "--hook" => a.hook = true,
             "--force" => a.force = true,
             _ if x.starts_with('-') && x.len() > 1 => usage_error(&format!("unrecognized arguments: {x}")),
@@ -202,7 +206,10 @@ fn main() {
     let t0 = Instant::now();
     let code = match a.cmd.as_str() {
         "check" => check(&a, &root, t0),
-        "gate" => gate(&a, &root, t0),
+        "gate" => seamcheck::tidy::cli::gate(&tidy_opts(&a), &root, t0),
+        "tidy" | "tests" | "test-only" | "unused" | "dups" | "split" | "hotspots" | "remove" | "refs" => {
+            seamcheck::tidy::cli::main(&tidy_opts(&a), &root, t0)
+        }
         "port-status" => port_status(&a, &root),
         "port-dump" => port_dump(&a, &root),
         "matrix" => matrix(&a, &root),
@@ -343,67 +350,18 @@ fn check(a: &Args, root: &Path, t0: Instant) -> i32 {
     failed as i32
 }
 
-fn gate(a: &Args, root: &Path, t0: Instant) -> i32 {
-    let mut p = Project::load(root, &a.config);
-    let r = a.since.clone().unwrap_or_else(|| "HEAD".into());
-    let rep = seamcheck::gate::gate(&mut p, &r, a.staged);
-    let w = whys(&p);
-    let bad = rep.failed();
-    if a.format != "text" {
-        let mut flatv: Vec<Value> = rep
-            .rules
-            .iter()
-            .map(|f| {
-                json!({"kind": "rule", "rule": f.rule, "severity": f.severity, "file": f.file, "line": f.line,
-                       "message": f.message, "why": w.get(&f.rule).map(|x| x.0.clone()).unwrap_or_default(), "fix": ""})
-            })
-            .collect();
-        for x in &rep.forbidden {
-            flatv.push(json!({"kind": "forbidden", "rule": "forbidden", "severity": "error", "file": x.file,
-                              "line": x.line, "message": x.word, "why": "",
-                              "fix": "retire the old path instead of naming a second one"}));
-        }
-        for x in &rep.moved_refs {
-            flatv.push(json!({"kind": "moved_refs", "rule": "moved-ref", "severity": "error", "file": x.file,
-                              "line": x.line, "message": format!("names {}, which this change split up", x.moved_from),
-                              "why": "a check pinned to one file checks less after a split",
-                              "fix": "point it at where the code went (or a glob), or `seamcheck: allow moved-ref`"}));
-        }
-        match a.format.as_str() {
-            "json" => println!(
-                "{}",
-                dumps(&json!({"blocked": bad, "changed_files": rep.changed_files, "findings": flatv,
-                              "ms": t0.elapsed().as_millis() as u64}))
-            ),
-            "sarif" => println!("{}", sarif(&flatv, &[])),
-            _ => println!("{}", github(&flatv)),
-        }
-        return bad as i32;
+fn tidy_opts(a: &Args) -> seamcheck::tidy::cli::Opts<'_> {
+    seamcheck::tidy::cli::Opts {
+        cmd: &a.cmd,
+        args: &a.args,
+        config: &a.config,
+        format: &a.format,
+        since: a.since.as_deref(),
+        staged: a.staged,
+        limit: a.q.limit.max(0) as usize,
+        ids: a.ids,
+        apply: a.apply,
     }
-    let mut shown = std::collections::HashSet::new();
-    for f in &rep.rules {
-        println!("  rule {}: {}:{}  {}", f.rule, f.file, f.line, f.message);
-        let why = w.get(&f.rule).map(|x| x.0.as_str()).unwrap_or("");
-        if !why.is_empty() && shown.insert(f.rule.clone()) {
-            println!("      why: {why}");
-        }
-    }
-    for x in &rep.forbidden {
-        println!("  new code names '{}': {}:{}  (retire the old path instead)", x.word, x.file, x.line);
-    }
-    for x in &rep.moved_refs {
-        println!(
-            "  names {}, which this change split up: {}:{}  (point it at the new files or a glob)",
-            x.moved_from, x.file, x.line
-        );
-    }
-    println!(
-        "seamcheck gate: {} changed files; {}  ({} ms)",
-        rep.changed_files.len(),
-        if bad { "BLOCKED" } else { "clear" },
-        t0.elapsed().as_millis()
-    );
-    bad as i32
 }
 
 fn port_status(a: &Args, root: &Path) -> i32 {
