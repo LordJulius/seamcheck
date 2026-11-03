@@ -26,14 +26,14 @@ LISTS = ("rule", "invariant", "contract", "bridge")
 KEYS = {
     "rule": {"id", "kind", "pattern", "in", "allow", "why", "severity", "if", "then", "scope", "window", "text",
              "defined", "used", "check", "from", "when", "to", "depth", "unless", "message", "mode", "report", "skip",
-             "strict", "ignore", "package", "path", "func", "ordered", "source", "source_entry", "source_param", "source_not_param", "views", "extra_severity", "match", "fallback", "normalize", "rewrite", "run", "timeout", "sep", "wildcard",
+             "strict", "ignore", "package", "path", "func", "ordered", "source", "source_entry", "source_param", "source_not_param", "source_scope", "sql_sinks", "url_sinks", "path_sinks", "shell_sinks", "url_severity", "argv_severity", "lookups", "views", "extra_severity", "match", "fallback", "normalize", "rewrite", "run", "timeout", "sep", "wildcard",
              "lint", "options", "gate", "bar", "controls", "menus", "repo", "files", "prefix", "fix", "tighten", "via", "layers", "level", "allow_to", "fuzzy"},
     "invariant": {"id", "each", "where", "when", "assert", "for", "key", "why", "severity"},
     "contract": {"id", "act", "when", "assert", "why", "severity"},
     "bridge": {"id", "from", "to", "match", "sep", "wildcard", "normalize", "why"},
 }
 SEVERITIES = {"error", "warn", "info"}
-TABLES = ("project", "runtime", "deps", "tidy", "gate", "precise")
+TABLES = ("project", "runtime", "deps", "tidy", "gate", "precise", "security")
 # keys whose lists add up across files instead of the last file winning
 ADDITIVE = ("include", "exclude", "packs")
 DEFAULT_PACKS = ("security",)  # what `check` runs in a repo with no config at all

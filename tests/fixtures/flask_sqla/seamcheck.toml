@@ -1,0 +1,5 @@
+[project]
+packs = ["security"]
+
+[security]
+sanitizers = ["coerce_safe_redirect_target"]

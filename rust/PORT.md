@@ -156,6 +156,22 @@ comparison back.
   previous empty match when a non-empty one also starts there; never in a
   rule pattern so far.
 
+## Security pack: sink, source and sanitizer resolution (2026-11-03)
+
+`seamcheck/security.py` decides what a taint `path` rule's sink does with which
+argument (`sql_sinks`, `url_sinks`, `path_sinks`, `shell_sinks`,
+`url_severity`, `argv_severity`, `lookups`, `source_scope`, `[security]
+sanitizers`, Python `if` guards, ORM / HTTP receivers). Its Rust twin is
+`src/rules/security.rs`: the same functions over strings and a
+`TaintCtx` trait (`dirty(text)`, `rhs(name)`), so the path port (arch lane)
+calls them instead of re-deriving them. What the path port must also carry
+from arch.py: `_sink` / `_Ctx` (the categorised verdict, a severity and note
+per hit), `_Taint.values` + `rhs()`, the Python guards from
+`security.guarded`, `lookups` cleaning an assignment, `_dirty` dropping
+`x.get(..., type=int)`, `_names` skipping an attribute (`os.path` is not a
+tainted `path`; `...x` and PHP `$x` still count), and `downstream` refusing a
+call whose own line reads the source.
+
 ## Phase 1 status (2026-10-24)
 
 **Commands.** `check` (text / json / sarif / github, `--only`, `--skip`,

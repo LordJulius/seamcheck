@@ -400,6 +400,53 @@ own `query()` method, Express's `res.download(path, { root })`, Rails'
 `where(id: params[:id])`, a Go prepared statement's `QueryRow`, values
 through `int()` / `.to_i`). Test code is never an entry point.
 
+Each sink reads only the argument it does harm with (`sql_sinks`,
+`url_sinks`, `path_sinks`, `shell_sinks` in a rule; seamcheck/security.py),
+which a Flask + Flask-SQLAlchemy + Celery app with Qt desktop tools showed was
+most of the noise (104 errors on one real app, nearly all false):
+
+- SQL counts when the text is built from the value (an f-string, `%`, `+`,
+  `.format`, `text()` of one, followed through the names it was assigned to):
+  `db.session.execute(select(User).where(User.name == q))` and
+  `text("... :q"), {"q": q}` are clean. An ORM session (`db.session` with
+  `db = SQLAlchemy()`, `Session(engine)`) is no HTTP client: its
+  `get(Model, pk)` is a row by key, while a project class that subclasses
+  `requests.Session` / `httpx.Client` is one.
+- A URL whose scheme or host comes from the value is an error; a fixed host (a
+  constant, a config value) with the value only in its path or parameters is
+  a warning (`url_severity`); a same-origin path (`fetch("/api?q=" + q)`) is
+  nothing.
+- Only a file sink's first argument is a path, and an in-memory buffer
+  (`send_file(BytesIO(...))`) isn't one. An argument list with a fixed program
+  and no `shell=True` runs no shell: the value in its other arguments is a
+  warning (`argv_severity`, `"off"` drops it).
+- `url_for(...)`, `request.args.get("n", type=int)`, and a Python check before
+  the use (`if not NAME.fullmatch(name): abort(400)`, `x.isdigit()`, `x not in
+  ALLOWED`, `urlsplit(x).netloc`, `x.startswith("/")`; without `not`, inside
+  its block only) clean the value; so do a project's own sanitizers, declared
+  once for every taint rule:
+
+```toml
+[security]
+sanitizers = ["coerce_safe_redirect_target"]  # their return value is clean
+```
+
+- A row looked up by the value (`User.query.filter_by(name=q).first()`,
+  `db.session.get(Post, pid)`: a rule's `lookups`) is the database's, not the
+  value; `os.path` is no tainted `path` (an attribute isn't the name).
+- The web request is a source only in files that use a web framework and in
+  the functions they reach (`source_scope`): Celery's `self.request.args` and a
+  Qt `QNetworkRequest` named `request` aren't it. Desktop input (a Qt or Tk file
+  dialog, `sys.argv`, `input()`) is its own lower source,
+  `python-desktop-input` (warn), and counts only when it reaches a shell or
+  `eval`.
+
+On `tests/fixtures/flask_sqla` (that app's shape, cut down, with an
+injection beside each look-alike) the pack went from 18 errors to the 8 real
+ones and 2 warnings; on miguelgrinberg/microblog and flasky from 3 errors to a
+warning (a translator API at a fixed host), with the eight vulnerable apps'
+findings unchanged.
+
 This is not CodeQL's data flow: a value inside a container or an object's
 field, or a guard that validates it, isn't followed, so CodeQL stays the tool
 for a security audit. The pack is the cheap version that needs no build and
@@ -1033,7 +1080,14 @@ so `x = escape(x)` cleans x for the rest of its block), or a parameter a
 caller passed a tainted argument to. A value through a call named like an
 `unless` entry (`_sanitize_username(u)`, `params[:id].to_i`) is clean, and so
 is a constant first argument (a parameterized query) unless it names a shell.
-Each sink is reported once, with its shortest chain. The built-in `security`
+Each sink is reported once, with its shortest chain. With `sql_sinks`, `url_sinks`,
+`path_sinks` and `shell_sinks` (regexes over the same call text) a sink reads
+only the argument it uses, as the security pack's Python and JS rules do
+(above); `url_severity` / `argv_severity` set the severity of a fixed host's
+path and a fixed program's arguments, `lookups` (a regex) names the
+assignments that hold a database row rather than the value, and
+`source_scope` (a regex over a file's text) keeps the source to the files that
+match it and the functions they reach. The built-in `security`
 pack is this rule for seven languages:
 
 ```toml
@@ -1245,7 +1299,7 @@ severity = "error"
 | `compose` | `init-order` (`kotlin-init-order`), `inert-control` (Kotlin); `no-global-scope` (warn: a `GlobalScope` coroutine outlives its screen) |
 | `express` | (type knowledge only, below) |
 | `hono` | (type knowledge only, below) |
-| `security` | `python-injection`, `js-injection`, `php-injection`, `ruby-injection`, `go-injection`, `java-injection`, `csharp-injection`: request data into a shell, eval, SQL, a deserializer, a file path, a redirect or an outbound request; `tls-verification-off` (warn), `flask-debug`, `xml-external-entities`, `weak-password-hash`, `jwt-unverified` (see "Security, against CodeQL"). On with no `seamcheck.toml`; `init` lists it for every repo |
+| `security` | `python-injection`, `js-injection`, `php-injection`, `ruby-injection`, `go-injection`, `java-injection`, `csharp-injection`: request data into a shell, eval, SQL, a deserializer, a file path, a redirect or an outbound request; `python-desktop-input` (warn: a file dialog, argv or input() into a shell or eval); `tls-verification-off` (warn), `flask-debug`, `xml-external-entities`, `weak-password-hash`, `jwt-unverified` (see "Security, against CodeQL"). On with no `seamcheck.toml`; `init` lists it for every repo |
 
 A pack also says what its framework hands the code, so the call graph can type
 it. That knowledge applies whenever package.json shows the framework, listed

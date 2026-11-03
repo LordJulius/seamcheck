@@ -5,6 +5,7 @@
 
 pub mod command;
 pub mod fanout;
+pub mod security;
 
 use rayon::prelude::*;
 use serde_json::{Map, Value};

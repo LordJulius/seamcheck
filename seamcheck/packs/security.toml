@@ -9,6 +9,15 @@
 # plus a local taint, not full data flow: a value kept in a container or an
 # object's field is not followed. Narrow `from` or add sinks by overriding a
 # rule by its id (`security/python-injection`).
+#
+# Sinks a rule sorts into `sql_sinks` / `url_sinks` / `path_sinks` / `shell_sinks`
+# read only the argument they use (seamcheck/security.py): SQL text built from the
+# value, a URL whose host comes from it (a fixed host with the value in its path is
+# `url_severity`), a path that isn't an in-memory buffer, a command run by a shell
+# (a fixed program's argument list is `argv_severity`). `lookups`: an assignment
+# from a database lookup holds the row, not the value. `source_scope`: the source
+# counts in files that use its framework and in the functions they reach. A
+# project's own sanitizers: `[security] sanitizers = ["coerce_safe_redirect_target"]`.
 
 [[rule]]
 id = "python-injection"
@@ -16,13 +25,34 @@ kind = "path"
 why = "request data reaching a shell, eval, SQL, deserializer, template or file path is injection"
 fix = "validate or escape the value, use parameters (SQL) and safe loaders (yaml.safe_load), or allow-list it"
 from = ["**/*.py:*"]
-source = 'request\.(args|form|values|json|data|files|cookies|headers|url|path|full_path|referrer|get_json|stream|GET|POST|FILES|COOKIES|META|body|query_params|query|path_params)'
+# (the framework's request, not another object's: Celery's `self.request.args` is the task's; Django's views read `self.request`)
+source = '(?:(?<![\w.])|(?<=\bflask\.))request\.(args|form|values|json|data|files|cookies|headers|url|path|full_path|referrer|get_json|stream|GET|POST|FILES|COOKIES|META|body|query_params|query|path_params)|\bself\.request\.(GET|POST|FILES|COOKIES|META|body|headers|data|query_params|path|get_full_path)\b'
+source_scope = '(?m)^[ \t]*(?:from|import)[ \t]+(?:flask|quart|werkzeug|django|starlette|fastapi|bottle|sanic|falcon|pyramid|tornado|aiohttp|rest_framework|ninja|litestar|connexion|cherrypy|webob|responder|masonite)\b'
 to = ['^subprocess\.(Popen|run|call|check_call|check_output|getoutput|getstatusoutput)$', '^os\.(system|popen|exec\w*|spawn\w*)$',
       '^(eval|exec)$', '\.(execute|executemany|executescript|raw|extra)$', '^(pickle|cPickle|marshal|dill|jsonpickle)\.(loads?|decode)$',
       '^yaml\.(load|unsafe_load|full_load)$', '^(render_template_string|Template|mark_safe)$', '^jinja2\.Template$',
       '^ImageMath\.eval$', '^open$', '^send_file$', '^(redirect|HttpResponseRedirect)$',
       '^(requests|httpx|urllib\.request|urllib2|session)\.(get|post|put|request|urlopen)$', '^urlopen$']
 unless = ["escape", "sanitize", "quote", "safe_load", "secure_filename", "safe_join", "validate", "clean", "url_for", "reverse", "int", "float", "uuid"]
+sql_sinks = ['\.(execute|executemany|executescript|raw|extra)$']
+url_sinks = ['^(requests|httpx|urllib\.request|urllib2|session)\.(get|post|put|request|urlopen)$', '^urlopen$']
+path_sinks = ['^open$', '^send_file$']
+shell_sinks = ['^subprocess\.(Popen|run|call|check_call|check_output)$']
+lookups = '(?:await\s+)?(?:(?:[A-Za-z_]\w*\.)*session\.(?:get|scalar|scalars|execute|query)\b|(?:[A-Za-z_]\w*\.)?(?:get_or_404|first_or_404|one_or_404|get_object_or_404)\s*\(|[A-Z]\w*\.(?:query|objects)\b)'
+depth = 6
+
+[[rule]]
+id = "python-desktop-input"
+kind = "path"
+severity = "warn"
+why = "a value the desktop user typed or picked (a file dialog, argv, input()) reaching a shell or eval runs what they may not mean to"
+fix = "pass it in an argument list (no shell), or parse it instead of evaluating it"
+from = ["**/*.py:*"]
+source = '\bQ(?:FileDialog|InputDialog)\.get\w+|\b(?:filedialog|simpledialog)\.ask\w+|\bsys\.argv\b|(?<![\w.])input\s*\(|\.parse_args\s*\('
+to = ['^subprocess\.(Popen|run|call|check_call|check_output|getoutput|getstatusoutput)$', '^os\.(system|popen)$', '^(eval|exec)$']
+shell_sinks = ['^subprocess\.(Popen|run|call|check_call|check_output)$']
+argv_severity = "off"
+unless = ["escape", "sanitize", "quote", "validate", "clean", "int", "float"]
 depth = 6
 
 [[rule]]
@@ -40,6 +70,7 @@ to = ['^(child_process|cp)\.(exec|execSync|spawn|spawnSync|execFile|execFileSync
       '^(needle|axios|got|superagent|request|http|https)\.(get|post|put|request)$', '^fetch$',
       '(?i)(col|collection|coll)\.(find|findOne|findOneAndUpdate|findOneAndDelete|updateOne|updateMany|deleteOne|deleteMany|remove|count|countDocuments|aggregate)$']
 unless = ["escape", "sanitize", "validate", "normalize", "basename", "url_for", "parseInt", "parseFloat", "Number"]
+url_sinks = ['^(needle|axios|got|superagent|request|http|https)\.(get|post|put|request)$', '^fetch$']
 depth = 6
 
 [[rule]]

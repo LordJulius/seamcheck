@@ -17,7 +17,9 @@ import subprocess
 import sys
 
 CORPUS = {
-    "Python": ([".py"], ["pallets/flask", "encode/httpx", "psf/requests"]),
+    # (microblog: a Flask + Flask-SQLAlchemy + Flask-Login app with blueprints, the shape of most Flask apps;
+    # tests/fixtures/flask_sqla is the same shape cut down, with the security pack's look-alikes)
+    "Python": ([".py"], ["pallets/flask", "encode/httpx", "psf/requests", "miguelgrinberg/microblog"]),
     "Go": ([".go"], ["spf13/cobra", "junegunn/fzf"]),
     "Rust": ([".rs"], ["BurntSushi/ripgrep", "sharkdp/bat"]),
     "TypeScript": ([".ts", ".tsx", ".mts"], ["excalidraw/excalidraw", "honojs/hono", "plausible/analytics"]),

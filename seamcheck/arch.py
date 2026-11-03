@@ -31,6 +31,8 @@ from __future__ import annotations
 import os
 import re
 
+from . import security
+
 
 
 
@@ -298,7 +300,8 @@ def path(project, r: dict) -> list:
     from .core import Finding
     sinks = [re.compile(p) for p in (r["to"] if isinstance(r["to"], list) else [r["to"]])]
     source = re.compile(r["source"]) if r.get("source") else None
-    unless = set(r.get("unless", []))
+    unless = set(r.get("unless", [])) | (set(security.sanitizers(project)) if source is not None else set())
+    kinds = security.Sinks(r)
     # a call whose name holds an `unless` entry (`mysqli_real_escape_string(`, `_sanitize_username(`;
     # a short one, `int`, only as the whole name), or a method of that name (`params[:id].to_i`)
     names = "|".join(rf"\w*{re.escape(u)}\w*" if len(u) > 3 else rf"(?<![\w.]){re.escape(u)}" for u in unless)
@@ -329,6 +332,8 @@ def path(project, r: dict) -> list:
         starts = [f for f in starts if not tidy.is_test(project, f.file)
                   and (f.id in bound or _reads_source(project, f, source, r.get("source_not_param"))
                        or _reads(readers, _own_code(project, f)))]
+        if r.get("source_scope"):  # (the web request: not a desktop tool's QNetworkRequest named `request`)
+            starts = security.scoped(project, starts, re.compile(r["source_scope"]), depth)
     out, best = [], {}
     for s in sorted({f.id: f for f in starts}.values(), key=lambda f: f.id):
         if s.name in unless:
@@ -340,14 +345,15 @@ def path(project, r: dict) -> list:
             nxt = []
             for fid in frontier:
                 f = project.funcs[fid]
-                taint = _Taint(project, f, source, clean, given[fid], readers) if source is not None else None
+                taint = _Taint(project, f, source, clean, given[fid], readers, kinds) if source is not None else None
                 for c in f.calls:
                     # (Ruby's bare `system`; a chained call on its own line, `.FromSql(q)`, keeps its dot)
                     text = (f"{c.qual}." if c.qual and c.qual not in (".", "self") else "." if c.qual == "." else "") + c.name
-                    if any(p.search(text) for p in sinks) and (f.file, c.line) not in hits \
-                            and (source is None or _carries(project, f, c, source, clean, taint.at(c.line), sink=True)) \
-                            and not (source is not None and taint.downstream(project, f, c, {ln for (fl, ln) in hits if fl == f.file})):
-                        hits[(f.file, c.line)] = (fid, text)
+                    if (f.file, c.line) in hits:
+                        continue
+                    sev, note = _sink(project, f, c, text, sinks, kinds, source, clean, taint)
+                    if sev and not (source is not None and taint.downstream(project, f, c, {ln for (fl, ln) in hits if fl == f.file})):
+                        hits[(f.file, c.line)] = (fid, text, sev, note)
                 for dst, ln, exact in project.edges.get(fid, []):
                     if not (exact or fuzzy) or dst in prev or dst not in project.funcs or project.funcs[dst].name in unless:
                         continue
@@ -363,18 +369,62 @@ def path(project, r: dict) -> list:
                     prev[dst] = fid
                     nxt.append(dst)
             frontier = nxt
-        for (file, line), (fid, text) in sorted(hits.items()):
+        for (file, line), (fid, text, sev, note) in sorted(hits.items()):
             chain, k = [], fid
             while k is not None:
                 chain.append(project.funcs[k].name)
                 k = prev[k]
-            f = Finding(r["id"], r.get("severity", "error"), s.file, s.start, s.name,
-                        r.get("message", f"reaches {text}() at {file}:{line}: ") + " -> ".join(reversed(chain)))
+            f = Finding(r["id"], sev, s.file, s.start, s.name,
+                        r.get("message", f"reaches {text}(){note} at {file}:{line}: ") + " -> ".join(reversed(chain)))
             if source is None:
                 out.append(f)
             elif (file, line) not in best or len(chain) < best[(file, line)][0]:
                 best[(file, line)] = (len(chain), f)
     return out + [f for _, f in sorted(best.values(), key=lambda x: (x[1].file, x[1].line))]
+
+
+def _sink(project, f, c, text: str, sinks: list, kinds, source, clean, taint) -> tuple[str | None, str]:
+    """(severity, note) when call c is a sink the value reaches the way it does harm, else (None, "").
+    A categorised sink (`sql_sinks`, `url_sinks`, ...) reads only the argument it uses (security.py);
+    Python's ORM session is no HTTP client, a project subclass of one is."""
+    sev = kinds.severity
+    m = project.modules.get(f.module)
+    line = m.raw[c.line - 1] if m is not None and 0 < c.line <= len(m.raw) else ""
+    ctx = _Ctx(taint, source, clean, c.line) if source is not None else None
+    rhs = ctx.rhs if ctx is not None else (lambda name: None)
+    recv = security.receiver(project, f, c, line, rhs) if kinds.any() else None
+    if recv == "http" and not any(p.search(text) for p in sinks):
+        text = f"session.{c.name}"  # `api.get(url)` with `class Api(requests.Session)`
+    if not any(p.search(text) for p in sinks):
+        return None, ""
+    kind = kinds.kind(text)
+    if recv == "orm" and kind == "url":
+        return None, ""  # `db.session.get(User, pk)`: a row by its key, no request
+    if source is None:
+        return sev, ""
+    if kind is None:
+        return (sev, "") if _carries(project, f, c, source, clean, taint.at(c.line), sink=True) else (None, "")
+    if kind == "url":
+        args = _call_args(project, f, c)
+        first = next((a for a in args if not security._kwarg(a)), "")
+        if re.fullmatch(r"\s*[A-Z]\w*\s*", first) and first.strip() in project.short and c.name == "get":
+            return None, ""  # `session.get(Post, pk)`: a model class, so an ORM session
+    got = kinds.verdict(kind, _call_args(project, f, c), ctx)
+    return got if got else (None, "")
+
+
+class _Ctx:
+    """What the security verdicts ask of the taint at one line (security.Sinks.verdict)."""
+
+    def __init__(self, taint, source, clean, line: int):
+        self.taint, self.source, self.clean, self.line = taint, source, clean, line
+
+    def dirty(self, text: str) -> bool:
+        return _dirty(text, self.source, self.clean, self.taint.at(self.line))
+
+    def rhs(self, name: str):
+        got = self.taint.rhs(name, self.line)
+        return None if got is None else (got[0], _Ctx(self.taint, self.source, self.clean, got[1]))
 
 
 def _reads_source(project, f, source, not_param: bool = False) -> bool:
@@ -426,11 +476,12 @@ class _Taint:
     request.args[...]` taints x, `x = escape(x)` cleans it again: the last assignment
     before the line decides; branches and loops are read top to bottom)."""
 
-    def __init__(self, project, f, source, clean, given: frozenset, readers=None):
+    def __init__(self, project, f, source, clean, given: frozenset, readers=None, kinds=None):
         code, raw = _own_code(project, f), _own_code(project, f, raw=True)  # (f"dig {domain}": the raw text has the name)
         # (no interpolation: `"... where username = ?"` holds no value named username)
         no_interp = f.file.endswith((".java", ".go"))
         self.steps = []  # (line, name, dirty, indent)
+        self.values = {}  # (line, name) -> the value's raw text, for an assignment (security's verdicts read it)
         self.given = set(given)
         self.source = source
         self.start, self.lines = f.start, code.split("\n")
@@ -475,6 +526,14 @@ class _Taint:
                               r"([A-Za-z_]\w*)\.(?:startsWith|startswith|start_with\?|StartsWith|HasPrefix)[ \t]*\(", code, re.M):
             found.append((am.start(), am.group(1), [am.group(2)], am.end()))
             guards.add(am.end())
+        if f.file.endswith(".py"):
+            # Python's validators: `if not NAME.fullmatch(x): abort(400)`, `if x not in ALLOWED: ...`,
+            # `if urlsplit(x).netloc != "": x = url_for(...)` clean x after the `if`; the same check
+            # without `not` (`if x.isdigit():`) cleans it inside the block
+            for am in re.finditer(r"^([ \t]*)(?:el)?if[ \t]+(.+?):(?=[ \t]*$|[ \t]+(?:return|raise|abort|continue|break)\b)", code, re.M):
+                for k, (name, inside) in enumerate(security.guarded(am.group(2))):
+                    found.append((am.start() + k, am.group(1) + (" " if inside else ""), [name], am.start(2) + k))
+                    guards.add(am.start(2) + k)
         for start, indent, names, val in sorted(found):
             if val in guards:
                 ln = f.start + code.count("\n", 0, start)
@@ -485,8 +544,12 @@ class _Taint:
             ln = f.start + code.count("\n", 0, start)
             dirty = _dirty(rhs, source, clean, self.at(ln)) or (_reads(readers, rhs) and not
                                                                      (clean and any(c.search(rhs) for c in clean)))
+            if dirty and kinds is not None and val not in adds and val not in conds and kinds.lookup(raw[val:end]):
+                dirty = False  # `user = User.query.filter_by(name=q).first()`: the database's row, not the value
             if val in adds and not dirty:
                 continue  # (adding a clean value cleans nothing)
+            if val not in adds and len(names) == 1:
+                self.values[(ln, names[0])] = raw[val:end].strip()
             self.steps += [(ln, name, dirty, len(indent.expandtabs(4))) for name in names]
 
     def _inside(self, a: int, b: int, indent: int) -> bool:
@@ -502,8 +565,8 @@ class _Taint:
         m = project.modules.get(f.module)
         line = m.code[c.line - 1] if m is not None and c.line <= len(m.code) else ""
         used = [t for t in self.at(c.line) if _names(t, line)]
-        if not used or not sunk:
-            return False
+        if not used or not sunk or (self.source and m is not None and self.source.search(m.raw[c.line - 1])):
+            return False  # (a call that reads the source itself is a new injection: `r = fetch(req.query.url)`)
         for t in used:
             ln = max((ln for ln, name, _, _ in self.steps if name == t and ln < c.line), default=None)
             if ln not in sunk:
@@ -513,6 +576,14 @@ class _Taint:
             if sum(_names(u, rhs) for u in self.at(ln)) + bool(self.source and self.source.search(m.raw[ln - 1])) > 1:
                 return False
         return True
+
+    def rhs(self, name: str, line: int):
+        """(the value's text, its line) of name's latest assignment before line; None when the
+        latest step is no plain assignment (a parameter, a loop, a destructuring)."""
+        last = max((ln for ln, n, _, _ in self.steps if n == name and ln < line), default=None)
+        if last is None or (last, name) not in self.values:
+            return None
+        return self.values[(last, name)], last
 
     def at(self, line: int) -> set:
         state = {n: 0 for n in self.given}  # name -> the indentation it was tainted at
@@ -600,6 +671,8 @@ def _dirty(arg: str, source, clean, tainted: set) -> bool:
     (`(err, rows) => {...}`) is code, not the value, whatever names its body uses."""
     if _FUNCTION_LITERAL.match(arg):
         return False
+    # Flask / Werkzeug: `request.args.get("page", 1, type=int)` is an int
+    arg = re.sub(r"[\w.]+\.get\(\s*[^()]*\btype\s*=\s*(?:int|float|bool)\b[^()]*\)", " ", arg)
     if clean:
         call, method = clean
         if re.search(rf"{method.pattern}\s*(?:\([^()]*\))?\s*$", arg.strip()):
@@ -734,4 +807,7 @@ def _passed(project, f, c, g, params: list[str], source, clean, tainted: set) ->
 
 def _names(name: str, text: str) -> bool:
     """`name` (`$x`, `@x` or `x`) occurs in text as a whole name."""
-    return re.search(rf"(?<![\w$@]){re.escape(name)}(?!\w)", text) is not None
+    if name.startswith("$"):  # (PHP: `"a".$x` concatenates)
+        return re.search(rf"(?<![\w$@]){re.escape(name)}(?!\w)", text) is not None
+    # not an attribute of something else (`os.path`, `job.name`), but a spread (`...args`)
+    return re.search(rf"(?<![\w$@])(?<![^.]\.)(?<!^\.){re.escape(name)}(?!\w)", text) is not None

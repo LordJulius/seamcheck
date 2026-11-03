@@ -99,6 +99,8 @@ BAD = {
                                              "        Runtime.getRuntime().exec(\"ping \" + host);\n    }\n}\n")},
         "tls-verification-off": {"client.py": "import requests\n\n\ndef get(u):\n    return requests.get(u, verify=False)\n"},
         "flask-debug": {"app.py": "from flask import Flask\napp = Flask(__name__)\napp.run(host='0.0.0.0', debug=True)\n"},
+        "python-desktop-input": {"tool.py": ("import os\nfrom PyQt6.QtWidgets import QFileDialog\n\n\ndef pick(w):\n"
+                                             "    name, _ = QFileDialog.getOpenFileName(w, 'Script')\n    os.system('sh ' + name)\n")},
         "xml-external-entities": {"x.js": "const libxmljs = require('libxmljs');\n"
                                           "function load(s) {\n  return libxmljs.parseXmlString(s, {noent: true});\n}\n"},
         "weak-password-hash": {"users.py": "import hashlib\n\n\ndef store(password):\n"

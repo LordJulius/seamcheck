@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use crate::glob::close_match;
 
 pub const LISTS: [&str; 4] = ["rule", "invariant", "contract", "bridge"];
-pub const TABLES: [&str; 6] = ["project", "runtime", "deps", "tidy", "gate", "precise"];
+pub const TABLES: [&str; 7] = ["project", "runtime", "deps", "tidy", "gate", "precise", "security"];
 const ADDITIVE: [&str; 3] = ["include", "exclude", "packs"];
 const DEFAULT_PACKS: [&str; 1] = ["security"];
 const SEVERITIES: [&str; 3] = ["error", "warn", "info"];
@@ -20,7 +20,8 @@ const SEVERITIES: [&str; 3] = ["error", "warn", "info"];
 pub const RULE_KEYS: &[&str] = &[
     "id", "kind", "pattern", "in", "allow", "why", "severity", "if", "then", "scope", "window", "text", "defined",
     "used", "check", "from", "when", "to", "depth", "unless", "message", "mode", "report", "skip", "strict", "ignore",
-    "package", "path", "func", "ordered", "source", "source_entry", "source_param", "source_not_param", "views",
+    "package", "path", "func", "ordered", "source", "source_entry", "source_param", "source_not_param", "source_scope",
+    "sql_sinks", "url_sinks", "path_sinks", "shell_sinks", "url_severity", "argv_severity", "lookups", "views",
     "extra_severity", "match", "fallback", "normalize", "rewrite", "run", "timeout", "sep", "wildcard", "lint",
     "options", "gate", "bar", "controls", "menus", "repo", "files", "prefix", "fix", "tighten", "via", "layers",
     "level", "allow_to", "fuzzy",
