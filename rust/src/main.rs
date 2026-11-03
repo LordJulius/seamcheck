@@ -226,6 +226,7 @@ fn main() {
             },
             &root,
         ),
+        "deps" => seamcheck::deps::cli(&root, &a.config, &a.args, a.all, a.format == "json", t0),
         other => {
             eprintln!(
                 "seamcheck (rust, phase 1): `{other}` is not ported yet; it needs the call graph (phase 2). \

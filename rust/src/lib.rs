@@ -4,6 +4,7 @@
 
 pub mod arch;
 pub mod config;
+pub mod deps;
 pub mod gate;
 pub mod glob;
 pub mod graph;
