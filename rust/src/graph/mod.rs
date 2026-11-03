@@ -13,6 +13,7 @@ pub mod infer;
 pub mod link;
 pub mod pylink;
 pub mod qt;
+pub mod query;
 
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -56,6 +57,12 @@ pub struct Graph {
     pub bridged: HashMap<(String, String), String>,
     /// notes that a bridge couldn't be built here (warnings)
     pub env_notes: Vec<String>,
+    /// per extension, how call sites resolved (core.Project.resolution)
+    pub resolution: link::Resolution,
+    /// calls by a project function's name that reached none (core.Project.possible)
+    pub possible: link::Possible,
+    /// how long the load took (core.Project.parse_ms)
+    pub load_ms: u128,
 }
 
 /// Godot: "res://path" -> the script's module name (core._res_map).
@@ -102,6 +109,7 @@ impl Graph {
 
     /// `bridges` off: the call graph alone (parity compares it so).
     pub fn load_with(p: &Project, bridges: bool) -> Graph {
+        let t0 = std::time::Instant::now();
         let mut g = Graph::assemble(parse_all(p, None));
         // what the frameworks in use hand the functions they call (packs' [[param]]):
         // type knowledge, so a detected framework's applies without being listed
@@ -115,6 +123,7 @@ impl Graph {
         if bridges {
             bridges::apply_bridges(&mut g, p);
         }
+        g.load_ms = t0.elapsed().as_millis();
         g
     }
 

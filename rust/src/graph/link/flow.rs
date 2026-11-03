@@ -4,6 +4,7 @@
 use indexmap::IndexMap;
 
 use super::call::Resolver;
+use super::count::Counts;
 use crate::graph::infer::{ends, re, Val};
 use crate::graph::Edge;
 use crate::lang::chains::expression;
@@ -174,7 +175,7 @@ impl<'a> Resolver<'a> {
     /// A JS / TS call guessed on a parameter (`headers.set(k, v)` in
     /// `setFormDataHeaders(headers, ...)`): typed by what every caller passes,
     /// the call reaches that type's method, or (a library value) nothing.
-    pub(super) fn param_receivers(&self, edges: &mut Edges, redges: &mut Edges, pending: &[(String, Call)]) {
+    pub(super) fn param_receivers(&self, edges: &mut Edges, redges: &mut Edges, pending: &[(String, Call)], counts: &mut Counts) {
         let g = self.g;
         for (fid, c) in pending {
             let f = g.func(fid).unwrap();
@@ -223,6 +224,7 @@ impl<'a> Resolver<'a> {
                     redges.entry(h.id.clone()).or_default().push((eid.clone(), c.line, true));
                 }
             }
+            counts.settled_receiver(g, f, c, !hits.is_empty());
         }
     }
 
@@ -230,7 +232,7 @@ impl<'a> Resolver<'a> {
     /// every caller is exact and passes the same project function there by name
     /// (or hands on its own parameter, whose callers do), the call reaches that
     /// function.
-    pub(super) fn param_flow(&self, edges: &mut Edges, redges: &mut Edges, pending: &[(String, Call)]) {
+    pub(super) fn param_flow(&self, edges: &mut Edges, redges: &mut Edges, pending: &[(String, Call)], counts: &mut Counts) {
         let g = self.g;
         for (fid, c) in pending {
             let f = g.func(fid).unwrap();
@@ -243,12 +245,14 @@ impl<'a> Resolver<'a> {
                 .get(&f.id)
                 .map(|v| v.iter().filter(|(d, ln, e)| *ln == c.line && d.rsplit('.').next() == Some(c.name.as_str()) && !*e).cloned().collect())
                 .unwrap_or_default();
+            let had_guess = !old.is_empty();
             for (d, ln, e) in old {
                 remove_edge(edges, &f.id, &(d.clone(), ln, e));
                 remove_edge(redges, &d, &(f.id.clone(), ln, e));
             }
             edges.entry(f.id.clone()).or_default().push((target.id.clone(), c.line, true));
             redges.entry(target.id.clone()).or_default().push((f.id.clone(), c.line, true));
+            counts.settled_flow(f, had_guess);
         }
     }
 
