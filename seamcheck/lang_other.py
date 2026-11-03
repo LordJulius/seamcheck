@@ -314,6 +314,12 @@ _PY_IMPORT = re.compile(r"^[ \t]*import[ \t]+([\w. \t,]+)$", re.M)
 _PY_FROM = re.compile(r"^[ \t]*from[ \t]+(\.*[\w.]*)[ \t]+import[ \t]+(\([^)]*\)|[^\n]+)", re.M)
 # `x = Foo(`, `x: Foo` (a parameter or a local); `self.x = Foo(` / `self.x: Foo` for the class
 _PY_NEW = re.compile(r"(?:^|[;(,]|\bself\.)[ \t]*([A-Za-z_]\w*)[ \t]*(?::[^=\n]*)?=[ \t]*((?:[a-z_]\w*\.)*[A-Z]\w*)[ \t]*\(", re.M)
+# Flask-SQLAlchemy / SQLAlchemy 2: a row of the model (a class name, not a CONSTANT) a lookup names
+# (`db.session.get(User, pk)`, `db.session.scalar(select(User).where(...))`, `db.first_or_404(sa.select(User)...)`)
+_PY_ROW = re.compile(r"(?:^|[;(,])[ \t]*([A-Za-z_]\w*)[ \t]*(?::[^=\n]*)?=[ \t]*(?:await[ \t]+)?(?:[A-Za-z_]\w*\.)*"
+                     r"(?:session\.(?:get|get_one)\([ \t]*([A-Z]\w*[a-z]\w*)[ \t]*,|"
+                     r"(?:session\.scalar|first_or_404|one_or_404)\([ \t]*(?:[A-Za-z_]\w*\.)?select\([ \t]*([A-Z]\w*[a-z]\w*)[ \t]*\)|"
+                     r"get_or_404\([ \t]*([A-Z]\w*[a-z]\w*)[ \t]*,)", re.M)
 _PY_ANN = re.compile(r"^[ \t]*([A-Za-z_]\w*)[ \t]*:[ \t]*([^=\n#]+?)[ \t]*(?:=|#|$)", re.M)
 _PY_SELF_ATTR = re.compile(r"\bself\.([A-Za-z_]\w*)[ \t]*(?::[ \t]*([A-Z]\w*)(?![\w.\[])[^=\n]*)?(?:=[ \t]*((?:[a-z_]\w*\.)*[A-Z]\w*)[ \t]*\()?")
 # a function used as a value: `key=fn`, `(fn,`, `[fn]`, `return fn`, `callback=self.on_x`
@@ -656,6 +662,8 @@ def _py_collect(f: Func, lines: list[str], a: int, b: int, first: bool, skip: se
         if f.kind != "top":
             for m in _PY_NEW.finditer(t):
                 f.bound[m.group(1)] = "type:" + m.group(2)
+            for m in _PY_ROW.finditer(t):
+                f.bound.setdefault(m.group(1), "type:" + (m.group(2) or m.group(3) or m.group(4)))
             for m in _PY_ANN.finditer(t):
                 if (ty := type_name(m.group(2))):  # `x: flask.Flask`, `y: dict[str, Any] = {}`, `z: Optional[Foo]`
                     f.bound.setdefault(m.group(1), "type:" + ty)

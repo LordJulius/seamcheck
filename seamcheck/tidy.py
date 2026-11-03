@@ -69,8 +69,12 @@ def is_entry(project, f: Func) -> bool:
         return True
     mod = project.modules.get(f.module)
     raw = mod.raw if mod else []
-    # annotations right above: @impl / @Override / @Test / @Composable preview / decorators
-    return any(re.match(r"\s*@(impl|Override|Test|Preview|app\.|router\.|route|get|post|put|delete|patch)\b", raw[i])
+    # annotations right above: @impl / @Override / @Test / @Composable preview / decorators; a framework's
+    # registration on any object (a Flask blueprint's `@bp.route`, `@socketio.on`, `@celery.task`, `@login.user_loader`)
+    return any(re.match(r"\s*@(impl|Override|Test|Preview|app\.|router\.|route|get|post|put|delete|patch|shared_task|"
+                        r"[A-Za-z_]\w*\.(?:route|get|post|put|delete|patch|websocket|on|on_event|task|user_loader|"
+                        r"request_loader|errorhandler|app_errorhandler|before_request|before_app_request|after_request|"
+                        r"teardown_request|context_processor|cli\.command|command))\b", raw[i])
                for i in range(max(0, f.start - 4), f.start - 1))
 
 

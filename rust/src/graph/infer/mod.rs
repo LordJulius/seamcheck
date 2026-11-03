@@ -29,6 +29,7 @@ use crate::project::{ext_of, Project};
 
 mod arity;
 mod extra;
+pub mod flask;
 mod held;
 pub(crate) mod scope;
 mod walk;
@@ -187,6 +188,8 @@ pub(crate) struct Caches {
     gopkgvars: Option<HashMap<(String, String), Vec<String>>>,
     autoloads: Option<HashMap<(String, String), String>>,
     goroots: HashMap<String, String>,
+    /// Flask-Login's user class (infer_flask.login_user)
+    flask_user: Option<Option<Val>>,
     // core's scope helpers
     js_factory: HashMap<(String, String), Option<String>>,
     js_arg_members: HashMap<String, bool>,

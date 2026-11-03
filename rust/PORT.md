@@ -172,6 +172,15 @@ per hit), `_Taint.values` + `rhs()`, the Python guards from
 tainted `path`; `...x` and PHP `$x` still count), and `downstream` refusing a
 call whose own line reads the source.
 
+Flask types (same lane): `infer_flask.py` / `graph/infer/flask.rs` (a
+model's `.query` as an `Ext` value tagged `\0rows`, Flask-Login's
+`current_user`), `_PY_ROW` in both Python adapters (`db.session.get(User,
+pk)` binds `type:User`); parse and edge parity 0 on flask, httpx, requests,
+click, rich, microblog, flasky, tests/fixtures/flask_sqla. `tidy.is_entry`
+now also takes a framework registration on any object (`@bp.route`,
+`@socketio.on`, `@celery.task`, `@login.user_loader`): the gate lane's port
+of it needs the same regex.
+
 ## Phase 1 status (2026-10-24)
 
 **Commands.** `check` (text / json / sarif / github, `--only`, `--skip`,

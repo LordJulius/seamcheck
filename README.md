@@ -723,7 +723,7 @@ the code.
 
 | language | repo: project calls exact (static, October 2026) |
 |---|---|
-| Python | flask 96.3%, httpx 97.9%, requests 96.1% |
+| Python | flask 96.3%, httpx 97.9%, requests 96.1%, microblog 96% (November) |
 | C | jq 99.9%, redis 100.0% |
 | C++ | flameshot 98.1%, kdeconnect 97.4% |
 | C# | Polly 96.6%, Newtonsoft.Json 98.5% |
@@ -739,6 +739,16 @@ the code.
 | Ruby | sinatra 95.6%, jekyll 96.6% |
 | GDScript | godot-demo-projects 97.9%, tps-demo 100.0% |
 | QML | neochat 96.7%, cool-retro-term 96.9%, kdeconnect 99.1% |
+
+A Flask app's own shape (microblog: Flask-SQLAlchemy models, Flask-Login,
+blueprints) is typed too: `User.query.filter_by(...).first()` and
+`db.session.get(User, pk)` / `db.session.scalar(select(User)...)` are Users,
+the query's own methods are the library's, and Flask-Login's `current_user` is
+the project's one `UserMixin` class (seamcheck/infer_flask.py). On
+tests/fixtures/flask_sqla that took project calls exact from 64% to 87%, on
+flasky from 86% to 92%, microblog 95% to 96%. A function a framework registers
+(`@bp.route`, `@socketio.on`, `@celery.task`, `@login.user_loader`) is an entry
+point, not unused code.
 
 **Held out.** Those repos are the ones the resolvers were tuned on, so they
 overstate what a new repo gets. `bench/bench.py REPOS_DIR --holdout` runs 28

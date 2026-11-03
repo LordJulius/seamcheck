@@ -31,6 +31,9 @@ class User(UserMixin, db.Model):
     def is_following(self, user):
         return user.id in [u.id for u in self.followed]
 
+    def to_dict(self):
+        return {"id": self.id, "username": self.username, "avatar": self.avatar(64)}
+
     def recent_posts(self):
         return self.posts.order_by(Post.timestamp.desc())
 

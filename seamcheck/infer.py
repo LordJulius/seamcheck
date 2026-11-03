@@ -18,6 +18,8 @@ from __future__ import annotations
 import os
 import re
 
+from . import infer_flask
+
 from .chains import UNWRAP, generic_name, type_name
 
 UNKNOWN = ("unknown", (), False)  # declared, of a type the code doesn't say (a QML `property var`)
@@ -1200,6 +1202,9 @@ class Types:
                 before, cur = cur, self.instance(self.p.modules[el_t[0]], el_t[1])
                 continue
             before = cur
+            if infer_flask.is_rows(cur):
+                cur = infer_flask.step(cur, seg, EXT)  # `User.query.filter_by(...).first()`: a User
+                continue
             if cur is None and seg in _DOM_QUERIES and seg.endswith("()") and mod.file.endswith(_JS_EXTS[:-1]) \
                     and not self.p.by_name.get(seg[:-2]):
                 cur = EXT  # `el.getElementsByTagName('a')`: whatever el is, that finds DOM nodes
@@ -1375,6 +1380,8 @@ class Types:
             pm = self._go_package_var(fm.package, seg)
             if pm is not None:
                 return self.held(pm, None, pm.bound[seg], depth + 1)
+        if seg == "current_user" and fm.file.endswith(".py") and (cu := infer_flask.login_user(self, fm)) is not None:
+            return cu  # Flask-Login's proxy: the project's user class
         if seg in fm.external:
             return EXT
         if seg[:1].isupper() and seg in self.by_type and not fm.file.endswith(".py"):
@@ -1955,6 +1962,8 @@ class Types:
             if mod.file.endswith(_JS_EXTS):  # a module's object given a property elsewhere (`ctx.response = ...`)
                 got = self.field(list(mods), seg, depth)
                 return None if got is UNKNOWN else got
+            if seg == "query" and mod.file.endswith(".py") and infer_flask.model(self, mods):
+                return infer_flask.rows(mods)  # Flask-SQLAlchemy: `User.query`, a query of Users
             return None
         got = self.field(list(mods), seg, depth)
         if got is None:

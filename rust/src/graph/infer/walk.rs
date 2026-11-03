@@ -154,6 +154,10 @@ impl<'a> Types<'a> {
                 }
             }
             before = cur.clone();
+            if super::flask::is_rows(&cur) {
+                cur = Some(super::flask::step(cur.as_ref().unwrap(), seg)); // `User.query.filter_by(...).first()`: a User
+                continue;
+            }
             if cur.is_none()
                 && DOM_QUERIES.contains(&seg)
                 && seg.ends_with("()")
@@ -478,6 +482,11 @@ impl<'a> Types<'a> {
             // a package-level var another file of the package declares
             if let Some(pm) = self.go_package_var(&fm.package, seg) {
                 return self.held(pm, None, &pm.bound[seg], depth + 1, None);
+            }
+        }
+        if seg == "current_user" && fm.file.ends_with(".py") {
+            if let Some(cu) = self.flask_login_user(fm) {
+                return Some(cu); // Flask-Login's proxy: the project's user class
             }
         }
         if fm.external.contains(seg) {
@@ -883,6 +892,9 @@ impl<'a> Types<'a> {
                 // a module's object given a property elsewhere (`ctx.response = ...`)
                 let got = self.field(&mods, seg, depth);
                 return if got == Some(Val::Unknown) { None } else { got };
+            }
+            if seg == "query" && md.file.ends_with(".py") && self.flask_model(&mods) {
+                return Some(super::flask::rows(&mods)); // Flask-SQLAlchemy: `User.query`, a query of Users
             }
             return None;
         }

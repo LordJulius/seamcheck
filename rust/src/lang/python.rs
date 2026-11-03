@@ -38,6 +38,7 @@ struct Pats {
     import: Rx,
     from: Rx,
     new: Rx,
+    row: Rx,
     ann: Rx,
     self_attr: Rx,
     value: Rx,
@@ -75,6 +76,13 @@ fn pats() -> &'static Pats {
         new: Rx::lit(
             r"(?m)(?:^|[;(,]|\bself\.)[ \t]*([A-Za-z_]\w*)[ \t]*(?::[^=\n]*)?=[ \t]*((?:[a-z_]\w*\.)*[A-Z]\w*)[ \t]*\(",
         ),
+        // Flask-SQLAlchemy / SQLAlchemy 2: a row of the model a lookup names (lang_other._PY_ROW)
+        row: Rx::lit(concat!(
+            r"(?m)(?:^|[;(,])[ \t]*([A-Za-z_]\w*)[ \t]*(?::[^=\n]*)?=[ \t]*(?:await[ \t]+)?(?:[A-Za-z_]\w*\.)*",
+            r"(?:session\.(?:get|get_one)\([ \t]*([A-Z]\w*[a-z]\w*)[ \t]*,|",
+            r"(?:session\.scalar|first_or_404|one_or_404)\([ \t]*(?:[A-Za-z_]\w*\.)?select\([ \t]*([A-Z]\w*[a-z]\w*)[ \t]*\)|",
+            r"get_or_404\([ \t]*([A-Z]\w*[a-z]\w*)[ \t]*,)"
+        )),
         ann: Rx::lit(r"(?m)^[ \t]*([A-Za-z_]\w*)[ \t]*:[ \t]*([^=\n#]+?)[ \t]*(?:=|#|$)"),
         self_attr: Rx::lit(
             r"\bself\.([A-Za-z_]\w*)[ \t]*(?::[ \t]*([A-Z]\w*)(?![\w.\[])[^=\n]*)?(?:=[ \t]*((?:[a-z_]\w*\.)*[A-Z]\w*)[ \t]*\()?",
@@ -619,6 +627,10 @@ fn collect(f: &mut Func, lines: &[&str], raw: &[String], a: usize, b: usize, fir
         if f.kind != "top" {
             for m in p.new.find_iter(t) {
                 f.bound.insert(m.s(1).to_string(), format!("type:{}", m.s(2)));
+            }
+            for m in p.row.find_iter(t) {
+                let ty = [2, 3, 4].iter().find_map(|&i| m.get(i).filter(|x| !x.is_empty())).unwrap_or("");
+                f.bound.entry(m.s(1).to_string()).or_insert(format!("type:{ty}"));
             }
             for m in p.ann.find_iter(t) {
                 let ty = type_name(m.s(2));
