@@ -48,17 +48,30 @@ def class_bases(m) -> list[str]:
     return [x.strip() for x in bm.group(1).split(",") if x.strip() and "=" not in x] if bm else []
 
 
+def _bases(t, mn: str) -> list[str]:
+    key = ("\0flask_bases", mn)
+    if key not in t.cache:
+        t.cache[key] = class_bases(t.p.modules[mn])
+    return t.cache[key]
+
+
 def model(t, mods) -> bool:
     """Any of these classes is a Flask-SQLAlchemy model (a `db.Model` among its supertypes)."""
-    return any(_MODEL_BASE.match(b) for mn in mods for a in t.ancestors(mn) for b in class_bases(t.p.modules[a]))
+    key = ("\0flask_model", tuple(mods))
+    if key not in t.cache:
+        t.cache[key] = any(_MODEL_BASE.match(b) for mn in mods for a in t.ancestors(mn) for b in _bases(t, a))
+    return t.cache[key]
 
 
 def login_user(t, fm):
     """`current_user` imported from flask_login: an instance of the project's one UserMixin class."""
-    if not any(_CURRENT_USER.match(ln) for ln in fm.raw):
+    imports = ("\0flask_cu", fm.name)
+    if imports not in t.cache:
+        t.cache[imports] = any(_CURRENT_USER.match(ln) for ln in fm.raw)
+    if not t.cache[imports]:
         return None
     key = "\0flask_user"
     if key not in t.cache:
-        users = [mn for mn, m in t.p.modules.items() if m.owner and any(b.split(".")[-1] == "UserMixin" for b in class_bases(m))]
+        users = [mn for mn, m in t.p.modules.items() if m.owner and any(b.split(".")[-1] == "UserMixin" for b in _bases(t, mn))]
         t.cache[key] = ("inst", (users[0],), True) if len(users) == 1 else None
     return t.cache[key]

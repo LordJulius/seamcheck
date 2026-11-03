@@ -190,6 +190,10 @@ pub(crate) struct Caches {
     goroots: HashMap<String, String>,
     /// Flask-Login's user class (infer_flask.login_user)
     flask_user: Option<Option<Val>>,
+    /// infer_flask's per-load caches: a class's written bases, model-ness, current_user imported
+    flask_bases: HashMap<String, Vec<String>>,
+    flask_model: HashMap<Vec<String>, bool>,
+    flask_cu: HashMap<String, bool>,
     // core's scope helpers
     js_factory: HashMap<(String, String), Option<String>>,
     js_arg_members: HashMap<String, bool>,

@@ -58,17 +58,37 @@ pub fn class_bases(m: &Module) -> Vec<String> {
 impl<'a> Types<'a> {
     /// Any of these classes is a Flask-SQLAlchemy model (a `db.Model` among its supertypes).
     pub fn flask_model(&self, mods: &[String]) -> bool {
-        mods.iter().any(|mn| {
+        if let Some(hit) = self.c.borrow().flask_model.get(mods) {
+            return *hit;
+        }
+        let got = mods.iter().any(|mn| {
             self.ancestors(mn).iter().any(|a| {
-                class_bases(self.m(a)).iter().any(|b| re!(r"^(?:[A-Za-z_]\w*\.)?Model$").match_start(b).is_some())
+                self.flask_bases(a).iter().any(|b| re!(r"^(?:[A-Za-z_]\w*\.)?Model$").match_start(b).is_some())
             })
-        })
+        });
+        self.c.borrow_mut().flask_model.insert(mods.to_vec(), got);
+        got
+    }
+
+    fn flask_bases(&self, mn: &str) -> Vec<String> {
+        if let Some(hit) = self.c.borrow().flask_bases.get(mn) {
+            return hit.clone();
+        }
+        let got = class_bases(self.m(mn));
+        self.c.borrow_mut().flask_bases.insert(mn.to_string(), got.clone());
+        got
     }
 
     /// `current_user` imported from flask_login: an instance of the project's one UserMixin class.
     pub fn flask_login_user(&self, fm: &Module) -> Option<Val> {
-        let cu = re!(r"^\s*from\s+flask_login\s+import\s+[^\n]*\bcurrent_user\b");
-        if !fm.raw.iter().any(|ln| cu.match_start(ln).is_some()) {
+        let known = self.c.borrow().flask_cu.get(&fm.name).copied();
+        let imports = known.unwrap_or_else(|| {
+            let cu = re!(r"^\s*from\s+flask_login\s+import\s+[^\n]*\bcurrent_user\b");
+            let got = fm.raw.iter().any(|ln| cu.match_start(ln).is_some());
+            self.c.borrow_mut().flask_cu.insert(fm.name.clone(), got);
+            got
+        });
+        if !imports {
             return None;
         }
         if let Some(hit) = &self.c.borrow().flask_user {
@@ -78,7 +98,7 @@ impl<'a> Types<'a> {
             .g
             .modules
             .iter()
-            .filter(|(_, m)| !m.owner.is_empty() && class_bases(m).iter().any(|b| b.rsplit('.').next() == Some("UserMixin")))
+            .filter(|(mn, m)| !m.owner.is_empty() && self.flask_bases(mn).iter().any(|b| b.rsplit('.').next() == Some("UserMixin")))
             .map(|(mn, _)| mn.clone())
             .collect();
         let got = if users.len() == 1 { Some(Val::Inst(users, true)) } else { None };
