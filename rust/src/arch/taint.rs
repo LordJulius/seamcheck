@@ -125,8 +125,11 @@ pub fn dirty(arg: &str, cx: &Ctx, tainted: &HashSet<String>) -> bool {
     if function_literal().match_start(arg).is_some() {
         return false;
     }
-    // Flask / Werkzeug: `request.args.get("page", 1, type=int)` is an int
-    let mut arg = re!(r"[\w.]+\.get\(\s*[^()]*\btype\s*=\s*(?:int|float|bool)\b[^()]*\)").sub_with(arg, |_| " ".to_string());
+    // Flask / Werkzeug: `request.args.get("page", 1, type=int)` is an int; `",".join("?" for _ in ids)` holds
+    // only its literal
+    let arg = re!(r"[\w.]+\.get\(\s*[^()]*\btype\s*=\s*(?:int|float|bool)\b[^()]*\)").sub_with(arg, |_| " ".to_string());
+    let mut arg = re!(r#"\.join\(\s*(?:"[^"]*"|'[^']*')\s+for\s+[\w, ]+\s+in\s+[^()]*(?:\([^()]*\)[^()]*)*\)"#)
+        .sub_with(&arg, |_| ".join()".to_string());
     if let Some(cl) = &cx.clean {
         let mp = cl.method.pattern();
         if rxd(&format!(r"{mp}\s*(?:\([^()]*\))?\s*$")).is_match(strip(&arg)) {
@@ -620,6 +623,8 @@ fn py_index(xs: &[String], i: i64) -> &str {
 
 /// What the security verdicts ask of the taint at one line (arch._Ctx).
 pub struct At<'a> {
+    pub g: &'a Graph,
+    pub f: &'a Func,
     pub taint: &'a Taint,
     pub cx: &'a Ctx,
     pub line: usize,
@@ -627,12 +632,42 @@ pub struct At<'a> {
 
 impl TaintCtx for At<'_> {
     fn dirty(&self, text: &str) -> bool {
+        // (`redirect(raw_next())`: a helper that returns the request's value)
         dirty(text, self.cx, &self.taint.at(self.line))
+            || (reads(self.cx.readers.as_deref(), text)
+                && !self.cx.clean.as_ref().is_some_and(|c| c.call.is_match(text) || c.method.is_match(text)))
     }
 
     fn rhs(&self, name: &str) -> Option<(String, Box<dyn TaintCtx + '_>)> {
         let (v, ln) = self.taint.rhs(name, self.line)?;
-        Some((v, Box::new(At { taint: self.taint, cx: self.cx, line: ln })))
+        Some((v, Box::new(At { g: self.g, f: self.f, taint: self.taint, cx: self.cx, line: ln })))
+    }
+
+    /// What every exact caller passes for parameter `name` (raw texts), None when one passes
+    /// nothing we can read (arch._Ctx.passed).
+    fn passed(&self, name: &str) -> Option<Vec<String>> {
+        let (g, f) = (self.g, self.f);
+        let params: Vec<String> = param_decls(g, f).into_iter().map(|x| x.0).collect();
+        let k = params.iter().position(|p| p == name)?;
+        let kw_rx = rxd(&format!(r"\s*{}\s*[=:](?!=)", esc(name)));
+        let mut out = Vec::new();
+        for (caller, ln, exact) in g.redges.get(&f.id).map(|v| v.as_slice()).unwrap_or(&[]) {
+            let Some(h) = g.func(caller).filter(|_| *exact) else { return None };
+            for c in h.calls.iter().filter(|c| c.line == *ln && c.name == f.name) {
+                let args = call_args(g, h, c);
+                let kw: Vec<&str> =
+                    args.iter().filter(|a| kw_rx.match_start(a).is_some()).map(|a| a.split_once('=').map(|x| x.1).unwrap_or("")).collect();
+                let pos: Vec<&String> = args.iter().filter(|a| crate::rules::security::kwarg(a).is_none()).collect();
+                if let Some(v) = kw.first() {
+                    out.push(v.to_string());
+                } else if k < pos.len() {
+                    out.push(pos[k].clone());
+                } else {
+                    return None;
+                }
+            }
+        }
+        (!out.is_empty()).then_some(out)
     }
 }
 

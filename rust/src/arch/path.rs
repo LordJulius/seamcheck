@@ -77,8 +77,8 @@ pub fn path(p: &Project, r: &Rule) -> Res<Vec<Finding>> {
             unless.push(u);
         }
     }
-    let clean = clean_of(&unless)?;
-    let kinds = Sinks::new(r).map_err(crate::rules::RuleErr::BadPattern)?;
+    let mut clean = clean_of(&unless)?;
+    let mut kinds = Sinks::new(r).map_err(crate::rules::RuleErr::BadPattern)?;
     let depth = depth(r);
     let fuzzy = truthy(r.get("fuzzy"));
     need(r, "from")?;
@@ -108,7 +108,7 @@ pub fn path(p: &Project, r: &Rule) -> Res<Vec<Finding>> {
             }
         }
         // a helper that reads the request and returns it: `getCookie(request, "x")`, `WebUtils.getRequestBody(request)`
-        let mut rd: Vec<&str> = g
+        let mut rd: HashSet<&str> = g
             .all_funcs()
             .filter(|f| {
                 f.kind != "top"
@@ -119,22 +119,55 @@ pub fn path(p: &Project, r: &Rule) -> Res<Vec<Finding>> {
             })
             .map(|f| f.name.as_str())
             .collect();
+        let not_param = truthy(r.get("source_not_param"));
+        // (raw text: `"#{params[:id]}"` reads the source inside a string)
+        let direct: Vec<&Func> = starts
+            .iter()
+            .copied()
+            .filter(|f| !crate::gate::is_test(p, &f.file) && (bound.contains_key(&f.id) || reads_source(&g, f, src, not_param)))
+            .collect();
+        if rd.is_empty() && direct.is_empty() {
+            return Ok(Vec::new()); // nothing reads the source
+        }
+        // what each function returns, by name: a sanitized value (its own sanitizer call, url_for, or such a
+        // function's result), an in-memory buffer (security.returns)
+        if kinds.any() {
+            // (kept per load and sanitizer pattern, as security.returns does)
+            let call = clean.as_ref().map(|c| c.call.clone());
+            let key = format!("security.returns\0{}", call.as_ref().map(|c| c.pattern()).unwrap_or(""));
+            let got = p.memo(&key, || security::returns(&g, &|h: &Func| own_code(&g, h, true), call.as_deref()));
+            let (done, buffers) = (got.0.clone(), got.1.clone());
+            kinds.buffers = buffers;
+            if !done.is_empty() {
+                let mut names: Vec<&String> = done.iter().collect();
+                names.sort();
+                let extra = format!(r"(?<![\w$])(?:{})\s*\(", names.iter().map(|n| esc(n)).collect::<Vec<_>>().join("|"));
+                clean = Some(match clean.take() {
+                    Some(c) => Clean { call: compile(&format!("(?:{})|(?:{extra})", c.call.pattern()))?, method: c.method },
+                    None => Clean { call: compile(&extra)?, method: compile(r"(?!x)x")? },
+                });
+                rd.retain(|n| !done.contains(*n));
+            }
+        }
+        let mut rd: Vec<&str> = rd.into_iter().collect();
         rd.sort();
-        rd.dedup();
         let readers = if rd.is_empty() {
             None
         } else {
             Some(rxd(&format!(r"(?<![\w$])((?:[A-Za-z_]\w*\.)?)(?:{})\s*\(", rd.join("|"))))
         };
-        let c = Ctx { source: src.clone(), clean, readers };
-        let not_param = truthy(r.get("source_not_param"));
-        // (raw text: `"#{params[:id]}"` reads the source inside a string)
-        starts.retain(|f| {
-            !crate::gate::is_test(p, &f.file)
-                && (bound.contains_key(&f.id)
-                    || reads_source(&g, f, &c, not_param)
-                    || taint::reads(c.readers.as_deref(), &own_code(&g, f, false)))
-        });
+        let seen: HashSet<&str> = direct.iter().map(|f| f.id.as_str()).collect();
+        let more: Vec<&Func> = starts
+            .iter()
+            .copied()
+            .filter(|f| {
+                !seen.contains(f.id.as_str())
+                    && !crate::gate::is_test(p, &f.file)
+                    && taint::reads(readers.as_deref(), &own_code(&g, f, false))
+            })
+            .collect();
+        starts = direct.into_iter().chain(more).collect();
+        let c = Ctx { source: src.clone(), clean: clean.take(), readers };
         if let Some(scope) = s(r, "source_scope").filter(|x| !x.is_empty()) {
             // (the web request: not a desktop tool's QNetworkRequest named `request`)
             let keep = security::scoped(&g, &*compile(scope)?, depth);
@@ -191,11 +224,11 @@ pub fn path(p: &Project, r: &Rule) -> Res<Vec<Finding>> {
                     hits.insert((f.file.clone(), c.line), (fid.clone(), text, sev, note));
                 }
                 for (dst, ln, exact) in g.edges.get(fid).map(|v| v.as_slice()).unwrap_or(&[]) {
-                    if !(*exact || fuzzy) || prev.contains_key(dst) {
+                    if !(*exact || fuzzy) {
                         continue;
                     }
                     let Some(h) = g.func(dst) else { continue };
-                    if unless.contains(&h.name) {
+                    if unless.contains(&h.name) || (prev.contains_key(dst) && cx.is_none()) {
                         continue;
                     }
                     if let (Some(cx), Some(tn)) = (&cx, &tn) {
@@ -204,8 +237,18 @@ pub fn path(p: &Project, r: &Rule) -> Res<Vec<Finding>> {
                         for c in f.calls.iter().filter(|c| c.line == *ln && c.name == h.name) {
                             got.extend(taint::passed(&g, f, c, &params, cx, &tn.at(c.line)));
                         }
-                        if got.is_empty() {
-                            continue; // nothing tainted goes in
+                        let had = given.get(dst);
+                        if got.is_empty() || (prev.contains_key(dst) && had.is_some_and(|h| got.iter().all(|x| h.contains(x)))) {
+                            continue; // nothing (new) tainted goes in
+                        }
+                        if prev.contains_key(dst) {
+                            // another call passes it another tainted parameter: walk it again with both
+                            got.extend(had.into_iter().flatten().cloned());
+                            let mut got: Vec<String> = got.into_iter().collect();
+                            got.sort();
+                            given.insert(dst.clone(), got);
+                            nxt.push(dst.clone());
+                            continue;
                         }
                         let mut got: Vec<String> = got.into_iter().collect();
                         got.sort();
@@ -254,10 +297,10 @@ pub fn path(p: &Project, r: &Rule) -> Res<Vec<Finding>> {
 /// f reads the source; with `not_param`, not when the name it starts with is
 /// one of f's own parameters (a fastlane action's `def self.run(params)` is
 /// not Rails' params) (arch._reads_source).
-fn reads_source(g: &Graph, f: &Func, cx: &Ctx, not_param: bool) -> bool {
+fn reads_source(g: &Graph, f: &Func, source: &crate::pyre::Rx, not_param: bool) -> bool {
     let text = own_code(g, f, true);
     if !not_param {
-        return cx.source.is_match(&text);
+        return source.is_match(&text);
     }
     let head = g
         .module(&f.module)
@@ -272,7 +315,7 @@ fn reads_source(g: &Graph, f: &Func, cx: &Ctx, not_param: bool) -> bool {
         }
         None => HashSet::new(),
     };
-    cx.source.find_iter(&text).iter().any(|m| {
+    source.find_iter(&text).iter().any(|m| {
         let lead = re!(r"[$@]?\w*").match_start(m.group0()).map(|x| x.group0()).unwrap_or("");
         !own.contains(lead)
     })
@@ -292,15 +335,25 @@ fn sink(
     taint: Option<(&Ctx, &Taint)>,
 ) -> Option<(String, String)> {
     let sev = kinds.severity.clone();
-    let line = g.module(&f.module).filter(|m| 0 < c.line && c.line <= m.raw.len()).map(|m| m.raw[c.line - 1].as_str()).unwrap_or("");
-    let at = taint.map(|(cx, tn)| At { taint: tn, cx, line: c.line });
-    let recv = if kinds.any() { security::receiver(g, f, c, line, at.as_ref().map(|a| a as &dyn TaintCtx)) } else { None };
-    let mut text = text.to_string();
-    if recv == Some("http") && !sinks.iter().any(|p| p.is_match(&text)) {
-        text = format!("session.{}", c.name); // `api.get(url)` with `class Api(requests.Session)`
-    }
-    if !sinks.iter().any(|p| p.is_match(&text)) {
+    let hit = sinks.iter().any(|p| p.is_match(text));
+    if !hit && !(!kinds.url.is_empty() && f.file.ends_with(".py") && kinds.url.iter().any(|p| p.is_match(&format!("session.{}", c.name)))) {
         return None;
+    }
+    let at = taint.map(|(cx, tn)| At { g, f, taint: tn, cx, line: c.line });
+    let mut recv = None;
+    if !hit || kinds.kind(text) == Some("url") {
+        let line = g.module(&f.module).filter(|m| 0 < c.line && c.line <= m.raw.len()).map(|m| m.raw[c.line - 1].as_str()).unwrap_or("");
+        recv = security::receiver(g, f, c, line, at.as_ref().map(|a| a as &dyn TaintCtx));
+    }
+    let mut text = text.to_string();
+    if !hit {
+        if recv != Some("http") {
+            return None;
+        }
+        text = format!("session.{}", c.name); // `api.get(url)` with `class Api(requests.Session)`
+        if !sinks.iter().any(|p| p.is_match(&text)) {
+            return None;
+        }
     }
     let kind = kinds.kind(&text);
     if recv == Some("orm") && kind == Some("url") {

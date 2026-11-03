@@ -1,6 +1,7 @@
 //! The security pack's taint rules end to end (kind = "path" calling
 //! rules::security), ported from test_security_precision.py's rule-level
-//! classes (TextHelpers is ported in src/rules/security.rs).
+//! and test_security_round2.py's rule-level classes (their text helpers are
+//! ported in src/rules/security.rs).
 
 mod common;
 
@@ -363,4 +364,115 @@ fn copy(from: &std::path::Path, to: &std::path::Path) {
             std::fs::copy(e.path(), dst).unwrap();
         }
     }
+}
+
+// ---- test_security_round2.py: the second field round's rule-level classes ----
+
+const HEAD2: &str = "import io, os, re, subprocess, sqlite3\nimport requests\n\
+from flask import redirect, request, send_file, url_for\nfrom app import db\n\n\n";
+
+fn py(body: &str) -> (String, String) {
+    ("app/routes.py".into(), format!("{HEAD2}{body}"))
+}
+
+// test_security_round2.py: SanitizedReturns.test_a_helper_whose_return_is_sanitized_is_clean_for_its_callers
+#[test]
+fn a_helper_whose_return_is_sanitized_is_clean_for_its_callers() {
+    let safety = "def coerce_same_origin_redirect_target(t, default, host):\n    return t if t.startswith('/') else default\n\n\n\
+                  def mode_url_for(endpoint, **kw):\n    return url_for(endpoint, **kw)\n";
+    let body = "from app.safety import coerce_same_origin_redirect_target, mode_url_for\n\n\n\
+                def _ret():\n    t = request.form.get('return_to') or request.args.get('return_to')\n\
+                \x20   return coerce_same_origin_redirect_target(t, None, request.host_url)\n\n\n\
+                def _panel_target(pid, return_to_url=None):\n    return mode_url_for('panel', pid=pid, next=return_to_url)\n\n\n\
+                def panel(pid):\n    return redirect(_panel_target(pid, return_to_url=_ret()))\n\n\n\
+                def panel2(pid):\n    target = _panel_target(pid, return_to_url=_ret())\n    return redirect(target)\n\n\n\
+                def raw_next():\n    return request.args.get('next')\n\n\n\
+                def bad():\n    return redirect(raw_next())\n";
+    let got = run(
+        vec![("app/safety.py".into(), safety.into()), py(body)],
+        "[security]\nsanitizers = [\"coerce_same_origin_redirect_target\"]\n",
+    );
+    // only bad(): its helper returns the raw value
+    assert_eq!(sev_line(&got), vec![("error".into(), 33)], "{got:?}");
+}
+
+// test_security_round2.py: BufferReturns.test_a_helper_that_returns_a_buffer_is_no_path
+#[test]
+fn a_helper_that_returns_a_buffer_is_no_path() {
+    let body = "def _csv_bytes(rows) -> io.BytesIO:\n    return io.BytesIO(b''.join(rows))\n\n\n\
+                def _zip_bytes(rows):\n    buf = io.BytesIO()\n    buf.write(rows)\n    return buf\n\n\n\
+                def export():\n    rows = request.args.getlist('r')\n    buffer = _csv_bytes(rows)\n\
+                \x20   send_file(buffer, mimetype='text/csv')\n    return send_file(_zip_bytes(rows), mimetype='application/zip')\n\n\n\
+                def _path(name):\n    return os.path.join('/srv', name)\n\n\n\
+                def raw():\n    return send_file(_path(request.args['f']))\n";
+    let got = run(vec![py(body)], "");
+    assert_eq!(sev_line(&got), vec![("error".into(), 29)], "{got:?}");
+}
+
+// test_security_round2.py: CheckedValues.test_an_int_in_range_an_anchored_match_and_a_literal_host
+#[test]
+fn an_int_in_range_an_anchored_match_and_a_literal_host() {
+    let body = "_STATE_RE = re.compile(r'^[A-Za-z0-9_-]{16,128}$')\n_LOOSE = re.compile(r'[a-z]+')\n\n\n\
+                def callback():\n    port = int(request.args.get('port', ''))\n    if port < 1024 or port > 65535:\n\
+                \x20       return 'bad', 400\n    state = request.args.get('state', '')\n    if not _STATE_RE.match(state):\n\
+                \x20       return 'bad', 400\n    query = request.query_string.decode()\n\
+                \x20   subprocess.run(f'notify {state}', shell=True)\n\
+                \x20   return redirect(f'http://127.0.0.1:{port}/callback?{query}')\n\n\n\
+                def loose():\n    s = request.args.get('s', '')\n    if not _LOOSE.match(s):\n        return 'bad', 400\n\
+                \x20   subprocess.run(f'notify {s}', shell=True)\n\n\n\
+                def hostile():\n    return redirect(f\"https://{request.args['h']}/x\")\n";
+    let got = run(vec![py(body)], "");
+    assert_eq!(sev_line(&got), vec![("error".into(), 27), ("error".into(), 31)], "{got:?}");
+}
+
+// test_security_round2.py: Constants.test_a_loop_over_a_literal_list_is_constant
+#[test]
+fn a_loop_over_a_literal_list_is_constant() {
+    let body = "def dump():\n    keep = request.args.get('keep')\n    tables = ['users', 'posts', 'tags']\n\
+                \x20   for table_name in tables:\n        db.session.execute(db.text(f'SELECT * FROM {table_name}'))\n\
+                \x20   for t in request.args.getlist('t'):\n        db.session.execute(db.text(f'SELECT * FROM {t}'))\n\
+                \x20   return keep\n";
+    let got = run(vec![py(body)], "");
+    assert_eq!(sev_line(&got), vec![("error".into(), 13)], "{got:?}");
+}
+
+// test_security_round2.py: Constants.test_a_client_whose_callers_pass_constant_sql
+#[test]
+fn a_client_whose_callers_pass_constant_sql() {
+    let client = "import sqlite3\nSQL_ONE = 'SELECT * FROM u WHERE id = ?'\n\n\nclass Db:\n\
+                  \x20   def query(self, sql, params=None):\n        cur = self.conn.cursor()\n\
+                  \x20       cur.execute(sql, params or ())\n        return cur.fetchall()\n";
+    let body = "from app.client import Db, SQL_ONE\n\n\ndef one():\n    d = Db()\n    uid = request.args['id']\n\
+                \x20   d.query(SQL_ONE, (uid,))\n    ids = request.args.getlist('ids')\n\
+                \x20   marks = ','.join('?' for _ in ids)\n    d.query(f'SELECT * FROM u WHERE id IN ({marks})', ids)\n\
+                \x20   d.query('SELECT * FROM u WHERE id = ?', params=(uid,))\n    d.query('SELECT 1 WHERE ' + request.args['w'])\n";
+    let got = run(vec![("app/client.py".into(), client.into()), py(body)], "");
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(got[0].4.contains("one -> query"), "{got:?}");
+}
+
+// test_security_round2.py: Kept.test_a_request_controlled_host_is_still_an_error
+#[test]
+fn a_request_controlled_host_is_still_an_error() {
+    let body = "def version():\n    url = request.get_json()['url']\n\
+                \x20   return requests.get(f'{url}/api/v1/version', timeout=5).text\n";
+    assert_eq!(sev_line(&run(vec![py(body)], "")), vec![("error".into(), 9)]);
+}
+
+// test_security_round2.py: JsFetchHelper.test_a_parameter_its_callers_fill_with_same_origin_paths_is_clean
+#[test]
+fn a_parameter_its_callers_fill_with_same_origin_paths_is_clean() {
+    let js = "const express = require('express');\nconst app = express();\n\
+              async function requestJson(url, options) {\n  const r = await fetch(url, options || {});\n  return r.json();\n}\n\
+              app.post('/chat', async (req, res) => {\n  const body = req.body;\n\
+              \x20 const a = await requestJson('/chat/api/send', { method: 'POST', body: JSON.stringify(body) });\n\
+              \x20 const b = await requestJson(`/chat/api/thread/${body.id}`, {});\n  res.send([a, b]);\n});\n\
+              async function relay(url) {\n  return fetch(url);\n}\n\
+              app.get('/relay', async (req, res) => {\n  res.send(await relay(req.query.u));\n});\n";
+    let got = findings(&[("server.js", js)], "");
+    assert_eq!(
+        got.iter().map(|g| (g.0.as_str(), g.1.as_str(), g.3)).collect::<Vec<_>>(),
+        vec![("js-injection", "error", 14)],
+        "{got:?}"
+    );
 }

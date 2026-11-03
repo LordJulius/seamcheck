@@ -175,7 +175,7 @@ per hit), `_Taint.values` + `rhs()`, the Python guards from
 tainted `path`; `...x` and PHP `$x` still count), and `downstream` refusing a
 call whose own line reads the source.
 
-Round 2 (same lane), also for the path port: `redirect_sinks`; `security.returns`
+Round 2 (same lane; carried by the path port since the arch lane's round-2 commit): `redirect_sinks`; `security.returns`
 (sanitized / buffer-returning names: the sanitized ones join the rule's clean-call
 pattern and leave the reader helpers, the buffers go to `Sinks.buffers`), computed
 only when something reads the source (`path` returns early otherwise);
@@ -183,7 +183,8 @@ only when something reads the source (`path` returns early otherwise);
 pass a parameter: `TaintCtx::passed`); the Python `if` guard reads the raw
 condition and `security.anchored(file)`; `_dirty` drops `",".join("?" for _ in
 xs)`; the BFS walks a function again when a later call passes it another tainted
-parameter; `_own_code` is cached per load.
+parameter; `_own_code` is cached per load (Rust: `security::returns` is
+memoised per load and sanitizer pattern; `own_code` is cheap enough uncached).
 
 Flask types (same lane): `infer_flask.py` / `graph/infer/flask.rs` (a
 model's `.query` as an `Ext` value tagged `\0rows`, Flask-Login's
@@ -211,7 +212,8 @@ rule needs it; graph problems (`[[bridge]]` errors, environment notes) are
 
 Tests: `tests/arch.rs` (test_arch.py, TogetherFuncDepth, auth-in-background,
 EtsOwner), `tests/security_paths.rs` (test_security_precision.py's rule-level
-classes on the flask_sqla fixture), `tests/field_run.rs` (test_field_run.py).
+classes on the flask_sqla fixture, and test_security_round2.py's), `tests/field_run.rs`
+(test_field_run.py).
 Parity: `--fixtures tests/fixtures` and `--fixtures rust/tests/fixtures` with
 `--check --formats`: 0 differences.
 
