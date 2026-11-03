@@ -121,9 +121,9 @@ fn parse(argv: Vec<String>) -> Args {
                 let v = val(&mut i);
                 let n: i64 = v.parse().unwrap_or_else(|_| usage_error(&format!("argument {flag}: invalid int value: '{v}'")));
                 if flag == "--depth" { a.q.depth = n } else { a.q.limit = n }
+            }
             "--ids" => a.ids = true,
             "--apply" => a.apply = true,
-            }
             "--strict" => a.strict = true,
             "--echo" => a.echo = true,
             "--log" => a.log = Some(val(&mut i)),

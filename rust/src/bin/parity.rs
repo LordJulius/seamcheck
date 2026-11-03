@@ -44,6 +44,8 @@ use serde_json::Value;
 mod queries;
 #[path = "parity/runtime.rs"]
 mod runtime_mode;
+#[path = "parity/tidy.rs"]
+mod tidy;
 
 /// How many differences to print (env PARITY_MAX, default 60).
 fn max_show() -> usize {
@@ -55,6 +57,8 @@ struct Opts {
     rust: PathBuf,
     gate: bool,
     staged: bool,
+    since: Option<String>,
+    tidy: bool,
     parse: bool,
     edges: bool,
     chains: bool,
@@ -76,6 +80,8 @@ fn opts() -> Opts {
         rust: exe.with_file_name("seamcheck"),
         gate: false,
         staged: false,
+        since: None,
+        tidy: false,
         parse: false,
         edges: false,
         chains: false,
@@ -103,6 +109,11 @@ fn opts() -> Opts {
             }
             "--gate" => o.gate = true,
             "--staged" => o.staged = true,
+            "--since" | "--base" => {
+                i += 1;
+                o.since = Some(args[i].clone());
+            }
+            "--tidy" => o.tidy = true,
             "--parse" => o.parse = true,
             "--edges" => o.edges = true,
             "--chains" => o.chains = true,
@@ -130,7 +141,7 @@ fn opts() -> Opts {
             }
             "-h" | "--help" => {
                 println!(
-                    "parity [--python DIR] [--rust BIN] [--gate] [--staged] [--fixtures DIR] [--formats] \
+                    "parity [--python DIR] [--rust BIN] [--gate] [--staged] [--since REF] [--tidy] [--fixtures DIR] [--formats] \
                      [--parse] [--edges] [--untyped] [--ext .ex,.exs] [--check] [--queries] [--serve] [--runtime] [--precise] [REPO...]"
                 );
                 std::process::exit(0);
@@ -142,7 +153,7 @@ fn opts() -> Opts {
     if o.runtime {
         o.repos = o.repos.iter().flat_map(|r| runtime_mode::dirs(r)).collect();
     }
-    if !o.parse && !o.edges && !o.chains && !o.queries && !o.serve && !o.runtime {
+    if o.gate || !o.parse && !o.edges && !o.chains && !o.queries && !o.serve && !o.runtime && !o.tidy {
         o.check = true;
     }
     if o.repos.is_empty() {
@@ -213,13 +224,9 @@ fn bag(v: &[Value], with_snippet: bool) -> BTreeMap<Key, usize> {
     m
 }
 
-/// Python findings the port sets aside: in a gate, the graph-only kinds and
-/// the rules `port-status` defers.
+/// Python findings the port sets aside: the rules `port-status` still defers.
 fn phase1(f: &Value, deferred: &[String]) -> bool {
     let s = |k: &str| f.get(k).and_then(|x| x.as_str()).unwrap_or("");
-    if matches!(s("kind"), "unused" | "test_only" | "dups" | "tests" | "exactness") {
-        return false;
-    }
     !deferred.iter().any(|d| d == s("rule"))
 }
 
@@ -657,6 +664,17 @@ fn main() {
         if o.runtime {
             total += runtime_mode::parity(&o.python, &o.rust, repo, &name);
         }
+        if o.tidy {
+            let pr = |a: &[&str]| {
+                let r = py(&o, repo, a);
+                (r.out, r.ms)
+            };
+            let rr = |a: &[&str]| {
+                let r = rs(&o, repo, a);
+                (r.out, r.ms)
+            };
+            total += tidy::tidy_parity(&tidy::Side { run: &pr }, &tidy::Side { run: &rr }, repo, &name);
+        }
         if !o.check {
             if total == before {
                 println!("  identical");
@@ -707,6 +725,9 @@ fn main() {
             let mut gargs = vec!["gate", "--format", "json"];
             if o.staged {
                 gargs.push("--staged");
+            }
+            if let Some(r) = &o.since {
+                gargs.extend(["--since", r.as_str()]);
             }
             let pg = py(&o, repo, &gargs);
             let rg = rs(&o, repo, &gargs);
