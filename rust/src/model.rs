@@ -15,6 +15,14 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use serde_json::{json, Value};
 
+/// Python source files (a `.pyw` is a Python script run without a console) (model.PY_EXTS).
+pub const PY_EXTS: &[&str] = &[".py", ".pyw"];
+
+/// Is this a Python source file?
+pub fn is_py(file: &str) -> bool {
+    file.ends_with(".py") || file.ends_with(".pyw")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Call {
     /// the called function's name

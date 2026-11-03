@@ -32,6 +32,7 @@ import os
 import re
 
 from . import security
+from .model import PY_EXTS
 
 
 
@@ -526,7 +527,7 @@ class _Taint:
                               r"([A-Za-z_]\w*)\.(?:startsWith|startswith|start_with\?|StartsWith|HasPrefix)[ \t]*\(", code, re.M):
             found.append((am.start(), am.group(1), [am.group(2)], am.end()))
             guards.add(am.end())
-        if f.file.endswith(".py"):
+        if f.file.endswith(PY_EXTS):
             # Python's validators: `if not NAME.fullmatch(x): abort(400)`, `if x not in ALLOWED: ...`,
             # `if urlsplit(x).netloc != "": x = url_for(...)` clean x after the `if`; the same check
             # without `not` (`if x.isdigit():`) cleans it inside the block
@@ -783,7 +784,7 @@ def _param_decls(project, g) -> list[tuple[str, str]]:
         if not names:
             continue
         dollar = [n for n in names if n.startswith("$")]
-        out.append((dollar[0] if dollar else names[0] if ext in (".go", ".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".rb",
+        out.append((dollar[0] if dollar else names[0] if ext in (".go", ".py", ".pyw", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".rb",
                                                                       ".kt", ".rs", ".swift", ".ex", ".exs") else names[-1], decl))
     return [(n.lstrip("*&"), d) for n, d in out]
 

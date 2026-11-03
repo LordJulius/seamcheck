@@ -315,7 +315,7 @@ impl<'a> Types<'a> {
         }
         if m.bound.contains_key(name)
             && m.owner.is_empty()
-            && (m.file.ends_with(".py") || ends(&m.file, JS_EXTS) || (m.file.ends_with(".rs") && name.chars().all(|c| !c.is_lowercase()) && name.chars().any(|c| c.is_uppercase())))
+            && (crate::model::is_py(&m.file) || ends(&m.file, JS_EXTS) || (m.file.ends_with(".rs") && name.chars().all(|c| !c.is_lowercase()) && name.chars().any(|c| c.is_uppercase())))
         {
             return Some((m, name.to_string()));
         }
@@ -337,7 +337,7 @@ impl<'a> Types<'a> {
     /// dot beside it (`ResilienceContextPool.Shared.cs`).
     pub(super) fn nested(&self, mn: &str) -> bool {
         let m = self.m(mn);
-        !m.owner.is_empty() || m.file.ends_with(".py")
+        !m.owner.is_empty() || crate::model::is_py(&m.file)
     }
 
     /// Python: the class a module (or package `__init__`) makes available
@@ -346,7 +346,7 @@ impl<'a> Types<'a> {
         mods.iter()
             .filter_map(|mn| {
                 let m = self.g.modules.get(mn)?;
-                if !m.file.ends_with(".py") || !m.owner.is_empty() {
+                if !crate::model::is_py(&m.file) || !m.owner.is_empty() {
                     return None;
                 }
                 let c = crate::graph::pylink::py_class(self.g, m, name, 0);

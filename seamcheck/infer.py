@@ -21,6 +21,7 @@ import re
 from . import infer_flask
 
 from .chains import UNWRAP, generic_name, type_name
+from .model import PY_EXTS
 
 UNKNOWN = ("unknown", (), False)  # declared, of a type the code doesn't say (a QML `property var`)
 EXT = ("ext", (), True)  # a library value: every call on it is the library's (("ext", (type,), True) when named)
@@ -85,7 +86,7 @@ class Types:
         if hit is not None:
             return hit
         hit = self._type_modules(mod, name)
-        if len(hit[0]) > 1 and "." not in name and mod.owner and not mod.file.endswith(".py"):
+        if len(hit[0]) > 1 and "." not in name and mod.owner and not mod.file.endswith(PY_EXTS):
             o = mod.name  # several `Source` classes in a test file: the enclosing classes' own nested one
             while o in self.p.modules and self.p.modules[o].owner and self.p.modules[o].file == mod.file:
                 if f"{o}.{name}" in hit[0]:
@@ -122,7 +123,7 @@ class Types:
     def _type_modules(self, mod, name: str):
         p = self.p
         fm = self._file_mod(mod)
-        if fm.file.endswith(".py"):
+        if fm.file.endswith(PY_EXTS):
             from .core import _py_class
             cls = _py_class(p, mod, name)
             if cls:
@@ -1095,7 +1096,7 @@ class Types:
                              if m_.file.endswith(os.path.splitext(mod.file)[1]) and (m_.parent == ty or ty in getattr(m_, "lib_bases", ())))
                 return ("inst", subs, False) if subs else None
             return ("ext", (ty,), True) if ty[:1].isupper() or "." in ty or mod.file.endswith((".rs", ".swift")) or \
-                (mod.file.endswith(".py") and ty in _PY_BUILTIN) else None
+                (mod.file.endswith(PY_EXTS) and ty in _PY_BUILTIN) else None
         return ("inst", tuple(mods), exact)
 
     def _go_type(self, mod, ty: str):
@@ -1239,7 +1240,7 @@ class Types:
             return None
         if fm.file.endswith(".rs") and re.fullmatch(_RS_PRIMS, seg):
             return EXT  # `u32::from(c)`: a primitive's
-        if seg == "super" or (seg, os.path.splitext(fm.file)[1]) in (("base", ".cs"), ("parent", ".php"), ("super()", ".py")):
+        if seg == "super" or (seg, os.path.splitext(fm.file)[1]) in (("base", ".cs"), ("parent", ".php"), ("super()", ".py"), ("super()", ".pyw")):
             # (C#'s `base`, PHP's `parent::`, Python's `super().x()`; elsewhere `base` is a name)
             own = self.own_class(mod, f)
             if not own:
@@ -1289,7 +1290,7 @@ class Types:
                     and (g is None or (not g.returns and g.name == name)) \
                     and (got := self.instance(mod, name, self_mods)) is not None:
                 return got  # `ConfigHandler().value()`: a constructor (ahead of a library base's own methods)
-            if g is None and not fm.file.endswith(".py"):
+            if g is None and not fm.file.endswith(PY_EXTS):
                 own = self.own_class(mod, f)
                 hits = self.method(own, name)[0] if own else []
                 if len(hits) > 1 and len({h.returns for h in hits}) == 1 and hits[0].returns not in ("", "Self") \
@@ -1300,10 +1301,10 @@ class Types:
                 return got if got is not None else self._rb_named(mod, name)
             if mod.file.endswith(".rb") and len(got := {self.returns(h, [h.module], depth + 1) for h in self.method(self.own_class(mod, f) or [], name)[0]}) == 1:
                 return got.pop()  # Ruby: a mixin's `site` that every includer's `site` returns alike (lang_ruby.py)
-            if name in fm.external or (fm.file.endswith(".py") and name in _PY_BUILTIN_CALLS):
+            if name in fm.external or (fm.file.endswith(PY_EXTS) and name in _PY_BUILTIN_CALLS):
                 return EXT  # (Python's `vars(x)`, `sorted(x)`: the language's own values)
             own = self.own_class(mod, f)
-            if own and not fm.file.endswith(".py") and any(self.external_base(o) for o in own) \
+            if own and not fm.file.endswith(PY_EXTS) and any(self.external_base(o) for o in own) \
                     and not self.method(own, name)[0]:
                 return EXT  # inherited from a library supertype (Qt's `sourceModel()`)
             if name[:1].isupper():
@@ -1380,11 +1381,11 @@ class Types:
             pm = self._go_package_var(fm.package, seg)
             if pm is not None:
                 return self.held(pm, None, pm.bound[seg], depth + 1)
-        if seg == "current_user" and fm.file.endswith(".py") and (cu := infer_flask.login_user(self, fm)) is not None:
+        if seg == "current_user" and fm.file.endswith(PY_EXTS) and (cu := infer_flask.login_user(self, fm)) is not None:
             return cu  # Flask-Login's proxy: the project's user class
         if seg in fm.external:
             return EXT
-        if seg[:1].isupper() and seg in self.by_type and not fm.file.endswith(".py"):
+        if seg[:1].isupper() and seg in self.by_type and not fm.file.endswith(PY_EXTS):
             # a type the project declares, whatever module the import names
             # (Rust's `use grep_searcher::SearcherBuilder` names the crate root that re-exports it)
             mods, exact, declared = self.type_modules(mod, seg)
@@ -1402,7 +1403,7 @@ class Types:
                 return self.held(p.modules[target], None, p.modules[target].bound[seg], depth + 1)
             if target in p.modules:
                 return ("static", (target,), True)
-        if fm.file.endswith(".py") and not (f is not None and seg in f.bound) and seg not in fm.bound:
+        if fm.file.endswith(PY_EXTS) and not (f is not None and seg in f.bound) and seg not in fm.bound:
             # a function of this file used as a value: one defined inside the function first
             # (`@click.group()\n def cli():` in a test), else the module's own
             defs = [g for g in fm.funcs if g.name == seg and g.kind != "top"]
@@ -1429,7 +1430,7 @@ class Types:
             if vm is not None:  # an imported module-level variable (`from flask import current_app`)
                 return self.held(vm[0], None, vm[0].bound[vm[1]], depth + 1)
             dm = _defining_module(p, w, n)
-            if dm and fm.file.endswith(".py") and (fn := p.funcs.get(f"{dm}.{n}")) is not None:
+            if dm and fm.file.endswith(PY_EXTS) and (fn := p.funcs.get(f"{dm}.{n}")) is not None:
                 return self._py_function_value(fn)
             if dm:
                 inner = f"{dm}.{n}"
@@ -1440,7 +1441,7 @@ class Types:
                 return ("static", tuple(mods), exact)
         if seg in p.modules:
             return ("static", (seg,), True)
-        short = p.short.get(seg) if not (seg[:1].islower() and fm.file.endswith((".rb", ".rake", ".ru", ".py") + _JS_EXTS[:-1])) else None
+        short = p.short.get(seg) if not (seg[:1].islower() and fm.file.endswith((".rb", ".rake", ".ru") + PY_EXTS + _JS_EXTS[:-1])) else None
         if short:  # (a Swift file's `LSNocilla` is not the Objective-C header of that name)
             from .core import _family
             short = [mn for mn in short if _family(p.modules[mn].file) & _family(fm.file)]
@@ -1461,7 +1462,7 @@ class Types:
             return EXT  # `std::unique_ptr<X509>(...)`: the standard library's
         if fm.file.endswith(".cs") and seg in _CS_KEYWORD_TYPES and not (f is not None and seg in f.bound):
             return EXT  # `string.Join(...)`, `object.ReferenceEquals(a, b)`: System's
-        if fm.file.endswith(".py") and seg in _PY_BUILTIN_NAMES:
+        if fm.file.endswith(PY_EXTS) and seg in _PY_BUILTIN_NAMES:
             return EXT  # `int.__new__`, `object.__repr__`: Python's own
         if seg in _JS_GLOBALS and fm.file.endswith(_JS_EXTS):
             return EXT  # `console`, `window`, `document`: the runtime's (no project name took it)
@@ -1595,7 +1596,7 @@ class Types:
         m = self.p.modules.get(where)
         if m is None or depth > 4:
             return None
-        if name in m.bound and not m.owner and (m.file.endswith((".py",) + _JS_EXTS) or m.file.endswith(".rs") and name.isupper()):
+        if name in m.bound and not m.owner and (m.file.endswith(PY_EXTS + _JS_EXTS) or m.file.endswith(".rs") and name.isupper()):
             return m, name
         if name in m.imported:
             w, n = m.imported[name]
@@ -1636,7 +1637,7 @@ class Types:
         from .core import _in_scope
         fm = self._file_mod(mod)
         own = self.own_class(mod, f)
-        if own and not fm.file.endswith(".py"):
+        if own and not fm.file.endswith(PY_EXTS):
             hits, _ = self.method(own, name)
             if len(hits) == 1:
                 return hits[0]
@@ -1774,7 +1775,7 @@ class Types:
         """Python: the class a module (or package `__init__`) makes available
         as `name`, through its imports and `from x import *` re-exports."""
         from .core import _py_class
-        return [c for mn in mods if mn in self.p.modules and self.p.modules[mn].file.endswith(".py")
+        return [c for mn in mods if mn in self.p.modules and self.p.modules[mn].file.endswith(PY_EXTS)
                 and not self.p.modules[mn].owner and (c := _py_class(self.p, self.p.modules[mn], name))]
 
     def _js_default_reexport(self, mods) -> list:
@@ -1834,7 +1835,7 @@ class Types:
         """`<mod>.<name>` is a class nested in mod, not a file named with a
         dot beside it (`ResilienceContextPool.Shared.cs`)."""
         m = self.p.modules[mn]
-        return bool(m.owner) or m.file.endswith(".py")
+        return bool(m.owner) or m.file.endswith(PY_EXTS)
 
     def step(self, mod, cur, seg: str, depth: int):
         kind, mods, exact = cur
@@ -1962,7 +1963,7 @@ class Types:
             if mod.file.endswith(_JS_EXTS):  # a module's object given a property elsewhere (`ctx.response = ...`)
                 got = self.field(list(mods), seg, depth)
                 return None if got is UNKNOWN else got
-            if seg == "query" and mod.file.endswith(".py") and infer_flask.model(self, mods):
+            if seg == "query" and mod.file.endswith(PY_EXTS) and infer_flask.model(self, mods):
                 return infer_flask.rows(mods)  # Flask-SQLAlchemy: `User.query`, a query of Users
             return None
         got = self.field(list(mods), seg, depth)
@@ -1970,7 +1971,7 @@ class Types:
             got = self._getter(list(mods), seg, depth)
         if got is UNKNOWN:
             return None
-        if got is None and seg.startswith("__") and seg.endswith("__") and mod.file.endswith(".py"):
+        if got is None and seg.startswith("__") and seg.endswith("__") and mod.file.endswith(PY_EXTS):
             return EXT  # `self.__dict__`, `cls.__name__`: Python's own attributes
         if got is None and seg in UNWRAP:
             return cur
@@ -2104,7 +2105,7 @@ _JS_BUILTINS = {"Buffer", "URL", "URLSearchParams", "Promise", "Math", "JSON", "
                 "ReadableStream", "WritableStream", "EventEmitter", "Function", "structuredClone"}
 _DOM_PROPS = {"classList", "style", "dataset"}
 _EXPANDO = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)[ \t]*=(?![=>])")
-_EXPLICIT_SELF = (".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".php")
+_EXPLICIT_SELF = (".py", ".pyw", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".php")
 _PY_BUILTIN_NAMES = set(dir(__import__("builtins")))
 # C#'s keyword names for System types
 _CS_KEYWORD_TYPES = {"string", "object", "int", "uint", "long", "ulong", "short", "ushort", "byte", "sbyte", "bool",
@@ -2114,7 +2115,7 @@ _PY_BUILTIN_CALLS = {"vars", "dict", "list", "set", "frozenset", "tuple", "str",
                      "type", "open", "globals", "locals", "dir", "int", "float", "bool", "len", "id", "hash"}
 _PY_BUILTIN = {"dict", "list", "set", "frozenset", "tuple", "str", "bytes", "bytearray", "int", "float", "bool",
                "defaultdict", "deque", "OrderedDict", "Counter"}
-_DYNAMIC = (".gd", ".py", ".js", ".mjs", ".cjs", ".rb", ".php", ".qml")
+_DYNAMIC = (".gd", ".py", ".pyw", ".js", ".mjs", ".cjs", ".rb", ".php", ".qml")
 _GO_BUILTIN = {"string", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64",
                "float32", "float64", "bool", "byte", "rune", "error", "any", "uintptr", "complex64", "complex128"}
 
@@ -2136,7 +2137,7 @@ def resolve_bases(project) -> None:
         if m.parent and not m.bases and m.parent not in project.modules and m.parent[:1].isupper() \
                 and not m.file.endswith((".ex", ".exs", ".rb", ".rake", ".ru")):
             m.unresolved = True  # GDScript `extends CharacterBody3D`: an engine class
-        if not m.bases or m.file.endswith((".rb", ".rake", ".ru", ".py")):  # Ruby, Python: resolved by their adapters
+        if not m.bases or m.file.endswith((".rb", ".rake", ".ru") + PY_EXTS):  # Ruby, Python: resolved by their adapters
             continue
         got, missing, lib = [], False, []
         fm = project.modules.get(m.owner, m) if m.owner else m

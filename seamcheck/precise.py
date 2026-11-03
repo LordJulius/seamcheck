@@ -33,9 +33,9 @@ from . import core
 from . import fingerprint as fp
 
 _TS = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
-DEFAULTS = {".py": ["pyright-langserver", "--stdio"], ".rs": ["rust-analyzer"], ".go": ["gopls"],
+DEFAULTS = {".py": ["pyright-langserver", "--stdio"], ".pyw": ["pyright-langserver", "--stdio"], ".rs": ["rust-analyzer"], ".go": ["gopls"],
             **{e: ["tsserver"] for e in _TS}}
-LANG_ID = {".py": "python", ".rs": "rust", ".go": "go", ".ts": "typescript", ".mts": "typescript",
+LANG_ID = {".py": "python", ".pyw": "python", ".rs": "rust", ".go": "go", ".ts": "typescript", ".mts": "typescript",
            ".cts": "typescript", ".tsx": "typescriptreact", ".js": "javascript", ".mjs": "javascript",
            ".cjs": "javascript", ".jsx": "javascriptreact", ".c": "c", ".h": "cpp", ".hpp": "cpp", ".cc": "cpp",
            ".cpp": "cpp", ".cxx": "cpp", ".cs": "csharp", ".java": "java", ".kt": "kotlin", ".kts": "kotlin",

@@ -25,7 +25,7 @@ impl Adapter for Python {
         "python"
     }
     fn exts(&self) -> &'static [&'static str] {
-        &[".py"]
+        &[".py", ".pyw"]
     }
     fn parse(&self, _ctx: &ParseCtx, rel: &str, text: &str) -> Vec<Module> {
         parse_python(rel, text)

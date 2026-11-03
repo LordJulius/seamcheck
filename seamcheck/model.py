@@ -10,6 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+# Python source files (a `.pyw` is a Python script run without a console)
+PY_EXTS = (".py", ".pyw")
+
+
 @dataclass
 class Call:
     name: str  # the called function's name

@@ -16,6 +16,7 @@ import os
 import pickle
 import re
 import subprocess
+import sys
 from collections import defaultdict, deque
 import signal
 from concurrent.futures import ProcessPoolExecutor
@@ -23,7 +24,7 @@ from dataclasses import dataclass, field
 
 from . import config as config_mod
 from . import lang_elixir, lang_gdscript, lang_other, lang_ruby, lang_slint
-from .model import Func, Module
+from .model import PY_EXTS, Func, Module
 from .scan import blank
 
 CACHE_VERSION = 35
@@ -66,7 +67,7 @@ def adapter_for(rel: str):
         return lang_gdscript.parse
     if ext in lang_elixir.EXT:
         return lang_elixir.parse
-    if ext == ".py":
+    if ext in PY_EXTS:
         return lang_other.parse_python
     if ext in lang_ruby.EXT:
         return lang_ruby.parse
@@ -83,7 +84,7 @@ def scan_family(rel: str) -> str:
         return "gdscript"
     if ext in lang_elixir.EXT:
         return "elixir"
-    if ext == ".py":
+    if ext in PY_EXTS:
         return "python"
     if ext in lang_ruby.EXT:
         return "ruby"
@@ -823,7 +824,7 @@ def _py_index(project: Project, cache: dict) -> dict[str, list[str]]:
     if idx is None:
         idx = defaultdict(list)
         for m in project.modules.values():
-            if m.owner or not m.file.endswith(".py"):
+            if m.owner or not m.file.endswith(PY_EXTS):
                 continue
             path = m.name[:-len("/__init__")] if m.name.endswith("/__init__") else m.name
             parts = path.split("/")
@@ -831,6 +832,39 @@ def _py_index(project: Project, cache: dict) -> dict[str, list[str]]:
                 idx[".".join(parts[k:])].append(m.name)
         cache["\0py"] = idx
     return idx
+
+
+# The standard library's top-level modules, every CPython from 3.10 on (sys.stdlib_module_names
+# of 3.12 and 3.14, plus what 3.12 and 3.13 removed): fixed, so the answer is the same whichever
+# Python runs seamcheck (the Rust port carries the same list)
+PY_STDLIB = frozenset(getattr(sys, "stdlib_module_names", ())) | frozenset("""
+    __future__ _abc _aix_support _android_support _apple_support _ast _ast_unparse _asyncio _bisect _blake2 _bz2
+    _codecs _codecs_cn _codecs_hk _codecs_iso2022 _codecs_jp _codecs_kr _codecs_tw _collections _collections_abc
+    _colorize _compat_pickle _compression _contextvars _crypt _csv _ctypes _curses _curses_panel _datetime _dbm
+    _decimal _elementtree _frozen_importlib _frozen_importlib_external _functools _gdbm _hashlib _heapq _hmac _imp
+    _interpchannels _interpqueues _interpreters _io _ios_support _json _locale _lsprof _lzma _markupbase _md5 _msi
+    _multibytecodec _multiprocessing _opcode _opcode_metadata _operator _osx_support _overlapped _pickle _posixshmem
+    _posixsubprocess _py_abc _py_warnings _pydatetime _pydecimal _pyio _pylong _pyrepl _queue _random
+    _remote_debugging _scproxy _sha1 _sha2 _sha3 _signal _sitebuiltins _socket _sqlite3 _sre _ssl _stat _statistics
+    _string _strptime _struct _suggestions _symtable _sysconfig _thread _threading_local _tkinter _tokenize
+    _tracemalloc _types _typing _uuid _warnings _weakref _weakrefset _winapi _wmi _zoneinfo _zstd abc aifc
+    annotationlib antigravity argparse array ast asynchat asyncio asyncore atexit audioop base64 bdb binascii bisect
+    builtins bz2 cProfile calendar cgi cgitb chunk cmath cmd code codecs codeop collections colorsys compileall
+    compression concurrent configparser contextlib contextvars copy copyreg crypt csv ctypes curses dataclasses
+    datetime dbm decimal difflib dis distutils doctest email encodings ensurepip enum errno faulthandler fcntl
+    filecmp fileinput fnmatch fractions ftplib functools gc genericpath getopt getpass gettext glob graphlib grp
+    gzip hashlib heapq hmac html http idlelib imaplib imghdr imp importlib inspect io ipaddress itertools json
+    keyword lib2to3 linecache locale logging lzma mailbox mailcap marshal math mimetypes mmap modulefinder msilib
+    msvcrt multiprocessing netrc nis nntplib nt ntpath nturl2path numbers opcode operator optparse os ossaudiodev
+    pathlib pdb pickle pickletools pipes pkgutil platform plistlib poplib posix posixpath pprint profile pstats pty
+    pwd py_compile pyclbr pydoc pydoc_data pyexpat queue quopri random re readline reprlib resource rlcompleter
+    runpy sched secrets select selectors shelve shlex shutil signal site smtpd smtplib sndhdr socket socketserver
+    spwd sqlite3 sre_compile sre_constants sre_parse ssl stat statistics string stringprep struct subprocess sunau
+    symtable sys sysconfig syslog tabnanny tarfile telnetlib tempfile termios textwrap this threading time timeit
+    tkinter token tokenize tomllib trace traceback tracemalloc tty turtle turtledemo types typing unicodedata
+    unittest urllib uu uuid venv warnings wave weakref webbrowser winreg winsound wsgiref xdrlib xml xmlrpc zipapp
+    zipfile zipimport zlib zoneinfo
+""".split())
 
 
 def _resolve_py(project: Project, where: str, cache: dict) -> str:
@@ -846,6 +880,11 @@ def _resolve_py(project: Project, where: str, cache: dict) -> str:
             if cand in project.modules:
                 return cand
         return ""
+    # a bare top-level import is the standard library's first: `import time` is never
+    # a project's app/utils/time.py
+    top = spec.split(".")[0]
+    if top in PY_STDLIB:
+        return EXTERNAL
     depth = spec.count(".") + 1
 
     def root(h):
@@ -854,6 +893,12 @@ def _resolve_py(project: Project, where: str, cache: dict) -> str:
     # an absolute import starts at a source root, never inside a package:
     # `import typing` in flask/ is the stdlib's, not flask/typing.py
     hits = [h for h in _py_index(project, cache).get(spec, []) if not root(h) or root(h) + "/__init__" not in project.modules]
+    # a source root holding the importing file (the repo root, its own folder or one above it)
+    mine = [h for h in hits if root(h) == "" or d == root(h) or d.startswith(root(h) + "/")]
+    if not mine:
+        # none: a package rooted elsewhere still imports (tests/ importing src/flask, an
+        # installed checkout), a lone file in an unrelated folder never does
+        hits = [h for h in hits if f"{root(h)}/{top}/__init__" in project.modules]
     if not hits:
         return EXTERNAL  # the stdlib or an installed package
     if len(hits) == 1:
@@ -862,7 +907,6 @@ def _resolve_py(project: Project, where: str, cache: dict) -> str:
     # package): what Python would do. A source root holding the importing
     # file wins (the longest such); else the shallowest root (`src/flask`
     # over `tests/apps/x/flask`).
-    mine = [h for h in hits if root(h) == "" or d == root(h) or d.startswith(root(h) + "/")]
     pool = mine or hits
     key = (lambda h: -len(root(h).split("/"))) if mine else (lambda h: len(root(h).split("/")) if root(h) else 0)
     best = min(key(h) for h in pool)
@@ -1126,7 +1170,7 @@ def _python_names(project: Project) -> None:
     """Python, once every import is resolved: `from x import Foo` (a class) and
     `from pkg import sub` (a submodule) become aliases, so `Foo.m()` and
     `sub.f()` are exact; and each class's base names its parent class."""
-    py = [m for m in project.modules.values() if m.file.endswith(".py")]
+    py = [m for m in project.modules.values() if m.file.endswith(PY_EXTS)]
     for m in py:
         if m.owner:
             continue
@@ -1347,7 +1391,7 @@ def _typed_targets(project: Project, mod: Module | None, ty: str, name: str, ext
     if mod and mod.file.endswith(".go"):
         return _go_typed(project, mod, ty, name)
     mods = []
-    if mod and mod.file.endswith(".py") and (cls := _py_class(project, mod, ty)):
+    if mod and mod.file.endswith(PY_EXTS) and (cls := _py_class(project, mod, ty)):
         mods.append(cls)
     if mod and ty in mod.aliases:
         mods.append(mod.aliases[ty])
@@ -1409,7 +1453,7 @@ _FAMILIES = {
     ".kt": {"jvm"}, ".kts": {"jvm"}, ".java": {"jvm"},
     ".ts": {"web"}, ".tsx": {"web"}, ".jsx": {"web"}, ".mjs": {"web"}, ".cjs": {"web"}, ".js": {"web", "qt"},
     ".qml": {"qt"}, ".c": {"qt"}, ".cpp": {"qt"}, ".cc": {"qt"}, ".cxx": {"qt"}, ".h": {"qt"}, ".hpp": {"qt"}, ".hh": {"qt"},
-    ".py": {"py"}, ".gd": {"gd"}, ".rs": {"rs"}, ".go": {"go"}, ".cs": {"cs"},
+    ".py": {"py"}, ".pyw": {"py"}, ".gd": {"gd"}, ".rs": {"rs"}, ".go": {"go"}, ".cs": {"cs"},
     ".rb": {"rb"}, ".rake": {"rb"}, ".ru": {"rb"}, ".slint": {"sl"},
 }
 
@@ -1564,7 +1608,7 @@ def _scoped_language(rel: str, mod=None) -> bool:
                 r"\brequire\s*\(\s*['\"]|\bmodule\.exports\b|^[ \t]*exports\.\w+\s*=|^[ \t]*(?:import|export)\b", raw, re.M)) \
                 and not re.search(r"^[ \t]*(?:global|globalThis|window)\.\w+\s*=", raw, re.M)
         return hit
-    return ext in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts", ".py", ".go", ".rs",
+    return ext in (".ex", ".exs", ".kt", ".kts", ".java", ".ts", ".tsx", ".mts", ".cts", ".py", ".pyw", ".go", ".rs",
                    ".swift", ".php", ".rb", ".rake", ".ru")
 
 
@@ -2238,7 +2282,7 @@ def _build_edges(project: Project) -> None:
                 if infer.is_ext(types.first(mod, f, c.name, 0)):
                     _nothing(project, f, c)  # `new Promise((resolve) => resolve(x))`: the runtime's function
                     continue
-            if not q and mod and not f.file.endswith((".py", ".ex", ".exs")) and not targets:
+            if not q and mod and not f.file.endswith(PY_EXTS + (".ex", ".exs")) and not targets:
                 # a bare call in a class: its own (or an inherited) method first;
                 # `Foo(...)` / `new Foo(...)` / `: Base(args)`: Foo's constructor
                 own = types.own_class(mod, f) if (mod.owner or mod.kind) else None
@@ -2349,7 +2393,7 @@ def _build_edges(project: Project) -> None:
                         if hits:
                             targets = [(t, len(hits) == 1) for t in hits]
                             break
-            elif not q and mod and f.file.endswith(".py") and f.kind != "top" and re.search(
+            elif not q and mod and f.file.endswith(PY_EXTS) and f.kind != "top" and re.search(
                     rf"^[ \t]+(?:from[ \t]+[\w.]+[ \t]+)?import[ \t][^\n]*(?:(?<![\w.]){re.escape(c.name)}\b(?![ \t]+as\b)|\bas[ \t]+{re.escape(c.name)}\b)",
                     f.code, re.M) and c.name in project.modules.get(mod.owner, mod).imported:
                 # `from ._termui_impl import get_pager_file` inside the function: that one, not the
@@ -2390,7 +2434,7 @@ def _build_edges(project: Project) -> None:
                         break
                 if not hits and smod.package:
                     hits = _in_scope(project, "pkg:" + smod.package, c.name)
-                if not hits and f.file.endswith(".py"):
+                if not hits and f.file.endswith(PY_EXTS):
                     # `Foo(...)` builds a Foo: its __init__
                     cls = _py_class(project, mod, c.name)
                     t = _lookup(project, cls, "__init__") if cls else None
@@ -2416,7 +2460,7 @@ def _build_edges(project: Project) -> None:
                     # project function of that name.
                     _nothing(project, f, c)
                     continue
-            if not targets and q and f.file.endswith(".py") and c.name[:1].isupper() and mod is not None \
+            if not targets and q and f.file.endswith(PY_EXTS) and c.name[:1].isupper() and mod is not None \
                     and (cls := _py_class(project, mod, f"{q}.{c.name}")):
                 # `sessions.Session()`: a class through its module builds one, so its __init__ runs
                 t = _lookup(project, cls, "__init__")
@@ -2539,7 +2583,7 @@ def _build_edges(project: Project) -> None:
                 # the file imports or shares a package with: that is the one.
                 seen_mods = _scope(project, mod, scope_cache) if mod and not _shadowed(f, c.name) else set()
                 mine = [g for g in cands if g.module in seen_mods]
-                if f.file.endswith(".py"):
+                if f.file.endswith(PY_EXTS):
                     # x.f() reaches a module-level Python function only through
                     # the module's own name (resolved above), never `session.get()`
                     mine = [g for g in mine if project.modules[g.module].owner]
@@ -2603,7 +2647,7 @@ def _build_edges(project: Project) -> None:
                 if _TRACE is not None:
                     _TRACE.append((f.file, c.line, c.name, c.chain, "exact" if any(e for _, e in targets) else "guess",
                                    tuple(t.id for t, _ in targets[:4])))
-            if f.file.endswith(".py") and mod is not None and 0 < c.line <= len(mod.raw) \
+            if f.file.endswith(PY_EXTS) and mod is not None and 0 < c.line <= len(mod.raw) \
                     and mod.raw[c.line - 1].lstrip().startswith("@") and len(targets) == 1 and targets[0][1]:
                 # `@app.route("/")`: route() runs, then the function it returns gets the decorated one
                 inner = _py_returned_closure(project, targets[0][0])
@@ -2674,7 +2718,7 @@ def _passed(project: Project, types, f: Func, k: int, depth: int):
     return got.pop() if len(got) == 1 else None
 
 
-_PARAM_FLOW_EXTS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".py")
+_PARAM_FLOW_EXTS = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts") + PY_EXTS
 
 
 def _param_names(f: Func) -> list[str]:
@@ -2967,6 +3011,9 @@ def run_rules(project: Project, only: list[str] | None = None, skip: list[str] |
             out.append(Finding(rid, "warn", r.get("_file", "seamcheck.toml"), 0, "", f"rule {rid} not checked here: {e.args[0] if e.args else e}"))
         except KeyError as e:
             out.append(Finding(rid, "error", r.get("_file", "seamcheck.toml"), 0, "", f"rule {rid} needs {e}"))
+        except Exception as e:  # a rule that breaks is one finding; the other rules still run
+            out.append(Finding(rid, "error", r.get("_file", "seamcheck.toml"), 0, "",
+                               f"rule {rid} crashed: {type(e).__name__}: {e}"))
     if pool:
         pool.shutdown()
     order = {"error": 0, "warn": 1, "info": 2}
@@ -3284,7 +3331,8 @@ def _reach(project: Project, r: dict) -> list[Finding]:
     picked = []
     for spec in (r["from"] if isinstance(r["from"], list) else [r["from"]]):
         picked.extend(project.find(spec))
-    for f in dict.fromkeys(picked):
+    # (each once, in order: a Func is unhashable, so by its id)
+    for f in {f.id: f for f in picked}.values():
         if when and not when.search(f.code):
             continue
         if _allowed(project, f.file, f, r.get("allow", [])):

@@ -492,7 +492,7 @@ impl<'a> Types<'a> {
             let cond = upper1(ty)
                 || ty.contains('.')
                 || ends(&md.file, &[".rs", ".swift"])
-                || (md.file.ends_with(".py") && super::PY_BUILTIN.contains(&ty));
+                || (crate::model::is_py(&md.file) && super::PY_BUILTIN.contains(&ty));
             return if cond { Some(Val::Ext(vec![ty.to_string()])) } else { None };
         }
         Some(Val::Inst(mods, exact))

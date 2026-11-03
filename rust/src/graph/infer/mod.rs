@@ -85,8 +85,8 @@ pub const JS_EXTS: &[&str] = &[".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".m
 /// `_JS_EXTS[:-1]`: without .qml
 pub const JS_FILE_EXTS: &[&str] = &[".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"];
 pub const ES_MODULE: &[&str] = &[".ts", ".tsx", ".mts", ".cts"];
-pub const EXPLICIT_SELF: &[&str] = &[".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".php"];
-pub const DYNAMIC: &[&str] = &[".gd", ".py", ".js", ".mjs", ".cjs", ".rb", ".php", ".qml"];
+pub const EXPLICIT_SELF: &[&str] = &[".py", ".pyw", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".php"];
+pub const DYNAMIC: &[&str] = &[".gd", ".py", ".pyw", ".js", ".mjs", ".cjs", ".rb", ".php", ".qml"];
 pub const OVERLOADED: &[&str] = &[".java", ".cs", ".kt", ".kts", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh"];
 
 /// The value a receiver chain evaluates to (infer.py's `(kind, modules, exact)`
@@ -338,7 +338,7 @@ impl<'a> Types<'a> {
             return h.clone();
         }
         let mut hit = self.type_modules_(md, name);
-        if hit.0.len() > 1 && !name.contains('.') && !md.owner.is_empty() && !md.file.ends_with(".py") {
+        if hit.0.len() > 1 && !name.contains('.') && !md.owner.is_empty() && !crate::model::is_py(&md.file) {
             // several `Source` classes in a test file: the enclosing classes' own nested one
             let mut o = md.name.clone();
             while let Some(om) = self.g.modules.get(&o) {
@@ -419,7 +419,7 @@ impl<'a> Types<'a> {
         let g = self.g;
         let fm = self.file_mod(md);
         let mut name = name.to_string();
-        if fm.file.ends_with(".py") {
+        if crate::model::is_py(&fm.file) {
             let cls = crate::graph::pylink::py_class(g, md, &name, 0);
             if !cls.is_empty() {
                 return (vec![cls], true, true);
@@ -1065,7 +1065,7 @@ pub fn resolve_bases(g: &mut Graph, p: &Project) {
             {
                 u.unresolved = Some(true); // GDScript `extends CharacterBody3D`: an engine class
             }
-            if m.bases.is_empty() || ends(&m.file, &[".rb", ".rake", ".ru", ".py"]) {
+            if m.bases.is_empty() || ends(&m.file, &[".rb", ".rake", ".ru", ".py", ".pyw"]) {
                 // Ruby, Python: resolved by their adapters
                 if u.unresolved.is_some() {
                     upds.push(u);

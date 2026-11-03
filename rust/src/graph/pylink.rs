@@ -46,6 +46,46 @@ const PY_BUILTINS: &[&str] = &[
     "type", "vars", "zip",
 ];
 
+/// The standard library's top-level modules, every CPython from 3.10 on
+/// (core.PY_STDLIB): a bare import of one is never a project file.
+pub const PY_STDLIB: &[&str] = &[
+    "__future__", "_abc", "_aix_support", "_android_support", "_apple_support", "_ast", "_ast_unparse", "_asyncio",
+    "_bisect", "_blake2", "_bz2", "_codecs", "_codecs_cn", "_codecs_hk", "_codecs_iso2022", "_codecs_jp",
+    "_codecs_kr", "_codecs_tw", "_collections", "_collections_abc", "_colorize", "_compat_pickle", "_compression",
+    "_contextvars", "_crypt", "_csv", "_ctypes", "_curses", "_curses_panel", "_datetime", "_dbm", "_decimal",
+    "_elementtree", "_frozen_importlib", "_frozen_importlib_external", "_functools", "_gdbm", "_hashlib", "_heapq",
+    "_hmac", "_imp", "_interpchannels", "_interpqueues", "_interpreters", "_io", "_ios_support", "_json", "_locale",
+    "_lsprof", "_lzma", "_markupbase", "_md5", "_msi", "_multibytecodec", "_multiprocessing", "_opcode",
+    "_opcode_metadata", "_operator", "_osx_support", "_overlapped", "_pickle", "_posixshmem", "_posixsubprocess",
+    "_py_abc", "_py_warnings", "_pydatetime", "_pydecimal", "_pyio", "_pylong", "_pyrepl", "_queue", "_random",
+    "_remote_debugging", "_scproxy", "_sha1", "_sha2", "_sha3", "_signal", "_sitebuiltins", "_socket", "_sqlite3",
+    "_sre", "_ssl", "_stat", "_statistics", "_string", "_strptime", "_struct", "_suggestions", "_symtable",
+    "_sysconfig", "_thread", "_threading_local", "_tkinter", "_tokenize", "_tracemalloc", "_types", "_typing",
+    "_uuid", "_warnings", "_weakref", "_weakrefset", "_winapi", "_wmi", "_zoneinfo", "_zstd", "abc", "aifc",
+    "annotationlib", "antigravity", "argparse", "array", "ast", "asynchat", "asyncio", "asyncore", "atexit",
+    "audioop", "base64", "bdb", "binascii", "bisect", "builtins", "bz2", "cProfile", "calendar", "cgi", "cgitb",
+    "chunk", "cmath", "cmd", "code", "codecs", "codeop", "collections", "colorsys", "compileall", "compression",
+    "concurrent", "configparser", "contextlib", "contextvars", "copy", "copyreg", "crypt", "csv", "ctypes",
+    "curses", "dataclasses", "datetime", "dbm", "decimal", "difflib", "dis", "distutils", "doctest", "email",
+    "encodings", "ensurepip", "enum", "errno", "faulthandler", "fcntl", "filecmp", "fileinput", "fnmatch",
+    "fractions", "ftplib", "functools", "gc", "genericpath", "getopt", "getpass", "gettext", "glob", "graphlib",
+    "grp", "gzip", "hashlib", "heapq", "hmac", "html", "http", "idlelib", "imaplib", "imghdr", "imp", "importlib",
+    "inspect", "io", "ipaddress", "itertools", "json", "keyword", "lib2to3", "linecache", "locale", "logging",
+    "lzma", "mailbox", "mailcap", "marshal", "math", "mimetypes", "mmap", "modulefinder", "msilib", "msvcrt",
+    "multiprocessing", "netrc", "nis", "nntplib", "nt", "ntpath", "nturl2path", "numbers", "opcode", "operator",
+    "optparse", "os", "ossaudiodev", "pathlib", "pdb", "pickle", "pickletools", "pipes", "pkgutil", "platform",
+    "plistlib", "poplib", "posix", "posixpath", "pprint", "profile", "pstats", "pty", "pwd", "py_compile", "pyclbr",
+    "pydoc", "pydoc_data", "pyexpat", "queue", "quopri", "random", "re", "readline", "reprlib", "resource",
+    "rlcompleter", "runpy", "sched", "secrets", "select", "selectors", "shelve", "shlex", "shutil", "signal",
+    "site", "smtpd", "smtplib", "sndhdr", "socket", "socketserver", "spwd", "sqlite3", "sre_compile",
+    "sre_constants", "sre_parse", "ssl", "stat", "statistics", "string", "stringprep", "struct", "subprocess",
+    "sunau", "symtable", "sys", "sysconfig", "syslog", "tabnanny", "tarfile", "telnetlib", "tempfile", "termios",
+    "textwrap", "this", "threading", "time", "timeit", "tkinter", "token", "tokenize", "tomllib", "trace",
+    "traceback", "tracemalloc", "tty", "turtle", "turtledemo", "types", "typing", "unicodedata", "unittest",
+    "urllib", "uu", "uuid", "venv", "warnings", "wave", "weakref", "webbrowser", "winreg", "winsound", "wsgiref",
+    "xdrlib", "xml", "xmlrpc", "zipapp", "zipfile", "zipimport", "zlib", "zoneinfo",
+];
+
 /// Dotted-path suffix -> Python file modules (core._py_index): `flask.helpers`
 /// is any module named `.../flask/helpers` (or a package `.../flask/helpers/__init__`).
 pub struct PyIndex {
@@ -56,7 +96,7 @@ impl PyIndex {
     pub fn new(g: &Graph) -> PyIndex {
         let mut idx: HashMap<String, Vec<String>> = HashMap::new();
         for m in g.modules.values() {
-            if !m.owner.is_empty() || !m.file.ends_with(".py") {
+            if !m.owner.is_empty() || !crate::model::is_py(&m.file) {
                 continue;
             }
             let path = m.name.strip_suffix("/__init__").unwrap_or(&m.name);
@@ -98,6 +138,12 @@ impl PyIndex {
             }
             return String::new();
         }
+        // a bare top-level import is the standard library's first: `import time` is never
+        // a project's app/utils/time.py
+        let top = spec.split('.').next().unwrap_or("");
+        if PY_STDLIB.contains(&top) {
+            return EXTERNAL.to_string();
+        }
         let depth = spec.matches('.').count() + 1;
         // (the parts of h without its package's __init__, `parts[:len(parts) - depth]`)
         let root = |h: &str| -> String {
@@ -108,7 +154,7 @@ impl PyIndex {
             }
             parts[..e as usize].join("/")
         };
-        let hits: Vec<&String> = self
+        let mut hits: Vec<&String> = self
             .idx
             .get(spec)
             .map(|v| v.iter().collect::<Vec<_>>())
@@ -119,6 +165,17 @@ impl PyIndex {
                 r.is_empty() || !g.modules.contains_key(&format!("{r}/__init__"))
             })
             .collect();
+        // a source root holding the importing file (the repo root, its own folder or one above it)
+        let in_root = |h: &str| {
+            let r = root(h);
+            r.is_empty() || d == r || d.starts_with(&format!("{r}/"))
+        };
+        let mine: Vec<&String> = hits.iter().copied().filter(|h| in_root(h)).collect();
+        if mine.is_empty() {
+            // none: a package rooted elsewhere still imports (tests/ importing src/flask, an
+            // installed checkout), a lone file in an unrelated folder never does
+            hits.retain(|h| g.modules.contains_key(&format!("{}/{top}/__init__", root(h))));
+        }
         if hits.is_empty() {
             return EXTERNAL.to_string();
         }
@@ -126,11 +183,6 @@ impl PyIndex {
             return hits[0].clone();
         }
         let nparts = |h: &str| root(h).split('/').count() as isize;
-        let in_root = |h: &str| {
-            let r = root(h);
-            r.is_empty() || d == r || d.starts_with(&format!("{r}/"))
-        };
-        let mine: Vec<&String> = hits.iter().copied().filter(|h| in_root(h)).collect();
         let use_mine = !mine.is_empty();
         let pool: Vec<&String> = if use_mine { mine } else { hits.clone() };
         let key = |h: &str| -> isize {
@@ -223,7 +275,7 @@ fn py_lib_reexport(g: &Graph, fm: &Module, name: &str, depth: usize) -> bool {
 /// class's base names its parent class.
 pub fn python_names(g: &mut Graph) {
     let names: Vec<String> =
-        g.modules.iter().filter(|(_, m)| m.file.ends_with(".py")).map(|(n, _)| n.clone()).collect();
+        g.modules.iter().filter(|(_, m)| crate::model::is_py(&m.file)).map(|(n, _)| n.clone()).collect();
     for n in &names {
         if !g.modules[n].owner.is_empty() {
             continue;
@@ -385,7 +437,7 @@ pub fn groups(g: &Graph, p: &Project) -> HashMap<String, String> {
 /// is declared `ty`, and whether ty is a project type at all.
 pub fn typed_targets<'a>(g: &'a Graph, m: &Module, ty: &str, name: &str) -> (Vec<&'a Func>, bool) {
     let mut mods: Vec<String> = Vec::new();
-    if m.file.ends_with(".py") {
+    if crate::model::is_py(&m.file) {
         let cls = py_class(g, m, ty, 0);
         if !cls.is_empty() {
             mods.push(cls);

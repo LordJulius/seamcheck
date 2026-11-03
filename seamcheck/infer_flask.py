@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import re
 
+from .model import PY_EXTS
+
 ROWS = "\0rows"
 _BUILDERS = {"filter()", "filter_by()", "order_by()", "group_by()", "having()", "join()", "outerjoin()", "options()",
              "limit()", "offset()", "distinct()", "where()", "select_from()", "params()", "execution_options()",
@@ -39,7 +41,7 @@ def step(v, seg: str, ext):
 def class_bases(m) -> list[str]:
     """A Python class module's supertypes as its `class X(...)` line writes them (the linker
     keeps only the project's)."""
-    if not m.decls or not m.file.endswith(".py"):
+    if not m.decls or not m.file.endswith(PY_EXTS):
         return []
     head = next((ln for ln in m.raw if re.match(rf"\s*class\s+{re.escape(m.decls[0])}\s*\(", ln)), "")
     bm = re.match(r"\s*class\s+\w+\s*\(([^)]*)\)", head)

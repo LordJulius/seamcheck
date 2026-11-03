@@ -15,7 +15,7 @@ fn module_q(q: &str) -> bool {
     re!(r"(?![A-Z0-9_]+$)[A-Z]\w*(?:\.[A-Z]\w*)*$").match_start(q).is_some()
 }
 
-const PARAM_FLOW_EXTS: &[&str] = &[".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".py"];
+const PARAM_FLOW_EXTS: &[&str] = &[".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".py", ".pyw"];
 const EXPLICIT_RECEIVER: &[&str] = &[".go", ".rs", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".php"];
 const C_FAMILY: &[&str] = &[".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh"];
 const CPP_EXTS: &[&str] = &[".cpp", ".cc", ".cxx", ".hpp", ".hh"];
@@ -83,7 +83,7 @@ impl<'a> Resolver<'a> {
         }
         matches!(
             ext,
-            ".ex" | ".exs" | ".kt" | ".kts" | ".java" | ".ts" | ".tsx" | ".mts" | ".cts" | ".py" | ".go" | ".rs" | ".swift"
+            ".ex" | ".exs" | ".kt" | ".kts" | ".java" | ".ts" | ".tsx" | ".mts" | ".cts" | ".py" | ".pyw" | ".go" | ".rs" | ".swift"
                 | ".php" | ".rb" | ".rake" | ".ru"
         )
     }
@@ -339,7 +339,7 @@ impl<'a> Resolver<'a> {
                 return nothing(); // `new Promise((resolve) => resolve(x))`: the runtime's function
             }
         }
-        if q.is_empty() && !ends(&f.file, &[".py", ".ex", ".exs"]) && targets.is_empty() {
+        if q.is_empty() && !ends(&f.file, &[".py", ".pyw", ".ex", ".exs"]) && targets.is_empty() {
             // a bare call in a class: its own (or an inherited) method first;
             // `Foo(...)` / `new Foo(...)` / `: Base(args)`: Foo's constructor
             let own = if !md.owner.is_empty() || !md.kind.is_empty() { self.t.own_class(md, Some(f)) } else { None };
@@ -496,7 +496,7 @@ impl<'a> Resolver<'a> {
                     }
                 }
             }
-        } else if f.file.ends_with(".py")
+        } else if crate::model::is_py(&f.file)
             && f.kind != "top"
             && c.name.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
             && rxd(&format!(
@@ -565,7 +565,7 @@ impl<'a> Resolver<'a> {
             if hits.is_empty() && !smod.package.is_empty() {
                 hits = self.t.in_scope(&format!("pkg:{}", smod.package), &c.name, 0);
             }
-            if hits.is_empty() && f.file.ends_with(".py") {
+            if hits.is_empty() && crate::model::is_py(&f.file) {
                 // `Foo(...)` builds a Foo: its __init__
                 let cls = pylink::py_class(g, md, &c.name, 0);
                 match (!cls.is_empty()).then(|| g.lookup(&cls, "__init__")).flatten() {
@@ -606,7 +606,7 @@ impl<'a> Resolver<'a> {
                 return nothing();
             }
         }
-        if targets.is_empty() && !q.is_empty() && f.file.ends_with(".py") && upper1(&c.name) {
+        if targets.is_empty() && !q.is_empty() && crate::model::is_py(&f.file) && upper1(&c.name) {
             let cls = pylink::py_class(g, md, &format!("{q}.{}", c.name), 0);
             if !cls.is_empty() {
                 // `sessions.Session()`: a class through its module builds one, so its __init__ runs
@@ -795,7 +795,7 @@ impl<'a> Resolver<'a> {
         if q.is_empty() && ends(&f.file, PARAM_FLOW_EXTS) && !targets.iter().any(|(_, e)| *e) && self.param_names(f).contains(&c.name) {
             pending = true; // `checkFn(x)` on a parameter: what the callers pass (after this pass)
         }
-        if f.file.ends_with(".py")
+        if crate::model::is_py(&f.file)
             && c.line > 0
             && c.line <= md.raw.len()
             && md.raw[c.line - 1].trim_start().starts_with('@')
@@ -894,7 +894,7 @@ impl<'a> Resolver<'a> {
             s
         };
         let mut mine: Vec<&Func> = cands.iter().copied().filter(|h| seen_mods.contains(&h.module)).collect();
-        if f.file.ends_with(".py") {
+        if crate::model::is_py(&f.file) {
             // x.f() reaches a module-level Python function only through
             // the module's own name (resolved above), never `session.get()`
             mine.retain(|h| !g.modules[&h.module].owner.is_empty());

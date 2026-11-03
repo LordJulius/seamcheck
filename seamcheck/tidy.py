@@ -553,7 +553,7 @@ def _is_private(project, f: Func) -> bool:
         return "export" not in line
     if ext in (".kt", ".kts", ".java", ".cs"):
         return bool(re.search(r"\bprivate\b", line))
-    if ext == ".py":
+    if ext in (".py", ".pyw"):
         return f.name.startswith("_") and not f.name.startswith("__")
     return False
 
@@ -609,7 +609,7 @@ _DECLS = {
     (".ts", ".tsx", ".js", ".jsx", ".mjs", ".mts"): (r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*[:=]",
                                                      lambda n: r"(?<![\w$.])" + re.escape(n) + r"(?![\w$])"),
     (".kt", ".kts"): (r"\s*private\s+(?:const\s+)?val\s+(\w+)\b", lambda n: r"(?<![\w.])" + n + r"\b"),
-    (".py",): (r"(_[A-Za-z]\w*)\s*=", lambda n: r"(?<![\w.])" + n + r"\b"),
+    (".py", ".pyw"): (r"(_[A-Za-z]\w*)\s*=", lambda n: r"(?<![\w.])" + n + r"\b"),
 }
 
 

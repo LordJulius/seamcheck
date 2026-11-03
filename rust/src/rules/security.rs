@@ -560,7 +560,7 @@ pub fn split_args(s: &str) -> Vec<String> {
 /// `db = SQLAlchemy()`, a name assigned it or `Session(engine)`), "http" for an HTTP client
 /// (`requests.Session()`, a project subclass of one, `self` inside one), else None.
 pub fn receiver(g: &Graph, f: &Func, c: &Call, line: &str, ctx: Option<&dyn TaintCtx>) -> Option<&'static str> {
-    if !f.file.ends_with(".py") {
+    if !crate::model::is_py(&f.file) {
         return None;
     }
     let pat = Rx::new(&format!(r"([A-Za-z_][\w.]*?)\s*\.\s*{}\s*\(", regex::escape(&c.name))).ok()?;
@@ -627,7 +627,7 @@ fn http_class(g: &Graph, m: &Module, depth: usize) -> bool {
 fn sqlalchemy_names(g: &Graph, f: &Func) -> HashSet<String> {
     let mut by_file: HashMap<&str, HashSet<String>> = HashMap::new();
     for (rel, ms) in &g.by_file {
-        if !rel.ends_with(".py") {
+        if !crate::model::is_py(&rel) {
             continue;
         }
         if let Some(m) = ms.first().and_then(|mn| g.modules.get(mn)) {

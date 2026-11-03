@@ -207,7 +207,7 @@ pub fn run_rules(p: &Project, only: Option<&[String]>, skip: Option<&[String]>) 
     let timing = std::env::var_os("SEAMCHECK_RS_TIMING").is_some();
     let one = |r: &Rule| {
         let t = std::time::Instant::now();
-        let f = run_one(p, r);
+        let f = isolate(r, || run_one(p, r));
         if timing {
             eprintln!("timing {:>7} ms  {}", t.elapsed().as_millis(), id(r));
         }
@@ -236,6 +236,23 @@ pub fn run_rules(p: &Project, only: Option<&[String]>, skip: Option<&[String]>) 
     }
     sort_findings(&mut out);
     out
+}
+
+/// A rule that breaks (a panic) is one finding; the other rules still run
+/// (core.run_rules' last `except`).
+pub fn isolate(r: &Rule, f: impl FnOnce() -> Vec<Finding>) -> Vec<Finding> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(v) => v,
+        Err(e) => {
+            let why = e
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_default();
+            let rid = id(r);
+            vec![Finding::new(rid, "error", &file_of(r), 0, "", format!("rule {rid} crashed: panic: {why}"))]
+        }
+    }
 }
 
 pub fn sort_findings(out: &mut [Finding]) {

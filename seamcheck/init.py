@@ -17,7 +17,7 @@ import stat
 from . import core
 
 _LANG = {".ex": "Elixir", ".exs": "Elixir", ".kt": "Kotlin", ".kts": "Kotlin", ".java": "Java", ".ts": "TypeScript",
-         ".tsx": "TypeScript", ".js": "JavaScript", ".jsx": "JavaScript", ".mjs": "JavaScript", ".py": "Python",
+         ".tsx": "TypeScript", ".js": "JavaScript", ".jsx": "JavaScript", ".mjs": "JavaScript", ".py": "Python", ".pyw": "Python",
          ".rs": "Rust", ".go": "Go", ".cs": "C#", ".c": "C", ".cpp": "C++", ".cc": "C++", ".h": "C++", ".hpp": "C++",
          ".qml": "QML", ".gd": "GDScript", ".swift": "Swift", ".php": "PHP"}
 # folders that hold code no one maintains by hand

@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import re
 
+from .model import PY_EXTS
+
 _STR = r"""[rRbBuU]{0,2}(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')"""
 _FSTR = re.compile(r"""^[rRbB]?[fF][rRbB]?(["'])(.*)\1$""", re.S)
 _PLAIN = re.compile(r"""^[rRbBuU]{0,2}(["'])((?:(?!\1)[^\\]|\\.)*)\1$""", re.S)
@@ -412,7 +414,7 @@ def receiver(project, f, c, line: str, rhs) -> str | None:
     with `db = SQLAlchemy()`, a name assigned `db.session` or `Session(engine)`), "http" for an
     HTTP client (`requests.Session()`, a project class that subclasses one, `self` inside one),
     else None."""
-    if not f.file.endswith(".py"):
+    if not f.file.endswith(PY_EXTS):
         return None
     m = re.search(rf"([A-Za-z_][\w.]*?)\s*\.\s*{re.escape(c.name)}\s*\(", line)
     if not m:
@@ -463,7 +465,7 @@ def _sqlalchemy_names(project, f) -> set[str]:
     if got is None:
         got = {}
         for rel, mods in project.by_file.items():
-            if rel.endswith(".py") and mods:
+            if rel.endswith(PY_EXTS) and mods:
                 for ln in mods[0].raw:
                     am = re.match(r"^([A-Za-z_]\w*)\s*(?::[^=]+)?=\s*(?:flask_sqlalchemy\.)?SQLAlchemy\s*\(", ln)
                     if am:

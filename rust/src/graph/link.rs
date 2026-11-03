@@ -39,7 +39,7 @@ pub fn family(rel: &str) -> Vec<&str> {
         ".ts" | ".tsx" | ".jsx" | ".mjs" | ".cjs" => vec!["web"],
         ".js" => vec!["web", "qt"],
         ".qml" | ".c" | ".cpp" | ".cc" | ".cxx" | ".h" | ".hpp" | ".hh" => vec!["qt"],
-        ".py" => vec!["py"],
+        ".py" | ".pyw" => vec!["py"],
         ".gd" => vec!["gd"],
         ".rs" => vec!["rs"],
         ".go" => vec!["go"],

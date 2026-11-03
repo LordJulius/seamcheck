@@ -224,7 +224,7 @@ impl<'a> Types<'a> {
             return Some(ext()); // `u32::from(c)`: a primitive's
         }
         let fext = crate::project::ext_of(&fm.file);
-        if seg == "super" || (seg == "base" && fext == ".cs") || (seg == "parent" && fext == ".php") || (seg == "super()" && fext == ".py") {
+        if seg == "super" || (seg == "base" && fext == ".cs") || (seg == "parent" && fext == ".php") || (seg == "super()" && (fext == ".py" || fext == ".pyw")) {
             // (C#'s `base`, PHP's `parent::`, Python's `super().x()`; elsewhere `base` is a name)
             let own = self.own_class(md, f)?;
             // (the next ancestor that isn't another part of the same type: a C# partial class's other file)
@@ -311,7 +311,7 @@ impl<'a> Types<'a> {
                     return Some(got); // `ConfigHandler().value()`: a constructor (ahead of a library base's own methods)
                 }
             }
-            if gf.is_none() && !fm.file.ends_with(".py") {
+            if gf.is_none() && !crate::model::is_py(&fm.file) {
                 if let Some(own) = self.own_class(md, f) {
                     let hits = self.method(&own, name, None).0;
                     if hits.len() > 1
@@ -341,12 +341,12 @@ impl<'a> Types<'a> {
                     return got.pop().unwrap(); // Ruby: a mixin's `site` that every includer's `site` returns alike
                 }
             }
-            if fm.external.contains(name) || (fm.file.ends_with(".py") && PY_BUILTIN_CALLS.contains(&name)) {
+            if fm.external.contains(name) || (crate::model::is_py(&fm.file) && PY_BUILTIN_CALLS.contains(&name)) {
                 return Some(ext()); // (Python's `vars(x)`, `sorted(x)`: the language's own values)
             }
             let own = self.own_class(md, f);
             if let Some(own) = &own {
-                if !fm.file.ends_with(".py") && own.iter().any(|o| self.external_base(o)) && self.method(own, name, None).0.is_empty() {
+                if !crate::model::is_py(&fm.file) && own.iter().any(|o| self.external_base(o)) && self.method(own, name, None).0.is_empty() {
                     return Some(ext()); // inherited from a library supertype (Qt's `sourceModel()`)
                 }
             }
@@ -484,7 +484,7 @@ impl<'a> Types<'a> {
                 return self.held(pm, None, &pm.bound[seg], depth + 1, None);
             }
         }
-        if seg == "current_user" && fm.file.ends_with(".py") {
+        if seg == "current_user" && crate::model::is_py(&fm.file) {
             if let Some(cu) = self.flask_login_user(fm) {
                 return Some(cu); // Flask-Login's proxy: the project's user class
             }
@@ -492,7 +492,7 @@ impl<'a> Types<'a> {
         if fm.external.contains(seg) {
             return Some(ext());
         }
-        if upper1(seg) && self.by_type.contains_key(seg) && !fm.file.ends_with(".py") {
+        if upper1(seg) && self.by_type.contains_key(seg) && !crate::model::is_py(&fm.file) {
             // a type the project declares, whatever module the import names
             // (Rust's `use grep_searcher::SearcherBuilder` names the crate root that re-exports it)
             let (mods, exact, declared) = self.type_modules(md, seg);
@@ -522,7 +522,7 @@ impl<'a> Types<'a> {
                 return Some(Val::Static(vec![target.clone()], true));
             }
         }
-        if fm.file.ends_with(".py") && !f.is_some_and(|f| f.bound.contains_key(seg)) && !fm.bound.contains_key(seg) {
+        if crate::model::is_py(&fm.file) && !f.is_some_and(|f| f.bound.contains_key(seg)) && !fm.bound.contains_key(seg) {
             // a function of this file used as a value: one defined inside the function first
             // (`@click.group()\n def cli():` in a test), else the module's own
             let defs: Vec<&Func> = fm.funcs.iter().filter(|g| g.name == seg && g.kind != "top").collect();
@@ -572,7 +572,7 @@ impl<'a> Types<'a> {
                 return self.held(vm, None, &vm.bound[&vn], depth + 1, None);
             }
             let dm = self.defining_module(&w, &n, 0);
-            if !dm.is_empty() && fm.file.ends_with(".py") {
+            if !dm.is_empty() && crate::model::is_py(&fm.file) {
                 if let Some(func) = self.fx(&format!("{dm}.{n}")) {
                     return self.py_function_value(func);
                 }
@@ -591,7 +591,7 @@ impl<'a> Types<'a> {
         if p.modules.contains_key(seg) {
             return Some(Val::Static(vec![seg.to_string()], true));
         }
-        let mut short: Option<Vec<String>> = if !(lower1(seg) && ends(&fm.file, &[".rb", ".rake", ".ru", ".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"])) {
+        let mut short: Option<Vec<String>> = if !(lower1(seg) && ends(&fm.file, &[".rb", ".rake", ".ru", ".py", ".pyw", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"])) {
             p.short.get(seg).cloned()
         } else {
             None
@@ -628,7 +628,7 @@ impl<'a> Types<'a> {
         if fm.file.ends_with(".cs") && super::CS_KEYWORD_TYPES.contains(&seg) && !f.is_some_and(|f| f.bound.contains_key(seg)) {
             return Some(ext()); // `string.Join(...)`, `object.ReferenceEquals(a, b)`: System's
         }
-        if fm.file.ends_with(".py") && crate::graph::pylink::is_py_builtin(seg) {
+        if crate::model::is_py(&fm.file) && crate::graph::pylink::is_py_builtin(seg) {
             return Some(ext()); // `int.__new__`, `object.__repr__`: Python's own
         }
         if JS_GLOBALS.contains(&seg) && ends(&fm.file, JS_EXTS) {
@@ -893,7 +893,7 @@ impl<'a> Types<'a> {
                 let got = self.field(&mods, seg, depth);
                 return if got == Some(Val::Unknown) { None } else { got };
             }
-            if seg == "query" && md.file.ends_with(".py") && self.flask_model(&mods) {
+            if seg == "query" && crate::model::is_py(&md.file) && self.flask_model(&mods) {
                 return Some(super::flask::rows(&mods)); // Flask-SQLAlchemy: `User.query`, a query of Users
             }
             return None;
@@ -905,7 +905,7 @@ impl<'a> Types<'a> {
         if got == Some(Val::Unknown) {
             return None;
         }
-        if got.is_none() && seg.starts_with("__") && seg.ends_with("__") && md.file.ends_with(".py") {
+        if got.is_none() && seg.starts_with("__") && seg.ends_with("__") && crate::model::is_py(&md.file) {
             return Some(ext()); // `self.__dict__`, `cls.__name__`: Python's own attributes
         }
         if got.is_none() && UNWRAP.contains(&seg) {
@@ -922,7 +922,7 @@ impl<'a> Types<'a> {
         let fm = self.file_mod(md);
         let own = self.own_class(md, f);
         if let Some(own) = &own {
-            if !fm.file.ends_with(".py") {
+            if !crate::model::is_py(&fm.file) {
                 let (hits, _) = self.method(own, name, None);
                 if hits.len() == 1 {
                     return Some(hits[0]);

@@ -475,7 +475,7 @@ impl<'a> Resolver<'a> {
             return self.go_typed(md, ty, name);
         }
         let mut mods: Vec<String> = Vec::new();
-        if md.file.ends_with(".py") {
+        if crate::model::is_py(&md.file) {
             let cls = crate::graph::pylink::py_class(g, md, ty, 0);
             if !cls.is_empty() {
                 mods.push(cls);

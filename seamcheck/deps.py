@@ -640,7 +640,7 @@ def _python(root: str, mrel: str, exclude) -> list[Dep]:
             mods = [name.replace("-", "_").lower()]
         for mo in mods:
             mod_of[mo] = _norm(name)
-    for rel in _walk(root, mdir, (".py",), "pyproject.toml|setup.py", exclude):
+    for rel in _walk(root, mdir, (".py", ".pyw"), "pyproject.toml|setup.py", exclude):
         code = blank(_read(root, rel), "python")[0]
         seen = set()
         for r in re.finditer(r"(?m)^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w., ]+))", code):

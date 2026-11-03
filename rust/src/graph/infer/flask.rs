@@ -44,7 +44,7 @@ pub fn step(v: &Val, seg: &str) -> Val {
 
 /// A Python class module's supertypes as its `class X(...)` line writes them.
 pub fn class_bases(m: &Module) -> Vec<String> {
-    if m.decls.is_empty() || !m.file.ends_with(".py") {
+    if m.decls.is_empty() || !crate::model::is_py(&m.file) {
         return Vec::new();
     }
     let head_rx = rxd(&format!(r"\s*class\s+{}\s*\(", esc(&m.decls[0])));
