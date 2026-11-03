@@ -1,0 +1,6 @@
+booting...
+SEAMCHECK {"k": "state", "t": 0, "units": [{"id": "a", "hp": 10, "max_hp": 10, "dead": false, "wet": false, "x": 0}, {"id": "b", "hp": 10, "max_hp": 10, "dead": false, "wet": false, "x": 0}], "stones": ["s1"], "paused": false}
+SEAMCHECK {"k": "act", "t": 0.5, "act": "build", "ok": true, "price": 5, "before": {"gold": 10}, "after": {"gold": 5}}
+SEAMCHECK {"k": "state", "t": 1, "units": [{"id": "a", "hp": 10, "max_hp": 10, "dead": false, "wet": false, "x": 1}, {"id": "b", "hp": 10, "max_hp": 10, "dead": false, "wet": false, "x": 0}], "stones": ["s1", "s2"], "paused": false}
+noise SEAMCHECK x
+SEAMCHECK {"k": "end"}

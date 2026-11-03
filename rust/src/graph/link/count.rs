@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use indexmap::IndexMap;
 
 use super::shares_family;
-use crate::graph::Graph;
+use crate::graph::{Graph, TraceRow};
 use crate::model::{Call, Func};
 use crate::project::ext_of;
 
@@ -22,10 +22,12 @@ pub type Possible = HashMap<String, Vec<(String, usize, i64)>>;
 pub(super) struct Counts {
     pub res: Resolution,
     pub possible: Possible,
+    /// every call's outcome in resolution order (core._TRACE), in precise mode
+    pub trace: Option<Vec<TraceRow>>,
 }
 
 /// A project function in the caller's language has this name (core._nothing's `named`).
-pub(super) fn named(g: &Graph, file: &str, name: &str) -> bool {
+pub fn named(g: &Graph, file: &str, name: &str) -> bool {
     g.by_name
         .get(name)
         .map(|ids| ids.iter().filter_map(|id| g.func(id)).any(|h| h.kind != "top" && shares_family(file, &h.file)))
@@ -37,8 +39,20 @@ impl Counts {
         self.res.entry(ext_of(file).to_string()).or_insert([0; 4])
     }
 
-    /// A call site's first resolution: exact, a name guess, or nothing.
+    /// A call site's first resolution: exact, a name guess, or nothing
+    /// (`targets`: what the resolver found, before overrides).
     pub fn site(&mut self, g: &Graph, f: &Func, c: &Call, targets: &[(String, bool)]) {
+        if let Some(t) = self.trace.as_mut() {
+            let outcome = if targets.is_empty() {
+                if named(g, &f.file, &c.name) { "named" } else { "nothing" }
+            } else if targets.iter().any(|t| t.1) {
+                "exact"
+            } else {
+                "guess"
+            };
+            let ids = targets.iter().take(4).map(|t| t.0.clone()).collect();
+            t.push(TraceRow { file: f.file.clone(), line: c.line, name: c.name.clone(), chain: c.chain.clone(), outcome, ids });
+        }
         if targets.is_empty() {
             let named = named(g, &f.file, &c.name);
             let r = self.slot(&f.file);
@@ -66,6 +80,17 @@ impl Counts {
                 if named {
                     r[3] += 1;
                 }
+            }
+        }
+    }
+
+    /// The first trace row of this call site (file, line, name) whose outcome
+    /// is one of `from`, now `outcome` with these callees.
+    pub fn retrace(&mut self, f: &Func, c: &Call, from: &[&str], outcome: &'static str, ids: Vec<String>) {
+        if let Some(t) = self.trace.as_mut() {
+            if let Some(r) = t.iter_mut().find(|r| r.file == f.file && r.line == c.line && r.name == c.name && from.contains(&r.outcome)) {
+                r.outcome = outcome;
+                r.ids = ids;
             }
         }
     }

@@ -1,0 +1,24 @@
+SEAMCHECK {"k": "state", "t": 0, "units": [], "stones": [], "paused": false}
+SEAMCHECK {"k": "state", "t": 1,}
+SEAMCHECK [1, 2,]
+SEAMCHECK {"k" 1}
+SEAMCHECK 
+SEAMCHECK {"k": "st
+SEAMCHECK "just a string"
+SEAMCHECK [1, 2]
+SEAMCHECK 42
+SEAMCHECK {"k": "state", "t": 2} trailing
+SEAMCHECK {"a": "\x"}
+SEAMCHECK {"a": "\uZZZZ"}
+xx SEAMCHECK {"k": "state", "t": 3, "units": [], "stones": [], "paused": false}   
+SEAMCHECK {"k": "state", "t": NaN, "units": [], "stones": [], "paused": false}
+SEAMCHECK {"k": "state", "t": "4.5", "units": [], "stones": [], "paused": false}
+SEAMCHECK {"k": "state", "t": true, "units": [], "stones": [], "paused": false}
+SEAMCHECK {"k": "state", "units": [], "stones": [], "paused": false}
+SEAMCHECK {"k": "nope"}
+SEAMCHECK {"k": 5}
+SEAMCHECK {"k": "act", "act": null, "ok": false, "before": 1, "after": 2}
+SEAMCHECK {"k": "act", "act": true, "ok": false, "before": 1, "after": 2}
+SEAMCHECK {"k": "act", "act": 7, "ok": false, "before": [1], "after": [2]}
+SEAMCHECK {"k": "act", "ok": false, "before": {"a": [1, 2.5, null, true]}, "after": {"a": "\u00e9\n\t"}}
+SEAMCHECK	{"k": "end"}

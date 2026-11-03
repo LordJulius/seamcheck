@@ -1,0 +1,12 @@
+[runtime]
+fail_on = ['^FATAL']
+
+[[invariant]]
+id = "small"
+assert = "n < 3"
+why = "the program keeps n small"
+
+[[contract]]
+id = "grows"
+act = "add"
+assert = "after > before"

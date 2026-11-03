@@ -1,0 +1,6 @@
+SEAMCHECK {"k": "state", "t": 0, "units": 0, "stones": null, "paused": false}
+SEAMCHECK {"k": "state", "t": 1, "units": [{"id": "q"}], "stones": [1, 1.0, true, {"a": 1}, {"a": 1}], "paused": "yes"}
+SEAMCHECK {"k": "state", "t": 2, "units": [{"id": "a", "hp": "x", "max_hp": 10, "dead": false, "wet": false, "x": 0}], "stones": [[1], [1]], "paused": false, "prev": null}
+SEAMCHECK {"k": "act", "t": 3, "act": "build", "ok": true, "price": "5", "before": {"gold": 1}, "after": {"gold": 2}}
+SEAMCHECK {"k": "act", "t": 4, "act": "recruit", "ok": true, "price": 1, "before": {}, "after": {}}
+SEAMCHECK {"k": "end"}

@@ -10,6 +10,7 @@ use std::cmp::Ordering;
 
 use indexmap::IndexMap;
 use serde_json::Value as Json;
+use super::pyfmt::dumps;
 
 /// A value inside an expression: JSON plus the shapes Python adds (tuple, set).
 #[derive(Clone, Debug)]
@@ -168,6 +169,10 @@ pub enum E {
     Dict(Vec<(E, E)>),
     /// kind: list | set | gen; the element, then each `for target in iter if ...`.
     Comp(&'static str, Box<E>, Vec<(Target, E, Vec<E>)>),
+    /// What Python's AST allowlist refuses (the message), or with no message
+    /// a node it allows over one it refuses; its children in Python's order.
+    /// Only in a tree `compile` rejects: never evaluated.
+    Refused(String, Vec<E>),
 }
 
 #[derive(Clone, Debug)]
@@ -180,557 +185,7 @@ pub const HELPERS: &[&str] = &[
     "len", "set", "sorted", "min", "max", "sum", "abs", "any", "all", "round", "count", "dupes", "isfinite", "get",
     "keys", "values", "diff",
 ];
-const CONSTS: &[&str] = &["None", "True", "False"];
-
-// ── tokens ──────────────────────────────────────────────────────────────────
-
-#[derive(Clone, Debug, PartialEq)]
-enum T {
-    Name(String),
-    Int(i64),
-    Float(f64),
-    Str(String),
-    Op(&'static str),
-    End,
-}
-
-const OPS: &[&str] = &[
-    "**", "//", "==", "!=", "<=", ">=", "<<", ">>", ":=", "->", "(", ")", "[", "]", "{", "}", ",", ":", ".", "+", "-", "*",
-    "/", "%", "<", ">", "=", "|", "&", "^", "~", "@", ";",
-];
-
-fn lex(src: &str) -> Result<Vec<(T, usize, usize)>, String> {
-    let b = src.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        let c = b[i] as char;
-        if c.is_whitespace() {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        if c.is_ascii_alphabetic() || c == '_' {
-            while i < b.len() && ((b[i] as char).is_ascii_alphanumeric() || b[i] == b'_') {
-                i += 1;
-            }
-            let w = &src[start..i];
-            if i < b.len() && (b[i] == b'\'' || b[i] == b'"') && matches!(w.to_ascii_lowercase().as_str(), "f" | "b" | "rb" | "br" | "fr" | "rf") {
-                return Err(format!("SyntaxError: {w}-strings are not allowed in a rule"));
-            }
-            if i < b.len() && (b[i] == b'\'' || b[i] == b'"') && (w == "r" || w == "R") {
-                let (s, n) = string(src, i, true)?;
-                i = n;
-                out.push((T::Str(s), start, i));
-                continue;
-            }
-            out.push((T::Name(w.to_string()), start, i));
-            continue;
-        }
-        if c.is_ascii_digit() || (c == '.' && i + 1 < b.len() && (b[i + 1] as char).is_ascii_digit()) {
-            let mut float = false;
-            while i < b.len() && ((b[i] as char).is_ascii_digit() || b[i] == b'_') {
-                i += 1;
-            }
-            if i < b.len() && b[i] == b'.' {
-                float = true;
-                i += 1;
-                while i < b.len() && (b[i] as char).is_ascii_digit() {
-                    i += 1;
-                }
-            }
-            if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
-                float = true;
-                i += 1;
-                if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
-                    i += 1;
-                }
-                while i < b.len() && (b[i] as char).is_ascii_digit() {
-                    i += 1;
-                }
-            }
-            let text = src[start..i].replace('_', "");
-            let tok = if float {
-                T::Float(text.parse().map_err(|_| format!("SyntaxError: bad number {text}"))?)
-            } else {
-                T::Int(text.parse().map_err(|_| format!("SyntaxError: bad number {text}"))?)
-            };
-            out.push((tok, start, i));
-            continue;
-        }
-        if c == '\'' || c == '"' {
-            let (s, n) = string(src, i, false)?;
-            i = n;
-            out.push((T::Str(s), start, i));
-            continue;
-        }
-        match OPS.iter().find(|op| src[i..].starts_with(**op)) {
-            Some(op) => {
-                i += op.len();
-                out.push((T::Op(op), start, i));
-            }
-            None => return Err(format!("SyntaxError: unexpected character {c:?}")),
-        }
-    }
-    out.push((T::End, b.len(), b.len()));
-    Ok(out)
-}
-
-fn string(src: &str, at: usize, raw: bool) -> Result<(String, usize), String> {
-    let q = src.as_bytes()[at] as char;
-    let chars: Vec<(usize, char)> = src[at + 1..].char_indices().map(|(k, c)| (k + at + 1, c)).collect();
-    let mut s = String::new();
-    let mut k = 0;
-    while k < chars.len() {
-        let (pos, c) = chars[k];
-        if c == q {
-            return Ok((s, pos + 1));
-        }
-        if c == '\\' && k + 1 < chars.len() {
-            let n = chars[k + 1].1;
-            k += 2;
-            if raw {
-                s.push('\\');
-                s.push(n);
-                continue;
-            }
-            match n {
-                'n' => s.push('\n'),
-                't' => s.push('\t'),
-                'r' => s.push('\r'),
-                '0' => s.push('\0'),
-                '\\' | '\'' | '"' => s.push(n),
-                'u' if k + 4 <= chars.len() => {
-                    let hex: String = chars[k..k + 4].iter().map(|x| x.1).collect();
-                    let cp = u32::from_str_radix(&hex, 16).map_err(|_| "SyntaxError: bad \\u escape".to_string())?;
-                    s.push(char::from_u32(cp).unwrap_or('\u{fffd}'));
-                    k += 4;
-                }
-                other => {
-                    s.push('\\');
-                    s.push(other);
-                }
-            }
-            continue;
-        }
-        s.push(c);
-        k += 1;
-    }
-    Err("SyntaxError: unterminated string literal".into())
-}
-
-// ── parser (Python's precedence) ────────────────────────────────────────────
-
-struct P<'a> {
-    toks: Vec<(T, usize, usize)>,
-    i: usize,
-    src: &'a str,
-}
-
-impl<'a> P<'a> {
-    fn peek(&self) -> &T {
-        &self.toks[self.i].0
-    }
-    fn next(&mut self) -> (T, usize, usize) {
-        let t = self.toks[self.i].clone();
-        if self.i + 1 < self.toks.len() {
-            self.i += 1;
-        }
-        t
-    }
-    fn is_op(&self, op: &str) -> bool {
-        matches!(self.peek(), T::Op(o) if *o == op)
-    }
-    fn is_kw(&self, kw: &str) -> bool {
-        matches!(self.peek(), T::Name(n) if n == kw)
-    }
-    fn expect_op(&mut self, op: &str) -> Result<(), String> {
-        if self.is_op(op) {
-            self.next();
-            Ok(())
-        } else {
-            Err(format!("SyntaxError: expected '{op}' at {:?}", self.peek()))
-        }
-    }
-
-    fn expr(&mut self) -> Result<E, String> {
-        if self.is_kw("lambda") {
-            return Err("not allowed in a rule: Lambda".into());
-        }
-        let body = self.or()?;
-        if self.is_kw("if") {
-            self.next();
-            let cond = self.or()?;
-            if !self.is_kw("else") {
-                return Err("SyntaxError: expected 'else'".into());
-            }
-            self.next();
-            let other = self.expr()?;
-            return Ok(E::IfExp(Box::new(cond), Box::new(body), Box::new(other)));
-        }
-        Ok(body)
-    }
-
-    fn or(&mut self) -> Result<E, String> {
-        let mut xs = vec![self.and()?];
-        while self.is_kw("or") {
-            self.next();
-            xs.push(self.and()?);
-        }
-        Ok(if xs.len() == 1 { xs.pop().unwrap() } else { E::Or(xs) })
-    }
-
-    fn and(&mut self) -> Result<E, String> {
-        let mut xs = vec![self.not()?];
-        while self.is_kw("and") {
-            self.next();
-            xs.push(self.not()?);
-        }
-        Ok(if xs.len() == 1 { xs.pop().unwrap() } else { E::And(xs) })
-    }
-
-    fn not(&mut self) -> Result<E, String> {
-        if self.is_kw("not") {
-            self.next();
-            return Ok(E::Not(Box::new(self.not()?)));
-        }
-        self.compare()
-    }
-
-    fn compare(&mut self) -> Result<E, String> {
-        let first = self.arith()?;
-        let mut ops = Vec::new();
-        loop {
-            let op = match self.peek() {
-                T::Op(o) if matches!(*o, "==" | "!=" | "<" | "<=" | ">" | ">=") => o.to_string(),
-                T::Name(n) if n == "in" => "in".to_string(),
-                T::Name(n) if n == "not" => {
-                    if matches!(&self.toks[self.i + 1].0, T::Name(m) if m == "in") {
-                        self.next();
-                        "not in".to_string()
-                    } else {
-                        break;
-                    }
-                }
-                T::Name(n) if n == "is" => {
-                    if matches!(&self.toks[self.i + 1].0, T::Name(m) if m == "not") {
-                        self.next();
-                        "is not".to_string()
-                    } else {
-                        "is".to_string()
-                    }
-                }
-                _ => break,
-            };
-            self.next();
-            ops.push((op, self.arith()?));
-        }
-        Ok(if ops.is_empty() { first } else { E::Compare(Box::new(first), ops) })
-    }
-
-    fn arith(&mut self) -> Result<E, String> {
-        let mut l = self.term()?;
-        while let T::Op(o @ ("+" | "-")) = self.peek().clone() {
-            self.next();
-            l = E::Bin(o.to_string(), Box::new(l), Box::new(self.term()?));
-        }
-        if let T::Op(o @ ("|" | "&" | "^" | "<<" | ">>" | "@")) = self.peek() {
-            return Err(format!("not allowed in a rule: operator {o}"));
-        }
-        Ok(l)
-    }
-
-    fn term(&mut self) -> Result<E, String> {
-        let mut l = self.unary()?;
-        while let T::Op(o @ ("*" | "/" | "//" | "%")) = self.peek().clone() {
-            self.next();
-            l = E::Bin(o.to_string(), Box::new(l), Box::new(self.unary()?));
-        }
-        Ok(l)
-    }
-
-    fn unary(&mut self) -> Result<E, String> {
-        match self.peek() {
-            T::Op("-") => {
-                self.next();
-                Ok(E::Neg(Box::new(self.unary()?)))
-            }
-            T::Op("+") => {
-                self.next();
-                Ok(E::Pos(Box::new(self.unary()?)))
-            }
-            T::Op("~") => Err("not allowed in a rule: Invert".into()),
-            _ => self.power(),
-        }
-    }
-
-    fn power(&mut self) -> Result<E, String> {
-        let base = self.postfix()?;
-        if self.is_op("**") {
-            self.next();
-            return Ok(E::Bin("**".into(), Box::new(base), Box::new(self.unary()?)));
-        }
-        Ok(base)
-    }
-
-    fn postfix(&mut self) -> Result<E, String> {
-        let start = self.toks[self.i].1;
-        let mut e = self.atom()?;
-        loop {
-            if self.is_op(".") {
-                self.next();
-                let (t, _, end) = self.next();
-                let T::Name(n) = t else { return Err("SyntaxError: expected a name after '.'".into()) };
-                if n.starts_with('_') {
-                    return Err("attributes starting with _ are not allowed".into());
-                }
-                e = E::Attr(Box::new(e), n, (start, end));
-            } else if self.is_op("[") {
-                self.next();
-                e = self.subscript(e)?;
-                self.expect_op("]")?;
-            } else if self.is_op("(") {
-                let E::Name(f, _) = &e else {
-                    return Err(format!("only helper calls are allowed ({})", HELPERS.join(", ")));
-                };
-                if !HELPERS.contains(&f.as_str()) {
-                    return Err(format!("only helper calls are allowed ({})", HELPERS.join(", ")));
-                }
-                let f = f.clone();
-                self.next();
-                let mut args = Vec::new();
-                while !self.is_op(")") {
-                    let a = self.expr()?;
-                    if self.is_kw("for") {
-                        args.push(self.comp("gen", a)?);
-                    } else {
-                        args.push(a);
-                    }
-                    if matches!(self.peek(), T::Op("=")) {
-                        return Err("not allowed in a rule: keyword".into());
-                    }
-                    if !self.is_op(",") {
-                        break;
-                    }
-                    self.next();
-                }
-                self.expect_op(")")?;
-                e = E::Call(f, args);
-            } else {
-                return Ok(e);
-            }
-        }
-    }
-
-    fn subscript(&mut self, base: E) -> Result<E, String> {
-        let part = |p: &mut P| -> Result<Option<Box<E>>, String> {
-            if p.is_op(":") || p.is_op("]") {
-                Ok(None)
-            } else {
-                Ok(Some(Box::new(p.expr()?)))
-            }
-        };
-        let lo = part(self)?;
-        if !self.is_op(":") {
-            return Ok(E::Index(Box::new(base), lo.ok_or("SyntaxError: empty subscript")?));
-        }
-        self.next();
-        let hi = part(self)?;
-        let step = if self.is_op(":") {
-            self.next();
-            part(self)?
-        } else {
-            None
-        };
-        Ok(E::Slice(Box::new(base), lo, hi, step))
-    }
-
-    fn target(&mut self) -> Result<Target, String> {
-        let one = |p: &mut P| -> Result<Target, String> {
-            if p.is_op("(") {
-                p.next();
-                let t = p.target()?;
-                p.expect_op(")")?;
-                return Ok(t);
-            }
-            match p.next().0 {
-                T::Name(n) => Ok(Target::Name(n)),
-                other => Err(format!("SyntaxError: bad loop target {other:?}")),
-            }
-        };
-        let first = one(self)?;
-        if !self.is_op(",") {
-            return Ok(first);
-        }
-        let mut xs = vec![first];
-        while self.is_op(",") {
-            self.next();
-            if self.is_kw("in") || self.is_op(")") {
-                break;
-            }
-            xs.push(one(self)?);
-        }
-        Ok(Target::Tuple(xs))
-    }
-
-    fn comp(&mut self, kind: &'static str, elt: E) -> Result<E, String> {
-        let mut gens = Vec::new();
-        while self.is_kw("for") {
-            self.next();
-            let t = self.target()?;
-            if !self.is_kw("in") {
-                return Err("SyntaxError: expected 'in'".into());
-            }
-            self.next();
-            let it = self.or()?;
-            let mut ifs = Vec::new();
-            while self.is_kw("if") {
-                self.next();
-                ifs.push(self.or()?);
-            }
-            gens.push((t, it, ifs));
-        }
-        Ok(E::Comp(kind, Box::new(elt), gens))
-    }
-
-    fn atom(&mut self) -> Result<E, String> {
-        let (t, s, e) = self.next();
-        match t {
-            T::Int(i) => Ok(E::Const(V::Int(i))),
-            T::Float(f) => Ok(E::Const(V::Float(f))),
-            T::Str(mut x) => {
-                while let T::Str(more) = self.peek().clone() {
-                    self.next();
-                    x.push_str(&more);
-                }
-                Ok(E::Const(V::Str(x)))
-            }
-            T::Name(n) => match n.as_str() {
-                "None" => Ok(E::Const(V::None)),
-                "True" => Ok(E::Const(V::Bool(true))),
-                "False" => Ok(E::Const(V::Bool(false))),
-                "lambda" => Err("not allowed in a rule: Lambda".into()),
-                "for" | "if" | "else" | "in" | "is" | "and" | "or" | "not" | "import" | "yield" | "await" => {
-                    Err(format!("SyntaxError: unexpected '{n}'"))
-                }
-                _ => Ok(E::Name(n, (s, e))),
-            },
-            T::Op("(") => {
-                if self.is_op(")") {
-                    self.next();
-                    return Ok(E::Tuple(vec![]));
-                }
-                let first = self.expr()?;
-                if self.is_kw("for") {
-                    let c = self.comp("gen", first)?;
-                    self.expect_op(")")?;
-                    return Ok(c);
-                }
-                if self.is_op(")") {
-                    self.next();
-                    return Ok(first);
-                }
-                let mut xs = vec![first];
-                while self.is_op(",") {
-                    self.next();
-                    if self.is_op(")") {
-                        break;
-                    }
-                    xs.push(self.expr()?);
-                }
-                self.expect_op(")")?;
-                Ok(E::Tuple(xs))
-            }
-            T::Op("[") => {
-                if self.is_op("]") {
-                    self.next();
-                    return Ok(E::List(vec![]));
-                }
-                let first = self.expr()?;
-                if self.is_kw("for") {
-                    let c = self.comp("list", first)?;
-                    self.expect_op("]")?;
-                    return Ok(c);
-                }
-                let mut xs = vec![first];
-                while self.is_op(",") {
-                    self.next();
-                    if self.is_op("]") {
-                        break;
-                    }
-                    xs.push(self.expr()?);
-                }
-                self.expect_op("]")?;
-                Ok(E::List(xs))
-            }
-            T::Op("{") => {
-                if self.is_op("}") {
-                    self.next();
-                    return Ok(E::Dict(vec![]));
-                }
-                let first = self.expr()?;
-                if self.is_op(":") {
-                    self.next();
-                    let v = self.expr()?;
-                    if self.is_kw("for") {
-                        return Err("not allowed in a rule: DictComp".into());
-                    }
-                    let mut kv = vec![(first, v)];
-                    while self.is_op(",") {
-                        self.next();
-                        if self.is_op("}") {
-                            break;
-                        }
-                        let k = self.expr()?;
-                        self.expect_op(":")?;
-                        kv.push((k, self.expr()?));
-                    }
-                    self.expect_op("}")?;
-                    return Ok(E::Dict(kv));
-                }
-                if self.is_kw("for") {
-                    let c = self.comp("set", first)?;
-                    self.expect_op("}")?;
-                    return Ok(c);
-                }
-                let mut xs = vec![first];
-                while self.is_op(",") {
-                    self.next();
-                    if self.is_op("}") {
-                        break;
-                    }
-                    xs.push(self.expr()?);
-                }
-                self.expect_op("}")?;
-                Ok(E::Set(xs))
-            }
-            other => Err(format!("SyntaxError: unexpected {other:?} in {:?}", self.src)),
-        }
-    }
-}
-
-/// Compile a rule expression; anything outside the allowed language is an error.
-pub fn compile(src: &str) -> Result<E, String> {
-    let toks = lex(src.trim())?;
-    let mut p = P { toks, i: 0, src };
-    let mut e = p.expr()?;
-    if p.is_op(",") {
-        // a bare tuple: `a, b`
-        let mut xs = vec![e];
-        while p.is_op(",") {
-            p.next();
-            if matches!(p.peek(), T::End) {
-                break;
-            }
-            xs.push(p.expr()?);
-        }
-        e = E::Tuple(xs);
-    }
-    if !matches!(p.peek(), T::End) {
-        return Err(format!("SyntaxError: unexpected {:?}", p.peek()));
-    }
-    Ok(e)
-}
+pub(super) const CONSTS: &[&str] = &["None", "True", "False"];
 
 // ── evaluation ──────────────────────────────────────────────────────────────
 
@@ -784,7 +239,8 @@ fn index(base: &V, k: &V) -> Result<V, String> {
         V::List(x) | V::Tuple(x) => {
             let i = k.int().ok_or_else(|| format!("TypeError: indices must be integers, not {}", k.type_name()))?;
             let j = if i < 0 { x.len() as i64 + i } else { i };
-            x.get(j as usize).filter(|_| j >= 0).cloned().ok_or_else(|| "IndexError: index out of range".to_string())
+            let kind = if matches!(base, V::Tuple(_)) { "tuple" } else { "list" };
+            x.get(j as usize).filter(|_| j >= 0).cloned().ok_or_else(|| format!("IndexError: {kind} index out of range"))
         }
         V::Str(s) => {
             let cs: Vec<char> = s.chars().collect();
@@ -1058,6 +514,7 @@ pub fn eval(e: &E, scope: &mut Scope) -> Result<V, String> {
             comp_rec(scope, gens, elt, &mut out)?;
             Ok(if *kind == "set" { V::Set(dedup(out)) } else { V::List(out) })
         }
+        E::Refused(m, _) => Err(m.clone()),
     }
 }
 
@@ -1096,9 +553,12 @@ fn helper(f: &str, args: Vec<V>) -> Result<V, String> {
                 other => Err(format!("TypeError: object of type '{}' has no len()", other.type_name())),
             }
         }
+        // (runtime.py's set() holds a dict or a list as its JSON text)
         "set" => match args.first() {
             None => Ok(V::Set(vec![])),
-            Some(x) => Ok(V::Set(dedup(x.items()?))),
+            Some(x) => Ok(V::Set(dedup(
+                x.items()?.into_iter().map(|v| if matches!(v, V::Dict(_) | V::List(_)) { V::Str(dumps(&v)) } else { v }).collect(),
+            ))),
         },
         "sorted" => {
             arity(1)?;
@@ -1119,7 +579,7 @@ fn helper(f: &str, args: Vec<V>) -> Result<V, String> {
         "min" | "max" => {
             let xs = many(&args)?;
             let mut it = xs.into_iter();
-            let mut best = it.next().ok_or_else(|| format!("ValueError: {f}() arg is an empty sequence"))?;
+            let mut best = it.next().ok_or_else(|| format!("ValueError: {f}() iterable argument is empty"))?;
             for x in it {
                 let o = cmp(&x, &best, "<")?;
                 if (f == "min" && o == Some(Ordering::Less)) || (f == "max" && o == Some(Ordering::Greater)) {
@@ -1158,6 +618,13 @@ fn helper(f: &str, args: Vec<V>) -> Result<V, String> {
                 None => Ok(V::Int(round_half_even(x) as i64)),
                 Some(n) => {
                     let n = n.int().ok_or("TypeError: round() digits must be an integer")?;
+                    if let (V::Int(_) | V::Bool(_), true) = (&args[0], n >= 0) {
+                        return Ok(V::Int(x as i64)); // (an int rounded to digits stays that int)
+                    }
+                    if n >= 0 && x.is_finite() {
+                        // the correctly rounded decimal, as Python's round does (2.675 -> 2.67)
+                        return Ok(V::Float(format!("{:.*}", n as usize, x).parse().unwrap_or(x)));
+                    }
                     let p = 10f64.powi(n as i32);
                     Ok(V::Float(round_half_even(x * p) / p))
                 }
@@ -1169,13 +636,15 @@ fn helper(f: &str, args: Vec<V>) -> Result<V, String> {
         }
         "dupes" => {
             arity(1)?;
-            let mut seen: Vec<V> = Vec::new();
+            // seen by JSON text (1 and 1.0 differ there), reported once by ==
+            let mut seen: std::collections::HashSet<String> = Default::default();
             let mut out: Vec<V> = Vec::new();
             for x in args[0].items()? {
-                if seen.iter().any(|y| eq(y, &x)) && !out.iter().any(|y| eq(y, &x)) {
+                let k = dumps(&x);
+                if seen.contains(&k) && !out.iter().any(|y| eq(y, &x)) {
                     out.push(x.clone());
                 }
-                seen.push(x);
+                seen.insert(k);
             }
             Ok(V::List(out))
         }
@@ -1242,196 +711,5 @@ fn round_half_even(x: f64) -> f64 {
         2.0 * (x / 2.0).round()
     } else {
         r
-    }
-}
-
-// ── names a rule reads (for the explanation of a finding) ───────────────────
-
-/// The source text of each name or outermost attribute chain the expression
-/// reads, skipping helpers, comprehension variables, and the root of a chain
-/// (runtime.py's `_explain`): `p is None or p.x == 1` shows `p.x`, not `p`.
-pub fn read_names(src: &str, e: &E) -> Vec<String> {
-    let mut bound = Vec::new();
-    collect_bound(e, &mut bound);
-    let mut roots = Vec::new();
-    collect_roots(e, &mut roots);
-    let mut out: Vec<String> = Vec::new();
-    walk_names(src.trim(), e, &bound, &roots, &mut out);
-    out
-}
-
-fn collect_bound(e: &E, out: &mut Vec<String>) {
-    fn names(t: &Target, out: &mut Vec<String>) {
-        match t {
-            Target::Name(n) => out.push(n.clone()),
-            Target::Tuple(ts) => ts.iter().for_each(|t| names(t, out)),
-        }
-    }
-    visit(e, &mut |x| {
-        if let E::Comp(_, _, gens) = x {
-            for (t, _, _) in gens {
-                names(t, out);
-            }
-        }
-    });
-}
-
-fn collect_roots(e: &E, out: &mut Vec<String>) {
-    visit(e, &mut |x| {
-        if let E::Attr(..) = x {
-            let mut b = x;
-            while let E::Attr(inner, _, _) = b {
-                b = inner;
-            }
-            if let E::Name(n, _) = b {
-                out.push(n.clone());
-            }
-        }
-    });
-}
-
-fn walk_names(src: &str, e: &E, bound: &[String], roots: &[String], out: &mut Vec<String>) {
-    let root_name = |x: &E| -> Option<String> {
-        let mut b = x;
-        while let E::Attr(inner, _, _) = b {
-            b = inner;
-        }
-        match b {
-            E::Name(n, _) => Some(n.clone()),
-            _ => None,
-        }
-    };
-    let push = |s: String, out: &mut Vec<String>| {
-        if !out.contains(&s) {
-            out.push(s);
-        }
-    };
-    match e {
-        E::Name(n, (a, b)) => {
-            if !bound.contains(n) && !HELPERS.contains(&n.as_str()) && !CONSTS.contains(&n.as_str()) && !roots.contains(n) {
-                push(src.get(*a..*b).unwrap_or(n).to_string(), out);
-            }
-        }
-        E::Attr(inner, _, (a, b)) => {
-            match root_name(e) {
-                Some(r) if bound.contains(&r) || HELPERS.contains(&r.as_str()) => {}
-                Some(_) => push(src.get(*a..*b).unwrap_or("").trim().to_string(), out),
-                // `a.b[k].c`: the whole chain, then what it is built from
-                None => {
-                    push(src.get(*a..*b).unwrap_or("").trim().to_string(), out);
-                    walk_names(src, inner, bound, roots, out)
-                }
-            }
-        }
-        _ => children(e).into_iter().for_each(|c| walk_names(src, c, bound, roots, out)),
-    }
-}
-
-fn children(e: &E) -> Vec<&E> {
-    match e {
-        E::Const(_) | E::Name(..) => vec![],
-        E::Attr(b, _, _) => vec![b],
-        E::Index(a, b) => vec![a, b],
-        E::Slice(b, x, y, z) => {
-            let mut v: Vec<&E> = vec![b];
-            v.extend([x, y, z].into_iter().flatten().map(|x| x.as_ref()));
-            v
-        }
-        E::Call(_, xs) | E::And(xs) | E::Or(xs) | E::List(xs) | E::Tuple(xs) | E::Set(xs) => xs.iter().collect(),
-        E::Not(x) | E::Neg(x) | E::Pos(x) => vec![x],
-        E::Bin(_, a, b) => vec![a, b],
-        E::Compare(a, ops) => std::iter::once(a.as_ref()).chain(ops.iter().map(|(_, x)| x)).collect(),
-        E::IfExp(a, b, c) => vec![a, b, c],
-        E::Dict(kv) => kv.iter().flat_map(|(k, v)| [k, v]).collect(),
-        E::Comp(_, elt, gens) => {
-            let mut v: Vec<&E> = vec![elt];
-            for (_, it, ifs) in gens {
-                v.push(it);
-                v.extend(ifs.iter());
-            }
-            v
-        }
-    }
-}
-
-fn visit<'a>(e: &'a E, f: &mut impl FnMut(&'a E)) {
-    f(e);
-    for c in children(e) {
-        visit(c, f);
-    }
-}
-
-// ── Python's json.dumps(sort_keys=True), for messages and subjects ──────────
-
-pub fn dumps(v: &V) -> String {
-    let mut s = String::new();
-    dump(v, &mut s);
-    s
-}
-
-fn dump_str(x: &str, out: &mut String) {
-    out.push('"');
-    for c in x.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
-                let mut buf = [0u16; 2];
-                for u in c.encode_utf16(&mut buf) {
-                    out.push_str(&format!("\\u{:04x}", u));
-                }
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-}
-
-pub fn float_repr(f: f64) -> String {
-    if f.is_nan() {
-        "NaN".into()
-    } else if f.is_infinite() {
-        if f > 0.0 { "Infinity".into() } else { "-Infinity".into() }
-    } else if f == f.trunc() && f.abs() < 1e16 {
-        format!("{f:.1}")
-    } else {
-        format!("{f}")
-    }
-}
-
-fn dump(v: &V, out: &mut String) {
-    match v {
-        V::None => out.push_str("null"),
-        V::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-        V::Int(i) => out.push_str(&i.to_string()),
-        V::Float(f) => out.push_str(&float_repr(*f)),
-        V::Str(s) => dump_str(s, out),
-        V::List(xs) | V::Tuple(xs) | V::Set(xs) => {
-            out.push('[');
-            for (i, x) in xs.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                dump(x, out);
-            }
-            out.push(']');
-        }
-        V::Dict(m) => {
-            let mut ks: Vec<&String> = m.keys().collect();
-            ks.sort();
-            out.push('{');
-            for (i, k) in ks.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                dump_str(k, out);
-                out.push_str(": ");
-                dump(&m[*k], out);
-            }
-            out.push('}');
-        }
     }
 }

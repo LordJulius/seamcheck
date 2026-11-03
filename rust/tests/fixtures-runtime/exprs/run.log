@@ -1,0 +1,8 @@
+SEAMCHECK {"k": "state", "t": 0, "xs": [1, 2, 3], "name": "\u00e9cole", "d": {"a": 1, "b": [1, 2]}, "e": {"b": [1, 2], "a": 1}, "e2": {"a": 2, "c": null}, "objs": [{"a": 1}, {"a": 1}], "units": [{"id": 1, "name": "u1", "hp": 6, "dead": false}, {"id": 2, "name": "u2", "hp": 7, "dead": false}, {"id": 3, "name": "u3", "hp": 1, "dead": true}], "x": 5, "deep": {"a": {"b": {"c": 2}}}, "f1": 0.30000000000000004, "big": 1.2345678901234567e+19, "tiny": 1.5e-07, "huge": 1e+300, "neg": -0.0, "tags": ["ab", "abcd", "x", "hello"], "zero": 0}
+SEAMCHECK {"k": "state", "t": 7.25, "xs": [3, 3], "name": "\u00e9cole", "d": {"a": 1, "b": [1, 2]}, "e": {"b": [1, 2], "a": 1}, "e2": {"a": 2, "c": null}, "objs": [{"a": 1}, {"a": 1}], "units": [{"id": "a", "name": "n", "hp": 9}], "x": 4, "deep": {"a": {"b": {"c": 1}}}, "f1": 0.30000000000000004, "big": 1.2345678901234567e+19, "tiny": 1.5e-07, "huge": 1e+300, "neg": -0.0, "tags": ["ab", "abcd", "x", "hello"], "zero": 0}
+SEAMCHECK {"k": "act", "t": 8, "act": "build", "ok": true, "before": {"n": 1}, "after": {"n": 2}}
+SEAMCHECK {"k": "act", "t": 9, "act": "bxild", "ok": false, "before": {"n": 1}, "after": {"n": 1}}
+SEAMCHECK {"k": "act", "t": 9, "act": "repair", "before": {"n": 1}, "after": {"n": 5}}
+SEAMCHECK {"k": "act", "t": 9, "act": "tell", "before": {"n": 1}, "after": {"n": 5}}
+SEAMCHECK {"k": "act", "t": 9, "act": "sell", "before": {"n": 1}}
+SEAMCHECK {"k": "end"}

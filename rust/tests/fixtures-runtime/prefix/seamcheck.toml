@@ -1,0 +1,7 @@
+[runtime]
+prefix = "CHECK"
+fail_on = ['(?i)^traceback', '\bpanic(ked)?\b', 'ERROR\s+\d{3}', '[[:alpha:]]+ exploded']
+
+[[invariant]]
+id = "n-small"
+assert = "n < 3"

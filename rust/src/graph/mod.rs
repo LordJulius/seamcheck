@@ -11,6 +11,7 @@ pub mod bridges;
 pub mod imports;
 pub mod infer;
 pub mod link;
+pub mod precise;
 pub mod pylink;
 pub mod qt;
 pub mod query;
@@ -27,6 +28,19 @@ use crate::project::{ext_of, read_text, Project};
 
 /// (callee or caller id, line, exact)
 pub type Edge = (String, usize, bool);
+
+/// One call site as the linker settled it (core._TRACE): its file, line,
+/// name and chain, the outcome ("exact", "guess", "named": nothing though a
+/// project function has the name, "nothing") and its first four callees.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraceRow {
+    pub file: String,
+    pub line: usize,
+    pub name: String,
+    pub chain: Vec<String>,
+    pub outcome: &'static str,
+    pub ids: Vec<String>,
+}
 
 #[derive(Default)]
 pub struct Graph {
@@ -63,6 +77,10 @@ pub struct Graph {
     pub possible: link::Possible,
     /// how long the load took (core.Project.parse_ms)
     pub load_ms: u128,
+    /// every call's outcome in resolution order, when asked for (precise mode)
+    pub trace: Option<Vec<TraceRow>>,
+    /// what the language servers settled (precise/), when they were asked
+    pub precise: Option<precise::Stats>,
 }
 
 /// Godot: "res://path" -> the script's module name (core._res_map).
@@ -107,8 +125,17 @@ impl Graph {
         Graph::load_with(p, true)
     }
 
-    /// `bridges` off: the call graph alone (parity compares it so).
+    /// `bridges` off: the call graph alone (parity compares it so). Language
+    /// servers settle the guesses when `[precise] enabled` says so.
     pub fn load_with(p: &Project, bridges: bool) -> Graph {
+        Graph::load_precise(p, bridges, precise::enabled(p), Some(&precise::cache_dir()))
+    }
+
+    /// `precise`: let language servers settle the calls the static resolver
+    /// guesses (`--precise`, or `[precise] enabled`); `cache`: the directory
+    /// whose answers from earlier runs may answer (None, `--no-cache`: ask
+    /// them all).
+    pub fn load_precise(p: &Project, bridges: bool, precise: bool, cache: Option<&std::path::Path>) -> Graph {
         let t0 = std::time::Instant::now();
         let mut g = Graph::assemble(parse_all(p, None));
         // what the frameworks in use hand the functions they call (packs' [[param]]):
@@ -119,7 +146,13 @@ impl Graph {
         packs.sort();
         packs.dedup();
         g.params = crate::config::pack_params(&packs);
+        if precise {
+            g.trace = Some(Vec::new());
+        }
         link::build_edges(&mut g, p);
+        if precise {
+            precise::refine(&mut g, p, cache);
+        }
         if bridges {
             bridges::apply_bridges(&mut g, p);
         }

@@ -1,0 +1,10 @@
+SEAMCHECK {"k": "state", "t": 0, "units": [{"id": "a", "hp": 11, "max_hp": 10, "dead": false, "wet": false, "x": 0}, {"id": "b", "hp": 10, "max_hp": 10, "dead": false, "wet": true, "x": 0}, {"id": 3, "hp": -1, "max_hp": 10, "dead": false, "wet": false, "x": 0}], "stones": ["s", "s", "t", "t"], "paused": true}
+SEAMCHECK {"k": "state", "t": 1, "units": [{"id": "a", "hp": 12, "max_hp": 10, "dead": false, "wet": false, "x": 0}, {"id": "b", "hp": 10, "max_hp": 10, "dead": false, "wet": true, "x": 0}], "stones": ["s", "s"], "paused": true}
+SEAMCHECK {"k": "state", "t": 2.5, "units": [{"id": "a", "hp": 12, "max_hp": 10, "dead": false, "wet": false, "x": 2}, {"id": "b", "hp": 10, "max_hp": 10, "dead": false, "wet": true, "x": 0}, {"id": "c", "hp": 99, "max_hp": 10, "dead": true, "wet": false, "x": 0}], "stones": [], "paused": true}
+SEAMCHECK {"k": "act", "t": 3, "act": "build", "ok": true, "price": 5, "before": {"gold": 10}, "after": {"gold": 7}}
+SEAMCHECK {"k": "act", "t": 3.25, "act": "sell", "ok": false, "before": {"gold": 10, "wood": 1}, "after": {"gold": 12}}
+SEAMCHECK {"k": "act", "t": 4, "act": "recruit", "ok": true, "price": -1, "before": {"gold": 1}, "after": {"gold": 99}}
+SEAMCHECK {"k": "act", "t": 5, "act": "build", "ok": false, "before": {"gold": 3}, "after": {"gold": 3}}
+SEAMCHECK {"k": "state", "t": 1234567.891, "units": [{"id": "\u00e9", "hp": 50, "max_hp": 10, "dead": false, "wet": false, "x": 0}], "stones": [], "paused": false}
+SEAMCHECK {"k": "state", "t": 1e-05, "units": [{"id": "z", "hp": NaN, "max_hp": 10, "dead": false, "wet": false, "x": 0}], "stones": [], "paused": false}
+SEAMCHECK {"k": "end"}

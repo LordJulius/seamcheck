@@ -9,14 +9,23 @@
 //!
 //! `seamcheck verify` writes its evidence in this protocol and judges it here.
 
+pub mod cmd;
 pub mod expr;
+pub mod names;
+pub mod parse;
+pub mod pyfmt;
+pub mod pyjson;
+pub mod pysyntax;
 
 use indexmap::IndexMap;
-use regex::Regex;
 use serde_json::Value as Json;
 
 use crate::glob::fnmatchcase;
-use expr::{compile, dumps, eval, read_names, Scope, E, V};
+use crate::pyre::Rx;
+use expr::{eval, Scope, E, V};
+use names::read_names;
+use parse::compile;
+use pyfmt::{dumps, fmt_g, py_repr, py_str};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Violation {
@@ -65,7 +74,7 @@ pub struct Checker {
     lineno: usize,
     since: IndexMap<(String, String), f64>,
     pub prefix: String,
-    fail_on: Vec<Regex>,
+    fail_on: Vec<Rx>,
     strict: bool,
 }
 
@@ -108,7 +117,7 @@ impl Checker {
         };
         for pat in rt.get("fail_on").and_then(Json::as_array).into_iter().flatten() {
             let pat = pat.as_str().unwrap_or("");
-            match Regex::new(pat) {
+            match Rx::new(pat) {
                 Ok(r) => c.fail_on.push(r),
                 Err(e) => c.rules.push(Rule {
                     spec: table(&serde_json::json!({"id": "fail_on"})),
@@ -118,7 +127,7 @@ impl Checker {
                     where_: None,
                     each: None,
                     evaluated: 0,
-                    error: format!("bad fail_on pattern {pat:?}: {e}"),
+                    error: format!("bad fail_on pattern {}: {e}", crate::pyre::repr(pat)),
                     waived: String::new(),
                 }),
             }
@@ -138,7 +147,7 @@ impl Checker {
                     waived: String::new(),
                 };
                 let compiled = (|| -> Result<(), String> {
-                    let a = r.get("assert").ok_or("KeyError: 'assert'")?.to_string();
+                    let a = r.get("assert").ok_or("'assert'")?.to_string();
                     r.code = Some(compile(&a)?);
                     if let Some(w) = r.get("when").filter(|w| !w.is_empty()) {
                         r.when = Some(compile(w)?);
@@ -164,14 +173,14 @@ impl Checker {
         self.lineno += 1;
         let marker = format!("{} ", self.prefix);
         let Some(i) = raw.find(&marker) else {
-            let hits: Vec<String> = self.fail_on.iter().filter(|rx| rx.is_match(raw)).map(|rx| rx.as_str().to_string()).collect();
+            let hits: Vec<String> = self.fail_on.iter().filter(|rx| rx.is_match(raw)).map(|rx| rx.pattern().to_string()).collect();
             for pat in hits {
-                let msg: String = raw.trim().chars().take(300).collect();
+                let msg = crate::pyre::take_chars(crate::pyre::strip(raw), 300).to_string();
                 self.flag("fail_on", "run", "error", 0.0, &pat, msg);
             }
             return;
         };
-        match parse_json(&raw[i + marker.len()..]) {
+        match pyjson::loads(&raw[i + marker.len()..]) {
             Ok(V::Dict(obj)) => self.feed(obj),
             Ok(_) => {}
             Err(e) => self.flag("protocol", "run", "error", 0.0, "line", format!("unreadable {} line: {e}", self.prefix)),
@@ -191,23 +200,23 @@ impl Checker {
             }
             Some(V::Str(k)) if k == "end" => self.ended = true,
             Some(V::Str(k)) if k == "waive" => {
-                let why = match obj.get("why") {
-                    Some(V::Str(s)) if !s.is_empty() => s.clone(),
-                    _ => "(no reason given)".into(),
-                };
+                let why = obj.get("why").map(py_str).filter(|s| !s.is_empty()).unwrap_or_else(|| "(no reason given)".into());
                 let ids = match obj.get("rules") {
                     Some(V::List(xs)) => xs.clone(),
                     Some(x) => vec![x.clone()],
                     None => vec![],
                 };
                 for rid in ids {
-                    let rid = match rid {
-                        V::Str(s) => s,
-                        other => dumps(&other),
+                    let found = match &rid {
+                        V::Str(s) => self.rules.iter_mut().find(|r| r.id() == *s),
+                        _ => None,
                     };
-                    match self.rules.iter_mut().find(|r| r.id() == rid) {
+                    match found {
                         Some(r) => r.waived = why.clone(),
-                        None => self.flag("waive", "run", "error", 0.0, &rid, format!("waived a rule that doesn't exist: '{rid}'")),
+                        None => {
+                            let msg = format!("waived a rule that doesn't exist: {}", py_repr(&rid));
+                            self.flag("waive", "run", "error", 0.0, &py_str(&rid), msg)
+                        }
                     }
                 }
             }
@@ -236,16 +245,25 @@ impl Checker {
 
     fn check(&mut self, ri: usize, layers: &[IndexMap<String, V>], t: f64, subject: &str, hold: f64) {
         let id = self.rules[ri].id();
-        let result = (|| -> Result<Option<bool>, String> {
-            let r = &self.rules[ri];
-            let mut scope = Scope::new(layers.iter().collect());
-            if let Some(w) = &r.where_ {
-                if !eval(w, &mut scope)?.truthy() {
-                    return Ok(None);
-                }
+        let mut scope = Scope::new(layers.iter().collect());
+        let r = &self.rules[ri];
+        let passed = match &r.where_ {
+            Some(w) => eval(w, &mut scope).map(|v| v.truthy()),
+            None => Ok(true),
+        };
+        let result = match passed {
+            Ok(false) => {
+                self.since.shift_remove(&(id, subject.to_string()));
+                return;
             }
-            Ok(Some(eval(r.code.as_ref().unwrap(), &mut scope)?.truthy()))
-        })();
+            // (counted as evaluated before the assertion runs, so a rule that raises was exercised)
+            Ok(true) => {
+                let got = eval(r.code.as_ref().unwrap(), &mut scope).map(|v| v.truthy());
+                self.rules[ri].evaluated += 1;
+                got
+            }
+            Err(e) => Err(e),
+        };
         let ok = match result {
             Err(e) => {
                 let r = &mut self.rules[ri];
@@ -254,13 +272,8 @@ impl Checker {
                 }
                 return;
             }
-            Ok(None) => {
-                self.since.shift_remove(&(id, subject.to_string()));
-                return;
-            }
-            Ok(Some(ok)) => ok,
+            Ok(ok) => ok,
         };
-        self.rules[ri].evaluated += 1;
         if ok {
             self.since.shift_remove(&(id, subject.to_string()));
             return;
@@ -309,14 +322,7 @@ impl Checker {
     }
 
     fn state(&mut self, st: &IndexMap<String, V>) {
-        let t = match st.get("t") {
-            Some(v @ (V::Int(_) | V::Float(_))) => match v {
-                V::Int(i) => *i as f64,
-                V::Float(f) => *f,
-                _ => unreachable!(),
-            },
-            _ => self.states as f64,
-        };
+        let t = st.get("t").and_then(py_float).unwrap_or(self.states as f64);
         let stv = V::Dict(st.clone());
         let prev = opt(&self.prev);
         for ri in 0..self.rules.len() {
@@ -338,7 +344,7 @@ impl Checker {
             }
             let Some(items) = self.eval_with(ri, |r| r.each.as_ref(), &base, "each: ") else { continue };
             let items = match items {
-                V::None => vec![],
+                v if !v.truthy() => vec![],
                 v => match v.items() {
                     Ok(xs) => xs,
                     Err(e) => {
@@ -369,7 +375,7 @@ impl Checker {
                 let e = self.rules[ri].each.clone().unwrap();
                 let mut scope = Scope::new(players.iter().collect());
                 if let Ok(v) = eval(&e, &mut scope) {
-                    for x in v.items().unwrap_or_default() {
+                    for x in if v.truthy() { v.items().unwrap_or_default() } else { vec![] } {
                         if let V::Dict(m) = &x {
                             if let Some(k) = m.get(&key) {
                                 prev_items.insert(dumps(k), x.clone());
@@ -397,16 +403,8 @@ impl Checker {
     }
 
     fn act(&mut self, a: &IndexMap<String, V>) {
-        let t = match a.get("t") {
-            Some(V::Int(i)) => *i as f64,
-            Some(V::Float(f)) => *f,
-            _ => 0.0,
-        };
-        let name = match a.get("act") {
-            Some(V::Str(s)) => s.clone(),
-            Some(V::None) | None => String::new(),
-            Some(other) => dumps(other),
-        };
+        let t = a.get("t").and_then(py_float).unwrap_or(0.0);
+        let name = a.get("act").map(py_str).unwrap_or_default();
         let av = V::Dict(a.clone());
         let prev = opt(&self.prev);
         for ri in 0..self.rules.len() {
@@ -477,6 +475,12 @@ impl Checker {
         out
     }
 
+    /// The `why` of the first rule with this id (printed under its findings).
+    pub fn why(&self, id: &str) -> Option<String> {
+        let r = self.rules.iter().find(|r| r.id() == id)?;
+        r.spec.get("why").filter(|v| crate::config::truthy(Some(v))).map(crate::config::py_str)
+    }
+
     pub fn summary(&self) -> String {
         let ran = self.rules.iter().filter(|r| r.evaluated > 0).count();
         let idle: Vec<String> =
@@ -495,61 +499,20 @@ impl Checker {
 }
 
 pub fn format_violation(v: &Violation) -> String {
-    let t = expr::float_repr(v.t);
-    let t = t.strip_suffix(".0").unwrap_or(&t);
+    let t = fmt_g(v.t);
     let subj = if v.subject.is_empty() { String::new() } else { format!(" {}", v.subject) };
     let more = if v.count > 1 { format!(" (x{})", v.count) } else { String::new() };
     format!("[{}] {}: t={t}{subj}{more}\n    {}", v.severity, v.rule, v.message)
 }
 
-/// JSON as Python's json.loads reads it: also the bare NaN / Infinity / -Infinity.
-pub fn parse_json(text: &str) -> Result<V, String> {
-    if let Ok(j) = serde_json::from_str::<Json>(text.trim()) {
-        return Ok(V::from_json(&j));
+/// Python's `float(x)` of a line's `t` (a number, a bool, a number's text);
+/// None for what Python's float() refuses.
+fn py_float(v: &V) -> Option<f64> {
+    match v {
+        V::Int(i) => Some(*i as f64),
+        V::Float(f) => Some(*f),
+        V::Bool(b) => Some(*b as i64 as f64),
+        V::Str(s) => crate::pyre::strip(s).replace('_', "").parse().ok(),
+        _ => None,
     }
-    // Swap the bare non-finite numbers for tagged strings outside string literals.
-    const TAG: &str = "\u{e000}seamcheck-float:";
-    let mut out = String::new();
-    let mut in_str = false;
-    let mut esc = false;
-    let mut rest = text.trim();
-    while let Some(c) = rest.chars().next() {
-        if in_str {
-            out.push(c);
-            if esc {
-                esc = false;
-            } else if c == '\\' {
-                esc = true;
-            } else if c == '"' {
-                in_str = false;
-            }
-            rest = &rest[c.len_utf8()..];
-            continue;
-        }
-        let word = ["-Infinity", "Infinity", "NaN"].into_iter().find(|w| rest.starts_with(w));
-        if let Some(w) = word {
-            out.push_str(&format!("\"{TAG}{w}\""));
-            rest = &rest[w.len()..];
-            continue;
-        }
-        if c == '"' {
-            in_str = true;
-        }
-        out.push(c);
-        rest = &rest[c.len_utf8()..];
-    }
-    let j: Json = serde_json::from_str(&out).map_err(|e| e.to_string())?;
-    fn fix(v: V) -> V {
-        match v {
-            V::Str(s) if s.starts_with(TAG) => V::Float(match &s[TAG.len()..] {
-                "NaN" => f64::NAN,
-                "Infinity" => f64::INFINITY,
-                _ => f64::NEG_INFINITY,
-            }),
-            V::List(xs) => V::List(xs.into_iter().map(fix).collect()),
-            V::Dict(m) => V::Dict(m.into_iter().map(|(k, v)| (k, fix(v))).collect()),
-            other => other,
-        }
-    }
-    Ok(fix(V::from_json(&j)))
 }

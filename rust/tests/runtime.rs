@@ -1,7 +1,7 @@
 //! Runtime checks (test_runtime.py): invariants, contracts, holds, the
 //! run-level guards and the expression sandbox, against the Rust checker.
 
-use seamcheck::runtime::expr::compile;
+use seamcheck::runtime::parse::compile;
 use seamcheck::runtime::{Checker, Violation};
 use serde_json::{json, Value};
 
@@ -252,7 +252,7 @@ fn expressions_mean_what_python_says() {
     let e = |src: &str| -> String {
         let m = indexmap::IndexMap::from([("xs".to_string(), V::List(vec![V::Int(3), V::Int(1), V::Int(2)])), ("d".to_string(), V::Dict(indexmap::IndexMap::from([("a".to_string(), V::Int(1))])))]);
         let mut sc = Scope::new(vec![&m]);
-        seamcheck::runtime::expr::dumps(&eval(&compile(src).unwrap(), &mut sc).unwrap())
+        seamcheck::runtime::pyfmt::dumps(&eval(&compile(src).unwrap(), &mut sc).unwrap())
     };
     assert_eq!(e("sorted(xs)[-1]"), "3");
     assert_eq!(e("xs[1:]"), "[1, 2]");

@@ -1,0 +1,46 @@
+[[invariant]]
+id = "a"
+wehre = "x"
+assert = "True"
+severity = "warning"
+
+[[invariant]]
+id = "syntax"
+assert = "x =="
+
+[[invariant]]
+id = "call"
+assert = "open('x')"
+
+[[invariant]]
+id = "dunder"
+assert = "x.__class__"
+
+[[invariant]]
+id = "lambda"
+assert = "(lambda: 1)()"
+
+[[invariant]]
+id = "method"
+assert = "[].append(1)"
+
+[[invariant]]
+id = "no-assert"
+each = "xs"
+
+[[invariant]]
+id = "walrus"
+assert = "(y := 1)"
+
+[[invariant]]
+id = "ok"
+assert = "x > 0"
+
+[[contract]]
+id = "b"
+acts = ["x"]
+assert = "True"
+
+[[contract]]
+id = "ok"
+assert = "True"

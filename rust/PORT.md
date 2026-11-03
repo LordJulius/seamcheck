@@ -51,7 +51,7 @@ mostly parsing and linking: phase 1 takes the first, phase 2 the second.
 | `lang_gdscript.py` | 198 | GDScript adapter | `lang/gdscript.rs` | 2 |
 | `chains.py`, `lambdas.py` | 782 | receiver chains, lambda parameter types | `lang/chains.rs`, `lang/lambdas.rs` (+ `_assignments`: `lang/assign.rs`) | 2 (done) |
 | `infer.py` | 2,166 | receiver type inference over the graph | `graph/infer.rs` | 2 |
-| `precise.py` | 848 | language servers settle guessed calls | `precise.rs` | 4 |
+| `precise.py` | 848 | language servers settle guessed calls | `graph/precise/` (done) | 4 |
 | `lint.py`, `lint_infra.py`, `lint_qml.py`, `structure.py`, `css.py` | 2,241 | `kind = "lint"` checks, `essential`, brace / JSX trees, CSS index | `lint/` | 1 (all but `auth-in-background` and `ets-owner`, which walk the graph: 3, done in `lint/graph.rs`) |
 | `tidy.py` | 980 | gate, dead / test-only / unused, dups, test audit, split, hotspots, remove, refs, moved code | `gate.rs` (1: changed lines, moved lines, forbid_added, moved refs) / `tidy/` | 1 / 3 |
 | `tidy_cli.py` | 241 | tidy command output | `main.rs` | 1 (gate) / 3 |
@@ -63,7 +63,7 @@ mostly parsing and linking: phase 1 takes the first, phase 2 the second.
 | `fingerprint.py` | 143 | content hashes, shared on-disk cache | `cache.rs` | 2 (only once parsing is worth caching; phase 1 needs no cache) |
 | `serve.py` | 252 | MCP server over queries | `serve.rs` | 4 |
 | `report.py` | 118 | HTML map | `report.rs` | 4 |
-| `runtime.py`, `runcmd.py` | 559 | `trace` / `run` / `fuzz` (reads only config) | `runtime/` (the checker and its expressions: done, for `verify`; the commands still Python) | 4 (independent, any time) |
+| `runtime.py`, `runcmd.py` | 559 | `trace` / `run` / `fuzz` (reads only config) | `runtime/` (done) | 4 (independent, any time) |
 | `init.py` | 203 | first seamcheck.toml, pack detection, hook | `init.rs` | 4 |
 | `output.py` | 72 | SARIF, GitHub annotations | `output.rs` | 1 |
 
@@ -377,3 +377,61 @@ and C can start the same day on three machines; D starts later.
 
 Phase 3 starts once the edge set matches for every language: gate's graph
 half, tidy, deps, arch and queries split cleanly by command.
+
+## Phase 4: runtime and precise (lane runtime-precise, 2026-11-03)
+
+**Runtime.** `trace`, `run` and `fuzz` (`runtime/cmd.rs`) on the checker
+`verify` already used, now faithful to Python's text where it shows: the
+JSON reader is CPython's scanner with its error messages
+(`runtime/pyjson.rs`: `unreadable SEAMCHECK line: Expecting value: line 1
+column 1 (char 0)`), floats print as `repr` / `:g` (`runtime/pyfmt.rs`),
+rule names in a finding come in `ast.walk`'s breadth-first order
+(`runtime/names.rs`), and a rule that won't compile says so in Python's
+words: the tokenizer's errors first (`'(' was never closed`, unterminated
+strings, bad numbers: `runtime/pysyntax.rs`), then the parser's
+(`invalid syntax`, `Perhaps you forgot a comma?`), then the allowlist's
+first refusal breadth first (`runtime/parse.rs` parses refused constructs
+into `E::Refused` so `(lambda: 1)()` names the call, as Python does).
+`run` reads stdout + stderr with universal newlines in its own session,
+killed at `--timeout` and two seconds after the command exits; `fuzz` runs
+`--jobs` at a time and prints in seed order. Lines `fail_on` matches use
+Python's regex syntax (`pyre`).
+
+**Precise.** `graph/precise/` (`mod.rs` settling, `lsp.rs` the clients,
+`servers.rs` discovery and the rust-analyzer project). The linker now keeps
+`Graph::resolution` (core.resolution: exact / guess / nothing / named per
+extension, each site once, kept in step by parameter flow) and, in precise
+mode, `Graph::trace` (core._TRACE). `Graph::load_precise(p, bridges,
+precise, cache_dir)`; `Graph::load` follows `[precise] enabled`; commands
+pass `--precise` / `--no-cache` through (`port-dump edges` does). Answers
+are cached as JSON (`~/.cache/seamcheck/<repo>-precise.json`), apart from
+Python's pickle. `precise::summary` is `stats --precise`'s line,
+`Stats::to_json` its JSON.
+
+**Parity.** `parity --runtime tests/fixtures-runtime`: 44 scripted cases
+(trace / run / fuzz, text and JSON, strict, garbled and non-UTF-8 streams,
+CR / CRLF, waivers, holds, every helper and expression form, refused and
+broken rules, timeouts, killed and missing commands, grandchildren holding
+the pipe, fuzz replay quoting): 0 differences. `parity --edges --precise`
+compares the precise graphs from cold.
+
+**Tests.** `tests/runtime_cmd.rs` (Breaks, Config, Cli of test_runtime.py,
+plus the JSON, float, seed, shlex and newline shapes), `tests/runtime_compile.rs`
+(48 sources, each with the text Python's compile_expr raises),
+`tests/precise.rs` (all of test_precise.py: framing, UTF-16 columns, the fake
+server's six cases, the four real servers where installed).
+
+**Known differences.**
+- A program whose stream crashes Python's checker (an `each` that is an int,
+  a non-number `t`, an unhashable waiver id) gets findings from Rust instead
+  of a traceback.
+- Integers past i64 read as the nearest float; a lone surrogate in a string
+  reads as U+FFFD.
+- Error text of a bad `fail_on` regex is each engine's own (as for rules).
+- The evaluation errors of a broken rule match Python's common ones
+  (TypeError / KeyError / IndexError / NameError / ValueError texts); rarer
+  ones may be worded differently.
+- Rare SyntaxError texts Python specializes (`cannot assign to ...`,
+  `invalid character` ...) read `invalid syntax`.
+- `trace` of a missing file exits 1 with one line on stderr, not a traceback.
+

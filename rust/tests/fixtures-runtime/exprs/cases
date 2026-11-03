@@ -1,0 +1,2 @@
+["trace", "run.log"]
+["trace", "--json", "--strict", "run.log"]

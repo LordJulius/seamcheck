@@ -29,6 +29,9 @@
 //! three the `check` comparison runs only when --check is given too.
 //! --queries / --serve: the query commands and the MCP server over a
 //! spread of the project's functions (parity/queries.rs).
+//! --runtime: `trace` / `run` / `fuzz` on scripted cases (parity/runtime.rs).
+//! --precise (with --edges): both sides let the language servers settle the
+//! guessed calls, from cold (no answer cache), and print what they settled.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -39,6 +42,8 @@ use serde_json::Value;
 
 #[path = "parity/queries.rs"]
 mod queries;
+#[path = "parity/runtime.rs"]
+mod runtime_mode;
 
 /// How many differences to print (env PARITY_MAX, default 60).
 fn max_show() -> usize {
@@ -58,6 +63,8 @@ struct Opts {
     queries: bool,
     serve: bool,
     formats: bool,
+    runtime: bool,
+    precise: bool,
     ext: Vec<String>,
     repos: Vec<PathBuf>,
 }
@@ -77,6 +84,8 @@ fn opts() -> Opts {
         queries: false,
         serve: false,
         formats: false,
+        runtime: false,
+        precise: false,
         ext: seamcheck::lang::ported_exts().iter().map(|s| s.to_string()).collect(),
         repos: vec![],
     };
@@ -102,6 +111,8 @@ fn opts() -> Opts {
             "--queries" => o.queries = true,
             "--serve" => o.serve = true,
             "--formats" => o.formats = true,
+            "--runtime" => o.runtime = true,
+            "--precise" => o.precise = true,
             "--ext" => {
                 i += 1;
                 o.ext = args[i].split(',').map(String::from).collect();
@@ -120,7 +131,7 @@ fn opts() -> Opts {
             "-h" | "--help" => {
                 println!(
                     "parity [--python DIR] [--rust BIN] [--gate] [--staged] [--fixtures DIR] [--formats] \
-                     [--parse] [--edges] [--untyped] [--ext .ex,.exs] [--check] [--queries] [--serve] [REPO...]"
+                     [--parse] [--edges] [--untyped] [--ext .ex,.exs] [--check] [--queries] [--serve] [--runtime] [--precise] [REPO...]"
                 );
                 std::process::exit(0);
             }
@@ -128,7 +139,10 @@ fn opts() -> Opts {
         }
         i += 1;
     }
-    if !o.parse && !o.edges && !o.chains && !o.queries && !o.serve {
+    if o.runtime {
+        o.repos = o.repos.iter().flat_map(|r| runtime_mode::dirs(r)).collect();
+    }
+    if !o.parse && !o.edges && !o.chains && !o.queries && !o.serve && !o.runtime {
         o.check = true;
     }
     if o.repos.is_empty() {
@@ -322,10 +336,13 @@ if os.environ.get("SEAMCHECK_UNTYPED"):
     core._param_flow = lambda *a, **k: None
     core._param_receivers = lambda *a, **k: None
 _load = fp.load
-fp.load = lambda name, default: default if "-graph" in name else _load(name, default)
+fp.load = lambda name, default: default if "-graph" in name or "-precise" in name else _load(name, default)
 fp.save = lambda *a, **k: None
 fp.prune = lambda *a, **k: None
-p = core.load(root)
+p = core.load(root, precise=True if os.environ.get("SEAMCHECK_PRECISE") else None)
+if p.precise:
+    from seamcheck import precise
+    print(precise.summary(p.precise), file=sys.stderr)
 for fid, es in p.edges.items():
     f = p.funcs.get(fid)
     if f is None or os.path.splitext(f.file)[1] not in exts:
@@ -451,7 +468,8 @@ fn py_inline(o: &Opts, repo: &Path, script: &str, exts: &str) -> Ran {
         .arg(exts)
         .current_dir(repo)
         .env("PYTHONPATH", &o.python)
-        .env("SEAMCHECK_UNTYPED", if o.untyped { "1" } else { "" }))
+        .env("SEAMCHECK_UNTYPED", if o.untyped { "1" } else { "" })
+        .env("SEAMCHECK_PRECISE", if o.precise { "1" } else { "" }))
 }
 
 fn json_lines(r: &Ran, who: &str) -> Vec<Value> {
@@ -543,7 +561,14 @@ fn parse_parity(o: &Opts, repo: &Path, name: &str) -> usize {
 fn edge_parity(o: &Opts, repo: &Path, name: &str) -> usize {
     let exts = o.ext.join(",");
     let pr = py_inline(o, repo, PY_EDGES, &exts);
-    let rr = rs(o, repo, &["port-dump", "edges", "--ext", &exts]);
+    let mut rargs = vec!["port-dump", "edges", "--ext", exts.as_str()];
+    if o.precise {
+        rargs.extend(["--precise", "--no-cache"]);
+    }
+    let rr = rs(o, repo, &rargs);
+    if o.precise {
+        println!("  python {}\n  rust   {}", pr.err.trim(), rr.err.trim());
+    }
     type E = (String, String, u64, bool);
     let row = |v: &Value| -> E {
         (
@@ -628,6 +653,9 @@ fn main() {
         }
         if o.serve {
             total += queries::serve_parity(&o, repo, &name);
+        }
+        if o.runtime {
+            total += runtime_mode::parity(&o.python, &o.rust, repo, &name);
         }
         if !o.check {
             if total == before {

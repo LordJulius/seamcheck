@@ -225,6 +225,8 @@ impl<'a> Resolver<'a> {
                 }
             }
             counts.settled_receiver(g, f, c, !hits.is_empty());
+            let ids = hits.iter().take(4).map(|h| h.id.clone()).collect();
+            counts.retrace(f, c, &["guess"], if hits.is_empty() { "named" } else { "exact" }, ids);
         }
     }
 
@@ -253,6 +255,7 @@ impl<'a> Resolver<'a> {
             edges.entry(f.id.clone()).or_default().push((target.id.clone(), c.line, true));
             redges.entry(target.id.clone()).or_default().push((f.id.clone(), c.line, true));
             counts.settled_flow(f, had_guess);
+            counts.retrace(f, c, &["guess", "nothing", "named"], "exact", vec![target.id.clone()]);
         }
     }
 

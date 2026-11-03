@@ -36,6 +36,14 @@ struct Args {
     html: Option<String>,
     level: String,
     via: String,
+    strict: bool,
+    precise: bool,
+    no_cache: bool,
+    echo: bool,
+    log: Option<String>,
+    timeout: f64,
+    seeds: String,
+    jobs: i64,
 }
 
 fn usage_error(msg: &str) -> ! {
@@ -46,7 +54,7 @@ fn usage_error(msg: &str) -> ! {
 
 fn parse(argv: Vec<String>) -> Args {
     let mut a =
-        Args { root: ".".into(), format: "text".into(), level: "dir".into(), via: "import".into(), ..Default::default() };
+        Args { root: ".".into(), format: "text".into(), level: "dir".into(), via: "import".into(), seeds: "1-4".into(), jobs: 4, ..Default::default() };
     let mut i = 0;
     let mut positional: Vec<String> = Vec::new();
     let value = |i: &mut usize, name: &str| -> String {
@@ -110,10 +118,21 @@ fn parse(argv: Vec<String>) -> Args {
                 let n: i64 = v.parse().unwrap_or_else(|_| usage_error(&format!("argument {flag}: invalid int value: '{v}'")));
                 if flag == "--depth" { a.q.depth = n } else { a.q.limit = n }
             }
-            "--no-cache" | "--exact" | "--precise" | "--ids" | "--apply" | "--strict" | "--echo" | "--hook" | "--force" => {}
-            "--log" | "--timeout" | "--seeds" | "--jobs" => {
-                let _ = val(&mut i);
+            "--strict" => a.strict = true,
+            "--echo" => a.echo = true,
+            "--log" => a.log = Some(val(&mut i)),
+            "--seeds" => a.seeds = val(&mut i),
+            "--timeout" => {
+                let v = val(&mut i);
+                a.timeout = v.trim().parse().unwrap_or_else(|_| usage_error(&format!("argument --timeout: invalid float value: '{v}'")))
             }
+            "--jobs" => {
+                let v = val(&mut i);
+                a.jobs = v.trim().parse().unwrap_or_else(|_| usage_error(&format!("argument --jobs: invalid int value: '{v}'")))
+            }
+            "--precise" => a.precise = true,
+            "--no-cache" => a.no_cache = true,
+            "--exact" | "--ids" | "--apply" | "--hook" | "--force" => {}
             _ if x.starts_with('-') && x.len() > 1 => usage_error(&format!("unrecognized arguments: {x}")),
             _ => positional.push(x),
         }
@@ -185,6 +204,21 @@ fn main() {
         "map" => map(&a, &root),
         "serve" => seamcheck::serve::main(&root, &a.config),
         "graph" => graph(&a, &root),
+        "trace" | "run" | "fuzz" => seamcheck::runtime::cmd::main(
+            &seamcheck::runtime::cmd::Opts {
+                cmd: a.cmd.clone(),
+                args: a.args.clone(),
+                config: a.config.clone(),
+                json: a.format == "json",
+                strict: a.strict,
+                log: a.log.clone(),
+                echo: a.echo,
+                timeout: a.timeout,
+                seeds: a.seeds.clone(),
+                jobs: a.jobs,
+            },
+            &root,
+        ),
         other => {
             eprintln!(
                 "seamcheck (rust, phase 1): `{other}` is not ported yet; it needs the call graph (phase 2). \
@@ -199,7 +233,9 @@ fn main() {
 /// The query commands (queries::cli), over one loaded graph.
 fn query(a: &Args, root: &Path, t0: Instant) -> i32 {
     let p = Project::load(root, &a.config);
-    let g = seamcheck::graph::Graph::load(&p);
+    let precise = a.precise || seamcheck::graph::precise::enabled(&p);
+    let cache = (!a.no_cache).then(seamcheck::graph::precise::cache_dir);
+    let g = seamcheck::graph::Graph::load_precise(&p, true, precise, cache.as_deref());
     let q = seamcheck::queries::Q::new(&p, &g);
     let r = if a.cmd == "stats" { q.cmd_stats(&a.q, Some(t0.elapsed().as_millis())) } else { q.command(&a.cmd, &a.q) };
     print!("{}", r.out);
@@ -399,7 +435,12 @@ fn port_dump(a: &Args, root: &Path) -> i32 {
             }
         }
         Some("edges") => {
-            let g = seamcheck::graph::Graph::load_with(&p, std::env::var_os("SEAMCHECK_BRIDGES").is_some());
+            let precise = a.precise || seamcheck::graph::precise::enabled(&p);
+            let cache = (!a.no_cache).then(seamcheck::graph::precise::cache_dir);
+            let g = seamcheck::graph::Graph::load_precise(&p, std::env::var_os("SEAMCHECK_BRIDGES").is_some(), precise, cache.as_deref());
+            if let Some(st) = &g.precise {
+                eprintln!("{}", seamcheck::graph::precise::summary(st));
+            }
             for (caller, callee, line, exact) in g.edge_rows() {
                 if g.func(&caller).map(|f| want(&f.file)).unwrap_or(false) {
                     println!("{}", json!([caller, callee, line, exact]));

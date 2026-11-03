@@ -29,11 +29,14 @@ pub(super) struct Resolved {
     pub param_call: bool,
     /// a guessed call on a parameter (core `pending_recv`)
     pub param_recv: bool,
+    /// how many of `targets` the resolver found before adding overrides
+    /// (what the counters and the trace judge the call by)
+    pub primary: usize,
 }
 
 impl Resolved {
     fn nothing() -> Resolved {
-        Resolved { targets: vec![], direct: vec![], param_call: false, param_recv: false }
+        Resolved { targets: vec![], direct: vec![], param_call: false, param_recv: false, primary: 0 }
     }
 }
 
@@ -541,7 +544,7 @@ impl<'a> Resolver<'a> {
                 if ends(&f.file, PARAM_FLOW_EXTS) && self.param_names(f).contains(&c.name) {
                     pending = true; // a parameter: what the callers pass (after this pass)
                 }
-                return Resolved { targets: vec![], direct: vec![], param_call: pending, param_recv: false }; // a closure or a parameter: no project function by that name
+                return Resolved { targets: vec![], direct: vec![], param_call: pending, param_recv: false, primary: 0 }; // a closure or a parameter: no project function by that name
             }
         } else {
             // own module, then a name imported by itself, then modules and
@@ -682,7 +685,7 @@ impl<'a> Resolver<'a> {
                 // libc, a library's, or a macro: a project macro (`JV_ARRAY(a, b)`) runs the
                 // functions its body calls, resolved by the same rule
                 let direct: Vec<String> = self.c_macro_targets(&f.file, &c.name, 0).into_iter().map(|h| h.id.clone()).collect();
-                return Resolved { targets: vec![], direct, param_call: false, param_recv: false };
+                return Resolved { targets: vec![], direct, param_call: false, param_recv: false, primary: 0 };
             }
         }
         if targets.is_empty() && q.is_empty() && c.chain.is_empty() && f.file.ends_with(".cs") && upper1(&c.name) {
@@ -825,7 +828,7 @@ impl<'a> Resolver<'a> {
         } else {
             pending_recv = false;
         }
-        Resolved { targets: out, direct: vec![], param_call: pending, param_recv: pending_recv }
+        Resolved { targets: out, direct: vec![], param_call: pending, param_recv: pending_recv, primary: targets.len() }
     }
 
     /// A method on some object, or an import we can't see: every function

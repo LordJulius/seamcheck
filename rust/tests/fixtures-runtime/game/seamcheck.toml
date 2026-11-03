@@ -1,0 +1,42 @@
+# test_runtime.py's CFG, with reasons on two rules
+[[invariant]]
+id = "hp"
+each = "units"
+where = "not dead"
+assert = "0 <= hp <= max_hp"
+why = "a unit's hp stays in its range"
+
+[[invariant]]
+id = "wet"
+each = "units"
+assert = "not wet"
+for = 2.0
+
+[[invariant]]
+id = "stones"
+assert = "not dupes(stones)"
+
+[[invariant]]
+id = "frozen"
+when = "paused and prev and prev.paused"
+each = "units"
+assert = "prev_item is None or (x, hp) == (prev_item.x, prev_item.hp)"
+
+[[invariant]]
+id = "fin"
+each = "units"
+assert = "isfinite(hp)"
+severity = "warn"
+
+[[contract]]
+id = "refused-noop"
+act = "*"
+when = "ok == False"
+assert = "after == before"
+why = "a refused action changes nothing"
+
+[[contract]]
+id = "price"
+act = ["build", "recruit"]
+when = "ok and price >= 0"
+assert = "after.gold == before.gold - price"

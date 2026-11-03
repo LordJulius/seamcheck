@@ -1,0 +1,3 @@
+SEAMCHECK {"k": "state", "t": 0, "units": [{"id": "a", "hp": 10, "max_hp": 10, "dead": false, "wet": false, "x": 0}], "stones": [], "paused": false}
+Traceback (most recent call last):
+  boom

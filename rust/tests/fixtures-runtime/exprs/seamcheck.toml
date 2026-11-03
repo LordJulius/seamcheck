@@ -1,0 +1,149 @@
+# Every helper and expression form, true and false, with the values a finding shows
+[[invariant]]
+id = "helpers"
+assert = "len(xs) == 3 and sorted(xs) == [1, 2, 3] and min(xs) == 1 and max(4, 5) == 5 and sum(xs) == 6 and abs(-2) == 2 and any(xs) and all(xs) and round(2.5) == 2 and round(2.675, 2) == 2.67 and count(xs, 2) == 1"
+
+[[invariant]]
+id = "helpers-false"
+assert = "sum(xs) > 100 or len(name) > 10"
+
+[[invariant]]
+id = "dicts"
+assert = "get(d, 'a') == 1 and get(d, 'zz', 7) == 7 and keys(d) == ['a', 'b'] and values(d)[1] == [1, 2] and diff(d, e) == {}"
+
+[[invariant]]
+id = "diff-shows"
+assert = "diff(d, e2) == {}"
+
+[[invariant]]
+id = "sets"
+assert = "len(set(objs)) == 1 and set(xs) == {1, 2, 3} and len(set()) == 0 and dupes(objs) == [{'a': 1}] and dupes([1, 1.0]) == []"
+
+[[invariant]]
+id = "comps"
+assert = "[x * 2 for x in xs if x > 1] == [4, 6] and {k for k in d} == {'a', 'b'} and all(u.hp > 0 for u in units) and sum(u.hp for u in units if not u.dead) == 13"
+
+[[invariant]]
+id = "comps-false"
+assert = "all(u.hp > 5 for u in units)"
+
+[[invariant]]
+id = "strings"
+assert = "name[0] == 'é' and name[1:] == 'cole' and 'co' in name and name[::-1] == 'eloc' + 'é' and name[-1] == 'e'"
+
+[[invariant]]
+id = "arith"
+assert = "7 // 2 == 3 and -7 // 2 == -4 and 7 % -3 == -2 and 2 ** 10 == 1024 and 1 / 4 == 0.25 and -x == -5 and +x == 5 and 3 * 'ab' == 'ababab'"
+
+[[invariant]]
+id = "compare-chain"
+assert = "1 < x < 10 > 2 != 3 and x is not None and None is None and (1, 2) != [1, 2] and [1, 2] < [1, 3] and 'b' > 'a'"
+
+[[invariant]]
+id = "ifexp"
+assert = "('big' if x > 3 else 'small') == 'small'"
+
+[[invariant]]
+id = "nested-attrs"
+assert = "deep.a.b.c == 2 and line.deep.a.b.c == 1"
+
+[[invariant]]
+id = "floats"
+assert = "f1 == 0.1 + 0.2"
+
+[[invariant]]
+id = "floats-shown"
+assert = "big < 0 and tiny < 0 and huge < 0 and neg > 0"
+
+[[invariant]]
+id = "missing-field"
+assert = "nofield > 0"
+
+[[invariant]]
+id = "missing-key"
+assert = "d['zz'] > 0"
+
+[[invariant]]
+id = "missing-attr"
+assert = "d.zz > 0"
+
+[[invariant]]
+id = "attr-of-list"
+assert = "xs.first > 0"
+
+[[invariant]]
+id = "index-error"
+assert = "xs[10] > 0"
+
+[[invariant]]
+id = "type-error"
+assert = "name < 3"
+
+[[invariant]]
+id = "not-iterable"
+assert = "len(x) > 0"
+
+[[invariant]]
+id = "zero-div"
+assert = "x / 0 > 1"
+
+[[invariant]]
+id = "empty-max"
+assert = "max([]) > 1"
+
+[[invariant]]
+id = "unicode-shown"
+assert = "name == 'x' and deep.a == {}"
+
+[[invariant]]
+id = "each-strings"
+each = "tags"
+assert = "len(item) < 4"
+
+[[invariant]]
+id = "each-falsy"
+each = "zero"
+assert = "False"
+
+[[invariant]]
+id = "each-dict"
+each = "d"
+assert = "item != 'b'"
+
+[[invariant]]
+id = "each-key"
+each = "units"
+key = "name"
+assert = "hp > 6"
+
+[[invariant]]
+id = "where-error"
+each = "units"
+where = "missing > 1"
+assert = "True"
+
+[[invariant]]
+id = "when-error"
+when = "missing > 1"
+assert = "True"
+
+[[invariant]]
+id = "each-error"
+each = "missing"
+assert = "True"
+
+[[invariant]]
+id = "never-runs"
+when = "False"
+assert = "False"
+
+[[contract]]
+id = "acts-glob"
+act = ["b?ild", "re*", "[st]ell"]
+assert = "after.n == before.n + 1"
+
+[[contract]]
+id = "acts-string"
+act = "build"
+when = "get(line, 'ok')"
+assert = "state.x == 5 and prev.x == 5"

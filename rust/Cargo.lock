@@ -417,6 +417,7 @@ dependencies = [
  "fancy-regex",
  "ignore",
  "indexmap",
+ "libc",
  "rayon",
  "regex",
  "serde",

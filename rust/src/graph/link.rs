@@ -22,7 +22,7 @@ mod count;
 mod flow;
 mod helpers;
 
-pub use count::{Possible, Resolution};
+pub use count::{named, Possible, Resolution};
 
 use call::Resolver;
 
@@ -361,7 +361,7 @@ pub fn build_edges(g: &mut Graph, p: &Project) {
     let mut site_out: HashMap<(String, usize, i64, String), Targets> = HashMap::new();
     let mut edges: flow::Edges = Default::default();
     let mut redges: flow::Edges = Default::default();
-    let mut counts = count::Counts::default();
+    let mut counts = count::Counts { trace: g.trace.take(), ..Default::default() };
     {
         let mut r = Resolver {
             g,
@@ -408,7 +408,7 @@ pub fn build_edges(g: &mut Graph, p: &Project) {
                 if out.param_recv {
                     pending_recv.push((f.id.clone(), c.clone()));
                 }
-                counts.site(g, f, c, &out.targets);
+                counts.site(g, f, c, &out.targets[..out.primary]);
                 site_out.insert(key, out.targets.clone());
                 for (tid, exact) in &out.targets {
                     push(&mut edges, &mut redges, &f.id, tid, c.line, *exact);
@@ -422,6 +422,7 @@ pub fn build_edges(g: &mut Graph, p: &Project) {
     g.redges = redges;
     g.resolution = counts.res;
     g.possible = counts.possible;
+    g.trace = counts.trace;
 }
 
 /// C++: a class's members are declared in its header; the .cpp's functions

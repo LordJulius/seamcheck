@@ -1,0 +1,8 @@
+SEAMCHECK {"k": "state", "t": 0, "units": [{"id": "a", "hp": 10, "max_hp": 10, "dead": false, "wet": true, "x": 0}], "stones": [], "paused": false}
+SEAMCHECK {"k": "state", "t": 1, "units": [], "stones": [], "paused": false}
+SEAMCHECK {"k": "state", "t": 2, "units": [{"id": "a", "hp": 10, "max_hp": 10, "dead": false, "wet": true, "x": 0}], "stones": [], "paused": false}
+SEAMCHECK {"k": "state", "t": 3.5, "units": [{"id": "a", "hp": 10, "max_hp": 10, "dead": false, "wet": true, "x": 0}], "stones": [], "paused": false}
+SEAMCHECK {"k": "state", "t": 4.5, "units": [{"id": "a", "hp": 10, "max_hp": 10, "dead": false, "wet": true, "x": 0}], "stones": [], "paused": false}
+SEAMCHECK {"k": "state", "t": 5, "units": [{"id": "a", "hp": 10, "max_hp": 10, "dead": false, "wet": false, "x": 0}], "stones": [], "paused": false}
+SEAMCHECK {"k": "state", "t": 6, "units": [{"id": "a", "hp": 10, "max_hp": 10, "dead": false, "wet": true, "x": 0}], "stones": [], "paused": false}
+SEAMCHECK {"k": "end"}

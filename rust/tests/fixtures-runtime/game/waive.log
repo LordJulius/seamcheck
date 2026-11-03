@@ -1,0 +1,7 @@
+SEAMCHECK {"k": "state", "t": 0, "units": [{"id": "a", "hp": 11, "max_hp": 10, "dead": false, "wet": false, "x": 0}], "stones": ["s", "s"], "paused": false}
+SEAMCHECK {"k": "waive", "rules": ["hp", "nope"], "why": "clears the map"}
+SEAMCHECK {"k": "waive", "rules": "stones"}
+SEAMCHECK {"k": "waive", "rules": [5, null, "it's"], "why": ""}
+SEAMCHECK {"k": "waive", "rules": ["nope"], "why": 3}
+SEAMCHECK {"k": "state", "t": 1, "units": [{"id": "a", "hp": 11, "max_hp": 10, "dead": false, "wet": false, "x": 0}], "stones": ["s", "s"], "paused": false}
+SEAMCHECK {"k": "end"}

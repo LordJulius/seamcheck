@@ -1,0 +1,2 @@
+SEAMCHECK {"k": "state", "t": 0, "units": [{"id": "a", "hp": 11, "max_hp": 10, "dead": false, "wet": false, "x": 0}], "stones": [], "paused": false}SEAMCHECK {"k": "state", "t": 1, "units": [{"id": "a", "hp": 12, "max_hp": 10, "dead": false, "wet": false, "x": 0}], "stones": [], "paused": false}
+ÿþ junk SEAMCHECK {"k": "end"}

@@ -333,6 +333,10 @@ impl<'a> Q<'a> {
                 .iter()
                 .map(|(ext, x)| (ext.clone(), json!({"exact": x["exact"], "guess": x["guess"], "nothing": x["nothing"], "named": x["named"]})))
                 .collect();
+            let mut short = short;
+            if let Some(pr) = &self.g.precise {
+                short.insert("precise".into(), pr.to_json());
+            }
             out!(r, "{}", dumps_line(&Value::Object(short)));
             return r;
         }
@@ -355,6 +359,9 @@ impl<'a> Q<'a> {
                 pct("nothing"),
                 pct("named")
             );
+        }
+        if let Some(pr) = &self.g.precise {
+            out!(r, "{}", crate::graph::precise::summary(pr));
         }
         r
     }
