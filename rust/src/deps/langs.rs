@@ -245,7 +245,7 @@ pub fn python(ctx: &Ctx, mrel: &str) -> Vec<Dep> {
         }
     }
     let import = lit(&IMPORT, r"(?m)^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w., ]+))");
-    for rel in ctx.walk(mdir, &[".py"], &["pyproject.toml", "setup.py"]) {
+    for rel in ctx.walk(mdir, &[".py", ".pyw"], &["pyproject.toml", "setup.py"]) {
         let code = crate::scan::blank_text(&ctx.read(&rel), "python", false);
         let mut seen: HashSet<String> = HashSet::new();
         for r in import.find_iter(&code) {

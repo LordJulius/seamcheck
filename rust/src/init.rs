@@ -26,6 +26,7 @@ const LANG: &[(&str, &str)] = &[
     (".jsx", "JavaScript"),
     (".mjs", "JavaScript"),
     (".py", "Python"),
+    (".pyw", "Python"),
     (".rs", "Rust"),
     (".go", "Go"),
     (".cs", "C#"),
