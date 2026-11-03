@@ -355,6 +355,8 @@ pub fn build_edges(g: &mut Graph, p: &Project) {
     };
     g.children = children;
     let groups = pylink::groups(g, p);
+    let missing = pylink::group_problems(g, p);
+    g.problems.extend(missing);
     let order = walk_order(g);
     let mut site_out: HashMap<(String, usize, i64, String), Targets> = HashMap::new();
     let mut edges: flow::Edges = Default::default();

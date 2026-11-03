@@ -52,12 +52,12 @@ mostly parsing and linking: phase 1 takes the first, phase 2 the second.
 | `chains.py`, `lambdas.py` | 782 | receiver chains, lambda parameter types | `lang/chains.rs`, `lang/lambdas.rs` (+ `_assignments`: `lang/assign.rs`) | 2 (done) |
 | `infer.py` | 2,166 | receiver type inference over the graph | `graph/infer.rs` | 2 |
 | `precise.py` | 848 | language servers settle guessed calls | `precise.rs` | 4 |
-| `lint.py`, `lint_infra.py`, `lint_qml.py`, `structure.py`, `css.py` | 2,241 | `kind = "lint"` checks, `essential`, brace / JSX trees, CSS index | `lint/` | 1 (all but `auth-in-background` and `ets-owner`, which walk the graph: 2) |
+| `lint.py`, `lint_infra.py`, `lint_qml.py`, `structure.py`, `css.py` | 2,241 | `kind = "lint"` checks, `essential`, brace / JSX trees, CSS index | `lint/` | 1 (all but `auth-in-background` and `ets-owner`, which walk the graph: 3, done in `lint/graph.rs`) |
 | `tidy.py` | 980 | gate, dead / test-only / unused, dups, test audit, split, hotspots, remove, refs, moved code | `gate.rs` (1: changed lines, moved lines, forbid_added, moved refs) / `tidy/` | 1 / 3 |
 | `tidy_cli.py` | 241 | tidy command output | `main.rs` | 1 (gate) / 3 |
 | `exactness.py` | 176 | gate's import-resolution guard (warns) | `tidy/` | 3 |
 | `deps.py` | 796 | declared vs used dependencies | `deps.rs` | 3 |
-| `arch.py` | 737 | depend / layers / cycles / path rules, `graph` command | `arch.rs` | 3 |
+| `arch.py` | 737 | depend / layers / cycles / path rules, `graph` command | `arch/` (`mod.rs`, `path.rs`, `taint.rs`) | 3 (done) |
 | `queries.py` | 205 | answers as data (CLI and MCP share them) | `queries.rs` | 3 |
 | `structure.py` | 316 | (see lint) | `lint/structure.rs` | 1 |
 | `fingerprint.py` | 143 | content hashes, shared on-disk cache | `cache.rs` | 2 (only once parsing is worth caching; phase 1 needs no cache) |
@@ -125,8 +125,9 @@ side by side:
 4. Findings compare as multisets of (kind, rule, severity, file, line,
    message, snippet), plus `func` for files whose functions phase 1 knows
    (Elixir, and files no adapter reads). `config` notes about `[[bridge]]`s
-   are set aside (bridges are built with the graph). A bad regex is reported
-   by both, each in its own engine's words; that text isn't compared.
+   are compared too, now that bridges are built with the graph. A bad regex
+   is reported by both, each in its own engine's words; that text isn't
+   compared.
 5. It prints every difference and both wall times, and exits 1 on any.
 
 `tests/fixtures/*` are small projects from the Python tests (each Rust test
@@ -140,7 +141,8 @@ them, `--edges` the linked graph's edges from callers in those files
 `--chains` the shared text helpers on every call site, assignment, declared
 type and bracket of real files (Python answers the same sites on Rust's
 blanked code). `--ext` picks the languages; `--check` adds the phase 1
-comparison back.
+comparison back. `--formats` also runs `check` as text, sarif and github and
+compares them line for line (the `(N ms)` tail and bad-regex text aside).
 
 ## Known differences (by design or not worth matching)
 
@@ -163,8 +165,9 @@ argument (`sql_sinks`, `url_sinks`, `path_sinks`, `shell_sinks`,
 `url_severity`, `argv_severity`, `lookups`, `source_scope`, `[security]
 sanitizers`, Python `if` guards, ORM / HTTP receivers). Its Rust twin is
 `src/rules/security.rs`: the same functions over strings and a
-`TaintCtx` trait (`dirty(text)`, `rhs(name)`), so the path port (arch lane)
-calls them instead of re-deriving them. What the path port must also carry
+`TaintCtx` trait (`dirty(text)`, `rhs(name)`), so the path port (arch lane,
+done: `src/arch/path.rs`, `src/arch/taint.rs`) calls them instead of
+re-deriving them. What the path port must also carry
 from arch.py: `_sink` / `_Ctx` (the categorised verdict, a severity and note
 per hit), `_Taint.values` + `rhs()`, the Python guards from
 `security.guarded`, `lookups` cleaning an assignment, `_dirty` dropping
@@ -180,6 +183,27 @@ click, rich, microblog, flasky, tests/fixtures/flask_sqla. `tidy.is_entry`
 now also takes a framework registration on any object (`@bp.route`,
 `@socketio.on`, `@celery.task`, `@login.user_loader`): the gate lane's port
 of it needs the same regex.
+
+## Phase 3 status: `check` (arch-check lane, 2026-11-03)
+
+`check` runs every rule; `port-status` defers only kind `deps` (the deps lane).
+`arch/mod.rs`: the file dependency graph (`_file_deps`, import and exact-call
+edges, memoised per `via`), depend / layers / cycles (Tarjan, shortest loop)
+and the `graph` command (`--level file|dir`, `--via import|call|any`, text /
+json / mermaid / dot). `arch/path.rs` + `arch/taint.rs`: kind `path` with its
+taint (`_Taint`, `_Ctx`, `_sink`) over `rules/security.rs`. `rules/reach.rs`:
+kind `reach` and `together`'s `depth`. `lint/graph.rs`: `auth-in-background`,
+`ets-owner`. Func-scoped rules read the graph's functions, so they work over
+every adapter's files. `run_rules` loads the graph before its threads when a
+rule needs it; graph problems (`[[bridge]]` errors, environment notes) are
+`config` findings as in Python. A rule that panics is one error finding
+(`rules::isolate`, as `core.run_rules` since 4f1c1cd).
+
+Tests: `tests/arch.rs` (test_arch.py, TogetherFuncDepth, auth-in-background,
+EtsOwner), `tests/security_paths.rs` (test_security_precision.py's rule-level
+classes on the flask_sqla fixture), `tests/field_run.rs` (test_field_run.py).
+Parity: `--fixtures tests/fixtures` and `--fixtures rust/tests/fixtures` with
+`--check --formats`: 0 differences.
 
 ## Phase 1 status (2026-10-24)
 

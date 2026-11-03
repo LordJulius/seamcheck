@@ -369,7 +369,7 @@ pub fn parse(rel: &str, text: &str) -> Vec<Module> {
             fm.uses.push(format!("inc:{d}\0{}", im.s(1)));
         }
     }
-    let _ = type_imports;
+    fm.type_imports = type_imports.into_iter().collect();
 
     // --- function spans -------------------------------------------------------------
     let n = code.len();

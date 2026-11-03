@@ -34,6 +34,8 @@ struct Args {
     ext: Option<String>,
     q: seamcheck::queries::cli::Opts,
     html: Option<String>,
+    level: String,
+    via: String,
 }
 
 fn usage_error(msg: &str) -> ! {
@@ -43,7 +45,8 @@ fn usage_error(msg: &str) -> ! {
 }
 
 fn parse(argv: Vec<String>) -> Args {
-    let mut a = Args { root: ".".into(), format: "text".into(), ..Default::default() };
+    let mut a =
+        Args { root: ".".into(), format: "text".into(), level: "dir".into(), via: "import".into(), ..Default::default() };
     let mut i = 0;
     let mut positional: Vec<String> = Vec::new();
     let value = |i: &mut usize, name: &str| -> String {
@@ -96,6 +99,8 @@ fn parse(argv: Vec<String>) -> Args {
             "--errors-only" => a.errors_only = true,
             "--all" => a.all = true,
             "--ext" => a.ext = Some(val(&mut i)),
+            "--level" => a.level = val(&mut i),
+            "--via" => a.via = val(&mut i),
             "--fuzzy" => a.q.fuzzy = true,
             "--wide" => a.q.wide = true,
             "--code" => a.q.code = true,
@@ -106,7 +111,7 @@ fn parse(argv: Vec<String>) -> Args {
                 if flag == "--depth" { a.q.depth = n } else { a.q.limit = n }
             }
             "--no-cache" | "--exact" | "--precise" | "--ids" | "--apply" | "--strict" | "--echo" | "--hook" | "--force" => {}
-            "--log" | "--timeout" | "--seeds" | "--jobs" | "--level" | "--via" => {
+            "--log" | "--timeout" | "--seeds" | "--jobs" => {
                 let _ = val(&mut i);
             }
             _ if x.starts_with('-') && x.len() > 1 => usage_error(&format!("unrecognized arguments: {x}")),
@@ -179,6 +184,7 @@ fn main() {
         "callers" | "callees" | "path" | "find" | "context" | "search" | "impact" | "dead" | "stats" => query(&a, &root, t0),
         "map" => map(&a, &root),
         "serve" => seamcheck::serve::main(&root, &a.config),
+        "graph" => graph(&a, &root),
         other => {
             eprintln!(
                 "seamcheck (rust, phase 1): `{other}` is not ported yet; it needs the call graph (phase 2). \
@@ -233,6 +239,8 @@ fn check(a: &Args, root: &Path, t0: Instant) -> i32 {
             eprintln!("seamcheck: no rule or pack named {} (rules: {})", seamcheck::pyre::repr(name), ids.join(", "));
         }
     }
+    // (as Python's check does: the graph's parser errors and bridge notes are findings too)
+    let g = p.graph();
     let mut findings = run_rules(&p, only.as_deref(), skip.as_deref());
     if a.errors_only {
         findings.retain(|f| f.severity == "error");
@@ -278,8 +286,7 @@ fn check(a: &Args, root: &Path, t0: Instant) -> i32 {
         }
     }
     let errs = findings.iter().filter(|f| f.severity == "error").count();
-    // (phase 1 parses Elixir only: the count is of Elixir functions)
-    let nfuncs: usize = p.files.iter().filter(|f| seamcheck::lang::ported(f)).map(|f| p.modules(f).iter().map(|m| m.funcs.len()).sum::<usize>()).sum();
+    let nfuncs = g.funcs.len();
     println!(
         "\nseamcheck: {} rules, {} files, {} functions; {} errors, {} warnings  ({} ms)",
         p.config.list("rule").len(),
@@ -363,7 +370,7 @@ fn port_status(a: &Args, root: &Path) -> i32 {
         println!("{}", dumps(&Value::Array(v)));
     } else {
         let n = p.config.list("rule").len();
-        println!("{} of {} rules run in phase 1; deferred:", n - d.len(), n);
+        println!("{} of {} rules run; deferred:", n - d.len(), n);
         for (id, why) in &d {
             println!("  {id}: {why}");
         }
@@ -497,6 +504,31 @@ fn matrix(a: &Args, root: &Path) -> i32 {
         "\n+ handled   ~ intentional gap (except)   generic: the view's fallback host   MISSING not handled   extra: handled, never produced"
     );
     (bad > 0) as i32
+}
+
+/// `seamcheck graph [GLOB...] [--level file|dir] [--via import|call|any]
+/// [--format dot|mermaid|json]`: the dependency graph, cycles marked.
+fn graph(a: &Args, root: &Path) -> i32 {
+    for (flag, v, ok) in [("--level", &a.level, &["file", "dir"][..]), ("--via", &a.via, &["import", "call", "any"][..])] {
+        if !ok.contains(&v.as_str()) {
+            let choices: Vec<String> = ok.iter().map(|c| format!("'{c}'")).collect();
+            usage_error(&format!("argument {flag}: invalid choice: '{v}' (choose from {})", choices.join(", ")));
+        }
+    }
+    let p = Project::load(root, &a.config);
+    let g = seamcheck::arch::graph(&p, &a.level, &a.via, &a.args);
+    if matches!(a.format.as_str(), "dot" | "mermaid" | "json") {
+        println!("{}", seamcheck::arch::render(&g, &a.format));
+        return 0;
+    }
+    let cyc = seamcheck::arch::in_cycles(&g);
+    for (src, ds) in &g {
+        println!("{src}{}", if cyc.contains(src) { "  (in a cycle)" } else { "" });
+        for (dst, w) in ds {
+            println!("  -> {dst}{}", if a.level == "dir" { format!("  ({w} files)") } else { String::new() });
+        }
+    }
+    0
 }
 
 /// `seamcheck tighten`: run each command rule's `tighten` (its own allowlist

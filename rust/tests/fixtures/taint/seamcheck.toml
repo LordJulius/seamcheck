@@ -1,0 +1,10 @@
+[project]
+name = "t"
+
+[[rule]]
+id = "taint"
+kind = "path"
+from = ["web/**:*"]
+to = ['^subprocess\.(run|call)$', '^open$']
+source = 'request\.args'
+unless = ["escape"]

@@ -2,7 +2,7 @@
 //! projects and diff their findings.
 //!
 //!   parity [--python DIR] [--rust BIN] [--gate] [--staged] [--fixtures DIR]
-//!          [--parse] [--edges] [--untyped] [--ext .ex,.exs] [--check] [--queries] [--serve] [REPO...]
+//!          [--parse] [--edges] [--untyped] [--ext .ex,.exs] [--check] [--formats] [--queries] [--serve] [REPO...]
 //!
 //! For each REPO (and each sub-directory of --fixtures): `check --format json`
 //! from both (Python with `--skip` for the rules `port-status` defers), and
@@ -10,6 +10,10 @@
 //! set aside). Findings compare on (rule, severity, file, line, message,
 //! snippet), plus `func` where phase 1 knows the file's functions. Prints the
 //! differences and both wall times; exits 1 on any difference.
+//!
+//! --formats: `check` in text, sarif and github too, compared line for line
+//! (the text's closing "(N ms)" aside): the order findings print in, not
+//! only the set.
 //!
 //! --parse: each file's modules as its adapter gives them (every model
 //! field but the text), compared file by file; --edges: the call graph's
@@ -53,6 +57,7 @@ struct Opts {
     check: bool,
     queries: bool,
     serve: bool,
+    formats: bool,
     ext: Vec<String>,
     repos: Vec<PathBuf>,
 }
@@ -71,6 +76,7 @@ fn opts() -> Opts {
         check: false,
         queries: false,
         serve: false,
+        formats: false,
         ext: seamcheck::lang::ported_exts().iter().map(|s| s.to_string()).collect(),
         repos: vec![],
     };
@@ -95,6 +101,7 @@ fn opts() -> Opts {
             "--check" => o.check = true,
             "--queries" => o.queries = true,
             "--serve" => o.serve = true,
+            "--formats" => o.formats = true,
             "--ext" => {
                 i += 1;
                 o.ext = args[i].split(',').map(String::from).collect();
@@ -112,7 +119,7 @@ fn opts() -> Opts {
             }
             "-h" | "--help" => {
                 println!(
-                    "parity [--python DIR] [--rust BIN] [--gate] [--staged] [--fixtures DIR] \
+                    "parity [--python DIR] [--rust BIN] [--gate] [--staged] [--fixtures DIR] [--formats] \
                      [--parse] [--edges] [--untyped] [--ext .ex,.exs] [--check] [--queries] [--serve] [REPO...]"
                 );
                 std::process::exit(0);
@@ -162,10 +169,6 @@ fn parse(r: &Ran, who: &str) -> Value {
     })
 }
 
-fn func_known(file: &str) -> bool {
-    seamcheck::lang::ported(file) || !seamcheck::project::has_adapter(file)
-}
-
 type Key = (String, String, String, u64, String, String, String);
 
 fn key(f: &Value, with_snippet: bool) -> Key {
@@ -182,7 +185,7 @@ fn key(f: &Value, with_snippet: bool) -> Key {
         s("rule"),
         s("severity"),
         f.get("line").and_then(|x| x.as_u64()).unwrap_or(0),
-        format!("{file}\u{0}{}", if func_known(&file) { s("func") } else { String::new() }),
+        format!("{file}\u{0}{}", s("func")),
         message,
         if with_snippet { s("snippet") } else { String::new() },
     )
@@ -196,13 +199,10 @@ fn bag(v: &[Value], with_snippet: bool) -> BTreeMap<Key, usize> {
     m
 }
 
-/// Python findings phase 1 sets aside: bridges (built with the graph) and,
-/// in a gate, the graph-only kinds and the rules phase 1 defers.
+/// Python findings the port sets aside: in a gate, the graph-only kinds and
+/// the rules `port-status` defers.
 fn phase1(f: &Value, deferred: &[String]) -> bool {
     let s = |k: &str| f.get(k).and_then(|x| x.as_str()).unwrap_or("");
-    if s("rule") == "config" && s("message").contains(": bridge ") {
-        return false;
-    }
     if matches!(s("kind"), "unused" | "test_only" | "dups" | "tests" | "exactness") {
         return false;
     }
@@ -225,6 +225,41 @@ fn diff(label: &str, p: &[Value], r: &[Value], with_snippet: bool) -> usize {
             n += c - pc;
             println!("  {label} only rust   ({}x): {}", c - pc, show(k));
         }
+    }
+    n
+}
+
+/// Two outputs line for line (a text report's "(N ms)" aside).
+fn lines_diff(label: &str, p: &str, r: &str) -> usize {
+    let norm = |t: &str| -> Vec<String> {
+        t.lines()
+            .map(|l| match (l.starts_with("seamcheck: "), l.rfind("  (")) {
+                (true, Some(k)) if l.ends_with(" ms)") => l[..k].to_string(),
+                _ => l.to_string(),
+            })
+            .map(|l| {
+                // (a bad regex: each engine's own words, as in `key`)
+                let Some(k) = l.find("bad pattern in rule ") else { return l };
+                match l[k..].find(": ") {
+                    Some(j) => format!("{}<the regex engine's error>", &l[..k + j + 2]),
+                    None => l,
+                }
+            })
+            .collect()
+    };
+    let (a, b) = (norm(p), norm(r));
+    let mut n = 0;
+    for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+        if x != y {
+            n += 1;
+            if n <= max_show() {
+                println!("  {label} line {}: python {x:?} | rust {y:?}", i + 1);
+            }
+        }
+    }
+    if a.len() != b.len() {
+        n += 1;
+        println!("  {label}: {} lines vs {}", a.len(), b.len());
     }
     n
 }
@@ -630,6 +665,16 @@ fn main() {
             deferred.len()
         );
         total += diff("check", &pv, &rv, true);
+        if o.formats {
+            for fmt in ["text", "sarif", "github"] {
+                let mut a = vec!["check", "--format", fmt];
+                if !deferred.is_empty() {
+                    a.extend(["--skip", skip.as_str()]);
+                }
+                let (pt, rt) = (py(&o, repo, &a), rs(&o, repo, &["check", "--format", fmt]));
+                total += lines_diff(&format!("check {fmt}"), &pt.out, &rt.out);
+            }
+        }
         if o.gate {
             let mut gargs = vec!["gate", "--format", "json"];
             if o.staged {

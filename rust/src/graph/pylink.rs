@@ -433,6 +433,21 @@ pub fn groups(g: &Graph, p: &Project) -> HashMap<String, String> {
     out
 }
 
+/// A `[project.groups]` file seamcheck doesn't know is a config problem (the
+/// binding would quietly fall back to name guesses) (core._groups).
+pub fn group_problems(g: &Graph, p: &Project) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(t) = p.config.table("project").get("groups").and_then(|x| x.as_object()) {
+        for (gid, rel) in t {
+            let r = rel.as_str().map(String::from).unwrap_or_else(|| crate::config::py_str(rel));
+            if g.by_file.get(&r).map(|v| v.is_empty()).unwrap_or(true) {
+                out.push(format!("[project.groups] {gid} = {}: no such file in the project", crate::pyre::repr(&r)));
+            }
+        }
+    }
+    out
+}
+
 /// core._typed_targets (without Go): the functions `x.name()` reaches when x
 /// is declared `ty`, and whether ty is a project type at all.
 pub fn typed_targets<'a>(g: &'a Graph, m: &Module, ty: &str, name: &str) -> (Vec<&'a Func>, bool) {

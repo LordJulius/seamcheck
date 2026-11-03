@@ -1,9 +1,10 @@
 //! `kind = "lint"`: structural checks that know a language or UI toolkit
 //! (lint.py, lint_infra.py, lint_qml.py). The registry keeps Python's names,
-//! default scopes, options and flags; a check that needs the call graph is
-//! registered without a function and reported as deferred (phase 2).
+//! default scopes, options and flags. The checks that walk the call graph
+//! (`graph.rs`) load it through `Project::graph`.
 
 pub mod css;
+pub mod graph;
 pub mod infra;
 pub mod qml;
 pub mod structure;
@@ -23,7 +24,7 @@ pub type LintFn = fn(&str, &str, &str, &Map<String, Value>, &Project) -> Result<
 
 pub struct LintDef {
     pub name: &'static str,
-    /// None: needs the call graph (phase 2)
+    /// None: not ported (the rule is reported as deferred)
     pub f: Option<LintFn>,
     pub default_in: &'static [&'static str],
     pub options: &'static [&'static str],
@@ -46,7 +47,7 @@ pub static LINTS: &[LintDef] = &[
     lint!("qml-anchors-in-positioner", Some(ui::qml_anchors_in_positioner), ["**/*.qml"], [], false, true),
     lint!("kotlin-init-order", Some(ui::kotlin_init_order), ["**/*.kt"], ["depth"], false, true),
     lint!("id-kind-mix", Some(ui::id_kind_mix), ["**/*.kt", "**/*.ts", "**/*.tsx", "**/*.js", "**/*.ex"], ["named"], false, true),
-    lint!("ets-owner", None, ["**/*.ex"], ["owners", "depth", "tests"], false, false),
+    lint!("ets-owner", Some(graph::ets_owner), ["**/*.ex"], ["owners", "depth", "tests"], false, false),
     lint!("handle-info-catch-all", Some(ui::handle_info_catch_all), ["**/*.ex"], ["subscribe"], false, false),
     lint!("css-popup-clipped", Some(ui::css_popup_clipped), ["**/*.tsx", "**/*.jsx"], ["css"], false, false),
     lint!("css-overlay-order", Some(ui::css_overlay_order), ["**/*.css"], ["css", "overlays", "shell", "above", "min_shell_z"], false, false),
@@ -55,7 +56,7 @@ pub static LINTS: &[LintDef] = &[
     lint!("shell-reexec-watch", Some(infra::shell_reexec_watch), ["**/*.sh", "deploy/**", "scripts/**"], [], true, true),
     lint!("shell-name-domain", Some(infra::shell_name_domain), ["**/*.sh", "deploy/**", "scripts/**"], ["names"], true, true),
     lint!("home-paths-mounted", Some(infra::home_paths_mounted), ["lib/**/*.ex"], ["compose", "service", "home", "allow"], false, false),
-    lint!("auth-in-background", None, ["lib/**/*.ex"], ["auth", "roots", "depth"], false, false),
+    lint!("auth-in-background", Some(graph::auth_in_background), ["lib/**/*.ex"], ["auth", "roots", "depth"], false, false),
     lint!("stale-module-ref", Some(infra::stale_module_ref), ["lib/**/*.ex"], ["namespaces"], false, true),
     lint!("lockfile-sync", Some(infra::lockfile_sync), ["**/package-lock.json"], [], true, true),
     lint!("path-unit-oneshot", Some(infra::path_unit_oneshot), ["**/*.path"], ["settles"], true, true),

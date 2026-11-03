@@ -170,6 +170,9 @@ pub struct Module {
     pub c_includes: Vec<String>,
     /// JS: `export * from "pkg"` of a library (core fills it)
     pub ext_star: bool,
+    /// JS / TS: local names imported for their types only (`import type`,
+    /// `import { type X }`): erased at runtime, no file dependency (arch)
+    pub type_imports: BTreeSet<String>,
 }
 
 impl Module {

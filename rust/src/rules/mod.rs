@@ -1,10 +1,11 @@
-//! Running the rules (core.run_rules and the rule kinds that need no call
-//! graph: forbid, require, together, coverage, fanout, command, lint,
-//! essential). Kinds and options that need the graph are reported by
-//! [`deferred`] and left to phase 2.
+//! Running the rules (core.run_rules): forbid, require, together, coverage,
+//! fanout, command, lint, essential here; reach and together's depth in
+//! `reach.rs`; depend, layers, cycles and path in `crate::arch`. What isn't
+//! ported yet is reported by [`deferred`].
 
 pub mod command;
 pub mod fanout;
+pub mod reach;
 pub mod security;
 
 use rayon::prelude::*;
@@ -12,7 +13,7 @@ use serde_json::{Map, Value};
 
 use crate::config::{self, file_of, id, list_or, s, severity, str_list, Rule};
 use crate::glob::{close_match, fnmatchcase, glob_re, match_any, Globs};
-use crate::project::{has_adapter, Finding, Mode, Project};
+use crate::project::{Finding, Mode, Project};
 use crate::pyre::{repr, rx, strip, take_chars, Rx};
 use crate::walk::{list_files, DEFAULT_EXCLUDE};
 
@@ -116,11 +117,10 @@ pub fn scope_files(p: &Project, r: &Rule) -> Vec<String> {
     pool.into_iter().filter(|f| gi.any(f) && !gs.any(f)).collect()
 }
 
-/// Why phase 1 can't run this rule exactly as Python does (None: it can).
-pub fn deferred(p: &Project, r: &Rule) -> Option<String> {
+/// Why the port can't run this rule exactly as Python does yet (None: it can).
+pub fn deferred(r: &Rule) -> Option<String> {
     let kind = s(r, "kind").unwrap_or("forbid");
     match kind {
-        "reach" | "depend" | "layers" | "cycles" | "path" => return Some(format!("kind {kind} walks the call graph")),
         "deps" => return Some("kind deps reads the dependency analysis".into()),
         "lint" => {
             let name = s(r, "lint").unwrap_or("");
@@ -135,67 +135,15 @@ pub fn deferred(p: &Project, r: &Rule) -> Option<String> {
         }
         _ => {}
     }
-    if kind == "together" && r.get("depth").is_some() {
-        return Some("together with depth follows calls".into());
-    }
-    // functions of a language phase 1 doesn't parse yet
-    let wants_funcs = match kind {
-        "together" => !matches!(s(r, "scope"), Some("file") | Some("near")) || r.get("func").is_some(),
-        "require" => r.get("func").is_some(),
-        _ => false,
-    } || str_list(r, "allow").unwrap_or_default().iter().any(|a| a.contains(':'));
-    if wants_funcs && matches!(kind, "together" | "require" | "forbid" | "lint") {
-        let files = if kind == "require" {
-            list_or(r, "in", &[]).into_iter().flat_map(|spec| expand_spec(p, &spec)).collect()
-        } else {
-            scope_files(p, r)
-        };
-        if let Some(f) = files.iter().find(|f| !p.funcs_known(f) && p.file_set.contains(*f)) {
-            return Some(format!("needs the functions of {f} (its adapter is phase 2)"));
-        }
-    }
-    if kind == "fanout" {
-        let mut specs: Vec<&Map<String, Value>> = Vec::new();
-        if let Some(Value::Object(src)) = r.get("source") {
-            specs.push(src);
-        }
-        if let Some(Value::Object(views)) = r.get("views") {
-            specs.extend(views.values().filter_map(|v| v.as_object()));
-        }
-        for sp in specs {
-            if sp.get("func").is_some() {
-                let inn = list_or(sp, "in", &["**/*"]);
-                let skip = list_or(sp, "skip", &[]);
-                if let Some(f) =
-                    p.files.iter().find(|f| match_any(f, &inn) && !match_any(f, &skip) && !p.funcs_known(f) && has_adapter(f))
-                {
-                    return Some(format!("harvests functions of {f} (its adapter is phase 2)"));
-                }
-            }
-        }
-    }
     None
 }
 
-fn expand_spec(p: &Project, spec: &str) -> Vec<String> {
-    if spec.contains(['*', '?', '[']) {
-        p.files.iter().filter(|f| match_any(f, &[spec])).cloned().collect()
-    } else {
-        vec![spec.to_string()]
-    }
-}
-
-/// The ids of rules phase 1 leaves to phase 2, with the reason.
+/// The ids of rules the port doesn't run yet, with the reason.
 pub fn deferred_rules(p: &Project) -> Vec<(String, String)> {
-    p.config.rules().filter_map(|r| deferred(p, r).map(|why| (id(r).to_string(), why))).collect()
+    p.config.rules().filter_map(|r| deferred(r).map(|why| (id(r).to_string(), why))).collect()
 }
 
 pub fn run_rules(p: &Project, only: Option<&[String]>, skip: Option<&[String]>) -> Vec<Finding> {
-    let mut out: Vec<Finding> = p
-        .config_problems
-        .iter()
-        .map(|pr| Finding::new("config", "error", pr.split(':').next().unwrap_or(""), 0, "", pr.clone()))
-        .collect();
     let rules: Vec<&Rule> = p
         .config
         .rules()
@@ -204,6 +152,17 @@ pub fn run_rules(p: &Project, only: Option<&[String]>, skip: Option<&[String]>) 
             !(only.map(|o| !o.is_empty()).unwrap_or(false) && !picked(rid, only)) && !picked(rid, skip)
         })
         .collect();
+    // the graph before the threads start (a worker must never wait on its own load)
+    if rules.iter().any(|r| reach::needs_graph(r) && deferred(r).is_none()) {
+        p.graph();
+    }
+    let config = |pr: &String, sev: &str| Finding::new("config", sev, pr.split(':').next().unwrap_or(""), 0, "", pr.clone());
+    let mut out: Vec<Finding> = p.config_problems.iter().map(|pr| config(pr, "error")).collect();
+    if let Some(g) = p.graph_loaded() {
+        // parser errors, [project.groups] and [[bridge]] problems, then what couldn't be built here
+        out.extend(g.problems.iter().map(|pr| config(pr, "error")));
+        out.extend(g.env_notes.iter().map(|pr| config(pr, "warn")));
+    }
     let timing = std::env::var_os("SEAMCHECK_RS_TIMING").is_some();
     let one = |r: &Rule| {
         let t = std::time::Instant::now();
@@ -270,7 +229,7 @@ pub fn sort_findings(out: &mut [Finding]) {
 pub fn run_one(p: &Project, r: &Rule) -> Vec<Finding> {
     let rid = id(r);
     let kind = s(r, "kind").unwrap_or("forbid");
-    if let Some(why) = deferred(p, r) {
+    if let Some(why) = deferred(r) {
         if std::env::var_os("SEAMCHECK_RS_QUIET").is_none() {
             eprintln!("seamcheck-rs: rule {rid} deferred: {why}");
         }
@@ -285,6 +244,11 @@ pub fn run_one(p: &Project, r: &Rule) -> Vec<Finding> {
         "command" => command::command(p, r),
         "lint" => lint(p, r),
         "essential" => essential(p, r),
+        "reach" => reach::reach(p, r),
+        "depend" => crate::arch::depend(p, r),
+        "layers" => crate::arch::layers(p, r),
+        "cycles" => crate::arch::cycles(p, r),
+        "path" => crate::arch::path::path(p, r),
         _ => {
             return vec![Finding::new(rid, "error", &file_of(r), 0, "", format!("unknown rule kind {}", repr(kind)))];
         }
@@ -526,7 +490,11 @@ fn together(p: &Project, r: &Rule) -> Res<Vec<Finding>> {
                 if allowed(p, rel, func.as_ref(), &allow) || suppressed(&raw, line, rid) {
                     continue;
                 }
-                let missing: Vec<&str> = thens.iter().filter(|t| !t.is_match(&body)).map(|t| t.pattern()).collect();
+                let mut missing: Vec<std::sync::Arc<Rx>> = thens.iter().filter(|t| !t.is_match(&body)).cloned().collect();
+                if let (false, Some(f), true) = (missing.is_empty(), &func, config::truthy(r.get("depth"))) {
+                    missing = reach::missing_after_calls(p, r, rel, f, missing);
+                }
+                let missing: Vec<&str> = missing.iter().map(|t| t.pattern()).collect();
                 if !missing.is_empty() {
                     let msg =
                         s(r, "message").map(String::from).unwrap_or_else(|| format!("missing: {}", missing.join(", ")));

@@ -72,6 +72,7 @@ pub struct Project {
     texts: RwLock<HashMap<(String, Mode), Arc<Vec<String>>>>,
     ex: RwLock<HashMap<String, Arc<Vec<Module>>>>,
     all_modules: OnceLock<Vec<String>>,
+    graph: OnceLock<Arc<crate::graph::Graph>>,
     memo: Memo,
 }
 
@@ -145,6 +146,7 @@ impl Project {
             texts: RwLock::new(HashMap::new()),
             ex: RwLock::new(HashMap::new()),
             all_modules: OnceLock::new(),
+            graph: OnceLock::new(),
             memo: Mutex::new(HashMap::new()),
         }
     }
@@ -188,11 +190,6 @@ impl Project {
     /// Whole-text form of `text_for` (joined with newlines).
     pub fn joined(&self, rel: &str, mode: Mode) -> String {
         self.text_for(rel, mode).join("\n")
-    }
-
-    /// Do we know this file's functions? (Its adapter is ported, or it has none at all.)
-    pub fn funcs_known(&self, rel: &str) -> bool {
-        lang::ported(rel) || !has_adapter(rel)
     }
 
     /// The file's modules as its adapter gives them (project.by_file, before
@@ -268,6 +265,18 @@ impl Project {
         }
         let _ = self.all_modules.set(out);
         self.all_modules.get().unwrap()
+    }
+
+    /// The linked call graph (bridges in), loaded on first use (core.load).
+    /// Load it outside a parallel section first (`run_rules` does): a rayon
+    /// worker that waits on its own initialisation would never return.
+    pub fn graph(&self) -> Arc<crate::graph::Graph> {
+        self.graph.get_or_init(|| Arc::new(crate::graph::Graph::load(self))).clone()
+    }
+
+    /// Has the graph been loaded already?
+    pub fn graph_loaded(&self) -> Option<Arc<crate::graph::Graph>> {
+        self.graph.get().cloned()
     }
 
     /// A value computed once per run under a key (brace trees, the CSS index...).

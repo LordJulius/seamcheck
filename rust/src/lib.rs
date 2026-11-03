@@ -2,6 +2,7 @@
 //! rules between its parts. Deterministic and local. The CLI, the TOML and
 //! the Python test suite are the contract (see PORT.md).
 
+pub mod arch;
 pub mod config;
 pub mod gate;
 pub mod glob;

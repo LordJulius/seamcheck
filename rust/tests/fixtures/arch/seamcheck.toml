@@ -1,0 +1,39 @@
+[project]
+name = "t"
+
+[[rule]]
+id = "ui-not-db"
+kind = "depend"
+from = ["src/ui/**"]
+to = ["src/db/**"]
+
+[[rule]]
+id = "layers"
+kind = "layers"
+layers = [{ name = "ui", in = ["src/ui/**"] }, { name = "db", in = ["src/db/**"] }, { name = "util", in = ["src/util/**"] }]
+
+[[rule]]
+id = "no-cycles"
+kind = "cycles"
+in = ["src/**"]
+
+[[rule]]
+id = "no-shell"
+kind = "path"
+from = ["web/app.py:*"]
+to = ['^subprocess\.run$']
+
+[[rule]]
+id = "no-tainted-shell"
+kind = "path"
+from = ["web/app.py:*"]
+to = ['^subprocess\.run$']
+source = 'request\.args'
+unless = ["safe"]
+
+[[rule]]
+id = "no-package-cycles"
+kind = "cycles"
+in = ["src/main/java/**"]
+level = "dir"
+via = "any"

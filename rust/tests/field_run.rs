@@ -1,8 +1,7 @@
 //! Bugs a field run found (a Flask repo with its own seamcheck.toml,
-//! 2026-11-03), ported from test_field_run.py: one broken rule took every
-//! other rule down, a bare `import time` resolved to an unrelated
-//! app/utils/time.py, and `.pyw` files were not read at all. (The reach
-//! rule's crash is Python's alone: kind reach is ported with its own test.)
+//! 2026-11-03), ported from test_field_run.py: a reach rule crashed `check`,
+//! one broken rule took every other rule down, a bare `import time` resolved
+//! to an unrelated app/utils/time.py, and `.pyw` files were not read at all.
 
 mod common;
 
@@ -18,6 +17,46 @@ fn project(files: &[(&str, &str)], rules: &str) -> (tempfile::TempDir, Project) 
     std::fs::write(d.path().join("seamcheck.toml"), format!("[project]\nname = \"t\"\n{rules}")).unwrap();
     let p = Project::load(d.path(), &[]);
     (d, p)
+}
+
+const ROUTES: &[(&str, &str)] = &[
+    (
+        "app/routes/x.py",
+        "from app.auth import _caller, _admin_caller\nfrom app.db import db\n\n\ndef api_list():\n    _caller()\n    return []\n\n\n\
+         def api_save():\n    db.session.commit()\n    return 1\n\n\ndef tool_archive():\n    _admin_caller()\n    db.session.commit()\n",
+    ),
+    ("app/auth.py", "def _caller():\n    return 1\n\n\ndef _admin_caller():\n    return 2\n"),
+    ("app/db.py", "class _S:\n    def commit(self):\n        pass\n\n\nclass _Db:\n    session = _S()\n\n\ndb = _Db()\n"),
+];
+
+const REACH: &str = r#"
+[[rule]]
+id = "routes-check-caller"
+kind = "reach"
+from = ["app/routes/x.py:api_*", "app/routes/x.py:tool_archive"]
+to = ["_caller", "_admin_caller"]
+depth = 2
+
+[[rule]]
+id = "writes-check-caller"
+kind = "reach"
+from = ["app/routes/x.py:*"]
+when = 'db\.session\.commit\(\)'
+to = ["_caller", "_admin_caller"]
+depth = 2
+"#;
+
+// test_field_run.py: ReachRules.test_a_reach_rule_runs_with_and_without_when
+#[test]
+fn a_reach_rule_runs_with_and_without_when() {
+    let (_d, p) = project(ROUTES, REACH);
+    let mut got: Vec<(String, String)> = run_rules(&p, None, None).into_iter().map(|f| (f.rule, f.func)).collect();
+    got.sort();
+    // api_save reaches neither; the rest reach one (any mode)
+    assert_eq!(
+        got,
+        vec![("routes-check-caller".into(), "api_save".into()), ("writes-check-caller".into(), "api_save".into())]
+    );
 }
 
 // test_field_run.py: BrokenRule.test_a_rule_that_crashes_is_one_finding_and_the_others_run
@@ -53,7 +92,7 @@ fn callees(g: &seamcheck::graph::Graph, fid: &str, exact_only: bool) -> Vec<Stri
 #[test]
 fn bare_imports_stdlib_first_and_never_an_unrelated_lone_file() {
     let (_d, p) = project(IMPORTS, "");
-    let g = seamcheck::graph::Graph::load(&p);
+    let g = p.graph();
     // a stdlib name is the stdlib's
     assert!(g.modules["CKSuper/tools/x/engines/foo"].external.contains("time"));
     let foo = callees(&g, "CKSuper/tools/x/engines/foo.go", false);
@@ -73,8 +112,8 @@ fn a_pyw_file_is_python() {
         "\n[[rule]]\nid = \"dl\"\nkind = \"require\"\nin = [\"launcher.pyw\"]\nfunc = \"download\"\npattern = \"fetch\"\n",
     );
     assert!(!run_rules(&p, None, None).iter().any(|f| f.rule == "dl"));
-    let g = seamcheck::graph::Graph::load(&p);
-    assert_eq!(g.by_name["download"], vec!["launcher.download".to_string()]);
+    let g = p.graph();
+    assert_eq!(g.find("download").iter().map(|f| f.id.clone()).collect::<Vec<_>>(), vec!["launcher.download".to_string()]);
     assert!(callees(&g, "launcher.download", false).contains(&"launcher.fetch".to_string()));
     assert_eq!(seamcheck::project::scan_family("launcher.pyw"), "python");
 }
