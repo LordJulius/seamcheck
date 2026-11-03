@@ -13,7 +13,7 @@ use crate::graph::infer::{esc, re, rxd};
 use crate::graph::Graph;
 use crate::model::{Call, Func};
 use crate::pyre::{strip, Rx};
-use crate::rules::security::{guarded, Sinks, TaintCtx};
+use crate::rules::security::{anchored, guarded, Sinks, TaintCtx};
 
 /// The sanitizers of `unless`: a call whose name holds one, and a method of that name.
 pub struct Clean {
@@ -496,8 +496,10 @@ impl Taint {
             for am in re!(r"(?m)^([ \t]*)(?:el)?if[ \t]+(.+?):(?=[ \t]*$|[ \t]+(?:return|raise|abort|continue|break)\b)")
                 .find_iter(&code)
             {
-                let s2 = am.span(2).unwrap().0;
-                for (k, (name, inside)) in guarded(am.s(2)).into_iter().enumerate() {
+                let (s2, e2) = am.span(2).unwrap();
+                let cond = slice(&raw, s2, e2); // (the raw text: `re.match(r"^[a-z]+$", x)` shows its pattern)
+                let anchored = g.module(&f.module).map(anchored).unwrap_or_default();
+                for (k, (name, inside)) in guarded(cond, &anchored).into_iter().enumerate() {
                     let indent = format!("{}{}", am.s(1), if inside { " " } else { "" });
                     found.push((am.start() + k, indent, vec![name], s2 + k));
                     guards.insert(s2 + k);
