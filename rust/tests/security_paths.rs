@@ -1,6 +1,6 @@
 //! The security pack's taint rules end to end (kind = "path" calling
 //! rules::security), ported from test_security_precision.py's rule-level
-//! and test_security_round2.py's rule-level classes, and the round-3 app shape (their text helpers are
+//! and test_security_round2/3/4.py's rule-level classes (their text helpers are
 //! ported in src/rules/security.rs).
 
 mod common;
@@ -319,9 +319,9 @@ fn a_relative_fetch_is_same_origin() {
     );
 }
 
-/// (severity, sink file, sink line) of the security pack on one of the Python suite's
-/// fixtures (copied, so nothing is written beside it); a finding with no chain is where it is.
-fn app_shape(name: &str) -> Vec<(String, String, usize)> {
+/// (severity, file, line) of the security findings on one of the Python suite's fixtures
+/// (tests/fixtures/NAME, copied so nothing is written beside it).
+fn fixture_findings(name: &str) -> Vec<(String, String, usize)> {
     std::env::set_var("SEAMCHECK_RS_QUIET", "1");
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures").join(name);
     let d = tempfile::tempdir().unwrap();
@@ -343,31 +343,20 @@ fn app_shape(name: &str) -> Vec<(String, String, usize)> {
     got
 }
 
-fn at(sev: &str, file: &str, line: usize) -> (String, String, usize) {
-    (sev.into(), file.into(), line)
-}
-
 // test_security_precision.py: TheAppShape.test_only_the_injections_are_errors
 #[test]
 fn only_the_injections_are_errors() {
-    let mut want: Vec<(String, String, usize)> = [58, 76, 106, 120, 144].iter().map(|ln| at("error", "app/main/routes.py", *ln)).collect();
+    let got = fixture_findings("flask_sqla");
+    let mut want: Vec<(String, String, usize)> =
+        [58, 76, 106, 120, 144].iter().map(|ln| ("error".to_string(), "app/main/routes.py".to_string(), *ln)).collect();
     want.extend([
-        at("error", "run.py", 6),
-        at("error", "server.js", 11),
-        at("error", "server.js", 16),
-        at("warn", "app/main/routes.py", 113),
-        at("warn", "tools/viewer.py", 31),
+        ("error".into(), "run.py".into(), 6),
+        ("error".into(), "server.js".into(), 11),
+        ("error".into(), "server.js".into(), 16),
+        ("warn".into(), "app/main/routes.py".into(), 113),
+        ("warn".into(), "tools/viewer.py".into(), 31),
     ]);
-    assert_eq!(app_shape("flask_sqla"), want);
-}
-
-// test_security_round3.py: TheAppShape.test_only_the_injections_are_errors
-#[test]
-fn round3_only_the_injections_are_errors() {
-    assert_eq!(
-        app_shape("flask_round3"),
-        vec![at("error", "app/main/files.py", 40), at("error", "app/main/files.py", 55), at("warn", "app/main/files.py", 50)]
-    );
+    assert_eq!(got, want);
 }
 
 fn copy(from: &std::path::Path, to: &std::path::Path) {
@@ -493,3 +482,147 @@ fn a_parameter_its_callers_fill_with_same_origin_paths_is_clean() {
         "{got:?}"
     );
 }
+
+// ---- test_security_round3.py / test_security_round4.py: the rule-level classes (generated from the
+// Python tests' own inputs and findings by the security lane; each names the test it ports) ----
+
+// test_security_round3.py: FilledBuffers.test_a_buffer_written_to_is_still_a_buffer
+#[test]
+fn round3_a_buffer_written_to_is_still_a_buffer() {
+    let files: &[(&str, &str)] = &[
+        ("app/pdf.py", "import io\nfrom flask import render_template\n\n\ndef render_pdf(template_name, **context):\n    html = render_template(template_name, **context)\n    buf = io.BytesIO()\n    buf.write(html.encode())\n    buf.seek(0)\n    return buf\n"),
+        ("app/routes.py", "import io, os\nfrom io import BytesIO\nfrom pathlib import Path\nfrom urllib.parse import urlencode\nfrom sqlalchemy import text\nfrom flask import redirect, request, send_file, url_for\nfrom app import db\n\n\nfrom app.pdf import render_pdf\n\n\ndef invoice():\n    inv = request.args.get('id')\n    pdf_buffer = render_pdf('invoice.html', inv=inv)\n    return send_file(pdf_buffer, mimetype='application/pdf', download_name=f'inv-{inv}.pdf')\n\n\ndef notes():\n    data = request.args['d'].encode()\n    buffer = io.BytesIO()\n    buffer.write(data)\n    buffer.seek(0)\n    return send_file(buffer, mimetype='text/plain')\n\n\ndef rows():\n    buffer = BytesIO()\n    for r in request.args.getlist('r'):\n        buffer.write(r.encode())\n    return send_file(buffer, as_attachment=True)\n\n\ndef swapped():\n    buffer = io.BytesIO()\n    buffer = request.args['p']\n    return send_file(buffer)\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+        ("python-injection".into(), "error".into(), "app/routes.py".into(), 37),
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round3.py: ConfinedPaths.test_a_path_a_method_checks_under_its_roots
+#[test]
+fn round3_a_path_a_method_checks_under_its_roots() {
+    let files: &[(&str, &str)] = &[
+        ("app/ctl.py", "from pathlib import Path\n\n\nclass HostController:\n    roots = [Path('/srv/a'), Path('/srv/b')]\n\n    def _is_allowed_path(self, path):\n        resolved = Path(path).resolve()\n        for root in self.roots:\n            try:\n                resolved.relative_to(root)\n                return resolved\n            except ValueError:\n                continue\n        raise PermissionError(path)\n\n    def resolve_managed_path(self, raw, must_exist=False):\n        path = self._is_allowed_path(raw)\n        if must_exist and not path.exists():\n            raise FileNotFoundError(raw)\n        return path\n\n    def loose(self, raw):\n        return Path(raw).resolve()\n\n\nhost_controller = HostController()\n"),
+        ("app/routes.py", "import io, os\nfrom io import BytesIO\nfrom pathlib import Path\nfrom urllib.parse import urlencode\nfrom sqlalchemy import text\nfrom flask import redirect, request, send_file, url_for\nfrom app import db\n\n\nfrom app.ctl import host_controller\n\n\ndef download():\n    path = host_controller.resolve_managed_path(request.args['path'], must_exist=True)\n    return send_file(path)\n\n\ndef direct():\n    return send_file(host_controller.resolve_managed_path(request.args['path']))\n\n\ndef resolved_only():\n    return send_file(host_controller.loose(request.args['path']))\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+        ("python-injection".into(), "error".into(), "app/routes.py".into(), 23),
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round3.py: Redirects.test_a_same_site_url_helper_with_the_query_after_it
+#[test]
+fn round3_a_same_site_url_helper_with_the_query_after_it() {
+    let files: &[(&str, &str)] = &[
+        ("app/routes.py", "import io, os\nfrom io import BytesIO\nfrom pathlib import Path\nfrom urllib.parse import urlencode\nfrom sqlalchemy import text\nfrom flask import redirect, request, send_file, url_for\nfrom app import db\n\n\ndef mode_query_url(endpoint, include_request_args=False, **values):\n    q = request.args.to_dict(flat=False) if include_request_args else {}\n    q.pop('mode', None)\n    return url_for(endpoint, **values) + '?' + urlencode(q, doseq=True)\n\n\ndef index():\n    return redirect(mode_query_url('x.index', include_request_args=True, view='y'))\n\n\ndef index2():\n    target = _go()\n    return redirect(target)\n\n\ndef _go():\n    return mode_query_url('x.index', include_request_args=True)\n\n\ndef query_host():\n    return request.args['h'] + '?' + urlencode(request.args)\n\n\ndef bad():\n    return redirect(query_host())\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+        ("python-injection".into(), "error".into(), "app/routes.py".into(), 34),
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round3.py: Redirects.test_back_to_the_referer_is_a_warning
+#[test]
+fn round3_back_to_the_referer_is_a_warning() {
+    let files: &[(&str, &str)] = &[
+        ("app/safety.py", "def safe_target(t):\n    return t if t and t.startswith('/') else '/'\n"),
+        ("app/routes.py", "import io, os\nfrom io import BytesIO\nfrom pathlib import Path\nfrom urllib.parse import urlencode\nfrom sqlalchemy import text\nfrom flask import redirect, request, send_file, url_for\nfrom app import db\n\n\nfrom app.safety import safe_target\n\n\ndef back():\n    return redirect(request.referrer or url_for('index'))\n\n\ndef back2():\n    ref = request.headers.get('Referer')\n    return redirect(ref or '/')\n\n\ndef checked():\n    return redirect(safe_target(request.referrer))\n\n\ndef nxt():\n    return redirect(request.args.get('next') or request.referrer)\n\n\ndef real():\n    return redirect(request.form.get('return_to'))\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "[security]\nsanitizers = [\"safe_target\"]\n").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+        ("python-injection".into(), "error".into(), "app/routes.py".into(), 27),
+        ("python-injection".into(), "error".into(), "app/routes.py".into(), 31),
+        ("python-injection".into(), "warn".into(), "app/routes.py".into(), 14),
+        ("python-injection".into(), "warn".into(), "app/routes.py".into(), 19),
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round3.py: Constants.test_a_literal_list_loop_nested_in_try_and_with
+#[test]
+fn round3_a_literal_list_loop_nested_in_try_and_with() {
+    let files: &[(&str, &str)] = &[
+        ("app/routes.py", "import io, os\nfrom io import BytesIO\nfrom pathlib import Path\nfrom urllib.parse import urlencode\nfrom sqlalchemy import text\nfrom flask import redirect, request, send_file, url_for\nfrom app import db\n\n\nfrom zipfile import ZipFile\n\n\ndef dump():\n    fmt = request.args.get('fmt', 'csv')\n    tables: list[str] = [\n        'customer',  # people\n        'department',\n        'fuel_surcharge',\n    ]\n    buf = BytesIO()\n    try:\n        with ZipFile(\n            buf, 'w'\n        ) as zf:\n            for table_name in tables:\n                rows = db.session.execute(\n                    db.text(\n                        f\"\"\"SELECT *\n                        FROM {table_name}\"\"\"\n                    )\n                ).mappings().all()\n                zf.writestr(f'{table_name}.{fmt}', str(rows))\n    except Exception:\n        return 'bad', 500\n    return send_file(buf, download_name=f'dump.{fmt}')\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round3.py: Constants.test_constant_sql_shapes_through_a_fetch_helper
+#[test]
+fn round3_constant_sql_shapes_through_a_fetch_helper() {
+    let files: &[(&str, &str)] = &[
+        ("app/routes.py", "import io, os\nfrom io import BytesIO\nfrom pathlib import Path\nfrom urllib.parse import urlencode\nfrom sqlalchemy import text\nfrom flask import redirect, request, send_file, url_for\nfrom app import db\n\n\ndef _header_sql_select() -> str:\n    return \"\"\"a, b, c\"\"\"\n\n\ndef b2w_fetchall(sql, params, conn=None):\n    cur = conn.cursor()\n    cur.execute(sql, params)\n    return cur.fetchall()\n\n\ndef lookup():\n    exact = request.args.getlist('x')\n    placeholders = ','.join(['%s'] * len(exact))\n    header_from = f'FROM header h'\n    order_sql = 'ORDER BY a' if request.args.get('o') else ''\n    sql = f\"\"\"SELECT {_header_sql_select()} {header_from} WHERE x IN ({placeholders}) {order_sql}\"\"\"\n    return b2w_fetchall(sql, tuple(exact), conn=db)\n\n\ndef purge():\n    conditions, params = [], {}\n    if request.form.get('wo'):\n        conditions.append('work_order_id = :wo')\n        params['wo'] = request.form['wo']\n    db.session.execute(text(f\"DELETE FROM invoice_work_orders WHERE {' AND '.join(conditions)}\"), params)\n\n\ndef bad():\n    c = request.args['c']\n    return b2w_fetchall(f'SELECT * FROM t WHERE {c}', (), conn=db)\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+        ("python-injection".into(), "error".into(), "app/routes.py".into(), 16),
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round3.py: JsIife.test_a_fetch_helper_inside_an_iife_called_from_nested_closures
+#[test]
+fn round3_a_fetch_helper_inside_an_iife_called_from_nested_closures() {
+    let files: &[(&str, &str)] = &[
+        ("static/chat.js", "(function () {\n  async function requestJson(url, options) {\n    const r = await fetch(url, options || {});\n    return r.json();\n  }\n  function bind(root, req) {\n    root.querySelectorAll('[data-thread]').forEach((el) => {\n      el.addEventListener('click', async () => {\n        await requestJson(`/chat/api/${el.dataset.thread}/messages`, { method: 'GET' });\n      });\n    });\n    root.addEventListener('submit', async () => {\n      await requestJson('/chat/api/send', { method: 'POST', body: JSON.stringify(req.body) });\n    });\n  }\n  bind(document.body, window.state);\n})();\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round4.py: Stores.test_a_session_key_written_with_request_data
+#[test]
+fn round4_a_session_key_written_with_request_data() {
+    let files: &[(&str, &str)] = &[
+        ("app/routes.py", "import json\nfrom flask import request, session\nfrom sqlalchemy import text\nfrom app import db\n\n\ndef keep():\n    session['note'] = json.dumps(request.get_json())\n    session['who'] = 'x'\n    return 'ok'\n\n\ndef use():\n    note = json.loads(session['note'])\n    db.session.execute(text(f\"SELECT {note['c']} FROM t\"))\n\n\ndef fine():\n    who = session.get('who')\n    db.session.execute(text(f\"SELECT * FROM {who}\"))\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+        ("python-injection".into(), "error".into(), "app/routes.py".into(), 15),
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round3.py: TheAppShape.test_only_the_injections_are_errors
+#[test]
+fn round3_only_the_injections_are_errors() {
+    let got = fixture_findings("flask_round3");
+    let want: Vec<(String, String, usize)> = vec![
+        ("error".into(), "app/main/files.py".into(), 40),
+        ("error".into(), "app/main/files.py".into(), 55),
+        ("warn".into(), "app/main/files.py".into(), 50),
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round4.py: TheAppShape.test_only_the_injections_are_errors
+#[test]
+fn round4_only_the_injections_are_errors() {
+    let got = fixture_findings("flask_round4");
+    let want: Vec<(String, String, usize)> = vec![
+        ("error".into(), "app/tp.py".into(), 19),
+        ("error".into(), "app/tp.py".into(), 37),
+        ("error".into(), "app/tp.py".into(), 40),
+    ];
+    assert_eq!(got, want);
+}
+

@@ -17,7 +17,8 @@
 # (a fixed program's argument list is `argv_severity`), a redirect whose scheme or host
 # comes from the value (`redirect_sinks`; back to the Referer alone is `referer_severity`,
 # warn). `lookups`: an assignment
-# from a database lookup holds the row, not the value. `source_scope`: the source
+# from a database lookup holds the row, not the value. `stores`: a request-scoped store
+# (Flask's `session`) whose key, once written with the value, is the value where it is read. `source_scope`: the source
 # counts in files that use its framework and in the functions they reach. A
 # project's own sanitizers: `[security] sanitizers = ["coerce_safe_redirect_target"]`.
 
@@ -41,6 +42,7 @@ redirect_sinks = ['^(redirect|HttpResponseRedirect)$']
 url_sinks = ['^(requests|httpx|urllib\.request|urllib2|session)\.(get|post|put|request|urlopen)$', '^urlopen$']
 path_sinks = ['^open$', '^send_file$']
 shell_sinks = ['^subprocess\.(Popen|run|call|check_call|check_output)$']
+stores = ["session"]  # (Flask's session: a key written with request data is request data where it is read)
 lookups = '(?:await\s+)?(?:(?:[A-Za-z_]\w*\.)*session\.(?:get|scalar|scalars|execute|query)\b|(?:[A-Za-z_]\w*\.)?(?:get_or_404|first_or_404|one_or_404|get_object_or_404)\s*\(|[A-Z]\w*\.(?:query|objects)\b)'
 depth = 6
 

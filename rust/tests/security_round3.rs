@@ -29,6 +29,7 @@ fn summaries_by_name() {
     let code = |f: &Func| g.modules.get(&f.module).map(|m| m.raw[f.start - 1..f.end.min(m.raw.len())].join("\n")).unwrap_or_default();
     let (confined, same) = summaries(&g, &code);
     let set = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<HashSet<String>>();
-    assert_eq!(set(&["check", "managed"]), confined);
-    assert_eq!(set(&["mq", "go"]), same);
+    // (names and function ids)
+    assert_eq!(set(&["check", "managed", "app/h.check", "app/h.managed"]), confined);
+    assert_eq!(set(&["mq", "go", "app/h.mq", "app/h.go"]), same);
 }

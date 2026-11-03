@@ -110,6 +110,7 @@ def anchored(project, rel: str) -> frozenset:
     return cache[rel]
 
 
+_JS_EXTS = (".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx")
 _RETURN = re.compile(r"^[ \t]*return\b[ \t]*(.*)$", re.M)
 _CONST = re.compile(r"""^(?:None|True|False|-?\d[\w.]*|null|undefined|true|false|[rbuRBU]{0,2}"(?:[^"\\$#]|\\.)*"|[rbuRBU]{0,2}'(?:[^'\\]|\\.)*')?;?$""")
 _BUFFER_ANN = re.compile(r"->\s*['\"]?(?:io\.)?(?:BytesIO|StringIO)\b")
@@ -119,7 +120,8 @@ def returns(project, code, clean) -> tuple[set, set]:
     """What functions return, by name (every function of that name alike): (sanitized, buffers).
     Sanitized: each `return` is a constant or a call to a sanitizer (the rule's `unless`, url_for, a
     declared one) or to a function that is sanitized itself; buffers: annotated `-> BytesIO`, or each
-    `return` builds one or names a local assigned one. `code(f, raw)`: a function's own code."""
+    `return` builds one or names a local assigned one, by name (every function of it alike) and by
+    function id (for a call resolved exactly). `code(f, raw)`: a function's own code."""
     key = (clean[0].pattern if clean else "", len(project.funcs))
     cache = project.__dict__.setdefault("_returns", {})
     if key not in cache:
@@ -128,7 +130,7 @@ def returns(project, code, clean) -> tuple[set, set]:
 
 
 def _returns(project, code, clean) -> tuple[set, set]:
-    cands = [f for f in project.funcs.values() if f.kind != "top" and f.file.endswith((".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"))]
+    cands = [f for f in project.funcs.values() if f.kind != "top" and f.file.endswith(PY_EXTS + _JS_EXTS)]
     rets = {}
     for f in cands:
         body = code(f, True)
@@ -154,10 +156,8 @@ def _returns(project, code, clean) -> tuple[set, set]:
                 grown = True
         if not grown:
             break
-    buffers = set()
-    for name, ids in by_name.items():
-        if ids and all(i in rets and _returns_buffer(*rets[i]) for i in ids):
-            buffers.add(name)
+    buffers = {fid for fid in rets if _returns_buffer(*rets[fid])}  # (by id: what a call resolved exactly gives)
+    buffers |= {name for name, ids in by_name.items() if ids and all(i in buffers for i in ids)}
     return sanit, buffers
 
 
@@ -229,7 +229,8 @@ def summaries(project, code) -> tuple[set, set]:
     it isn't), or calls such a function: what it returns is no path the request can move.
     Same-site: each `return` is a URL whose scheme, host and path are the site's (`url_for(...)
     + "?" + urlencode(q)`, a literal "/path", such a function's result), so request data in it is
-    only the query. `code(f, raw)`: a function's own code."""
+    only the query. Each set holds the names (every function of that name alike) and the function ids
+    (for a call resolved exactly). `code(f, raw)`: a function's own code."""
     key = len(project.funcs)
     cache = project.__dict__.setdefault("_summaries", {})
     if key not in cache:
@@ -238,31 +239,28 @@ def summaries(project, code) -> tuple[set, set]:
 
 
 def _summaries(project, code) -> tuple[set, set]:
-    cands = [f for f in project.funcs.values() if f.kind != "top" and f.file.endswith((".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"))]
+    cands = [f for f in project.funcs.values() if f.kind != "top" and f.file.endswith(PY_EXTS + _JS_EXTS)]
     by_name = {}
     for f in project.funcs.values():
         by_name.setdefault(f.name, []).append(f.id)
     bodies = {f.id: (f, code(f, True)) for f in cands}
 
-    def every(name, ok):
-        ids = by_name.get(name, [])
-        return bool(ids) and all(i in bodies and ok(*bodies[i]) for i in ids)
+    def named(ids: set) -> set:  # the names every function of which is in ids
+        return {f.name for fid in ids for f in (bodies[fid][0],) if all(i in ids for i in by_name.get(f.name, []))}
 
-    confined = set()
-    base = lambda f, body: bool(("relative_to" in body or "commonpath" in body) and _WITHIN.search(body)  # noqa: E731
-                                and _RESOLVES.search(body) and _REJECTS.search(body))
-    for f, body in bodies.values():
-        if f.name not in confined and every(f.name, base):
-            confined.add(f.name)
+    conf = {fid for fid, (f, body) in bodies.items() if ("relative_to" in body or "commonpath" in body)
+            and _WITHIN.search(body) and _RESOLVES.search(body) and _REJECTS.search(body)}
     for _ in range(6):  # (a method that calls the check: `resolve_managed_path` -> `self._is_allowed_path`)
-        if not confined:
+        if not conf:
             break
-        calls = re.compile(rf"(?<![\w$])(?:{'|'.join(map(re.escape, sorted(confined)))})\s*\(")
-        grown = {f.name for f, body in bodies.values() if f.name not in confined
-                 and every(f.name, lambda g, b: base(g, b) or bool(calls.search(b)))}
+        names = named(conf)
+        calls = re.compile(rf"(?<![\w$])(?:{'|'.join(map(re.escape, sorted(names)))})\s*\(") if names else None
+        grown = {fid for fid, (f, body) in bodies.items() if fid not in conf
+                 and (any(ex and dst in conf for dst, _ln, ex in project.edges.get(fid, [])) or calls and calls.search(body))}
         if not grown:
             break
-        confined |= grown
+        conf |= grown
+
     # (only a function with a URL-ish return can be one: url_for, reverse, a "/path", or a call to one found)
     def site_rets(body):
         es = [_ret_expr(body, m) for m in _RETURN.finditer(body)]
@@ -272,15 +270,17 @@ def _summaries(project, code) -> tuple[set, set]:
             and (es := site_rets(body))}
     same = set()
     for _ in range(6):
-        grown = {bodies[fid][0].name for fid in rets if bodies[fid][0].name not in same
-                 and every(bodies[fid][0].name, lambda g, b: g.id in rets and all(_same_site_ret(e, same) for e in rets[g.id]))}
+        names = named(same)
+        grown = {fid for fid in rets if fid not in same and all(_same_site_ret(e, names) for e in rets[fid])}
         if not grown:
             break
         same |= grown
-        calls = re.compile(rf"(?<![\w$])(?:{'|'.join(map(re.escape, sorted(grown)))})\s*\(")
-        rets.update({fid: es for fid, (f, body) in bodies.items() if fid not in rets and "return" in body
-                     and calls.search(body) and (es := site_rets(body))})
-    return confined, same
+        new = named(same) - names
+        if new:
+            calls = re.compile(rf"(?<![\w$])(?:{'|'.join(map(re.escape, sorted(new)))})\s*\(")
+            rets.update({fid: es for fid, (f, body) in bodies.items() if fid not in rets and "return" in body
+                         and calls.search(body) and (es := site_rets(body))})
+    return conf | named(conf), same | named(same)
 
 
 _SITE_HINT = re.compile(r"""\breturn\b[ \t]*[fbru]{0,2}["'`]/[^/]""", re.I)
@@ -300,9 +300,9 @@ def _same_site_ret(e: str, same):
 
 
 def via(a: str, ctx, names, depth: int = 0) -> bool:
-    """a is a call to one of `names`, or a name last assigned one."""
+    """a is a call to one of `names` (by name or by the call's exact targets), or a name last assigned one."""
     a = a.strip()
-    if _whole_call(a) in names:
+    if _summarised(a, ctx, names):
         return True
     name = _bare(a)
     if name is None or depth > 6:
@@ -330,6 +330,181 @@ def referer_only(a: str, ctx, depth: int = 0) -> bool:
         seen = True
         rest = re.sub(rf"(?<![\w.$]){re.escape(name)}(?!\w)", "None", rest)
     return seen and not ctx.dirty(rest)
+
+
+# a string literal's start: Python's prefixes (f-strings), C#'s `$"` / `@$"`, a triple quote
+_STR_START = re.compile(r"""(?<![\w$])(?:[rRbBuUfF]{1,2}|\$@?|@\$?)?(?:"{3}|'{3}|["'`])""")
+# what a non-f string interpolates: Ruby / Elixir `#{x}`, `${x}`, PHP `{$x}` and `$x->y`, Swift `\(x)`
+_INTERP = re.compile(r"#\{[^}]*\}|\$\{[^}]*\}|\{\$[^}]*\}|\$[A-Za-z_]\w*(?:->\w+|\[[^\]]*\])*|\\\([^)]*\)")
+
+
+def code_parts(text: str) -> str:
+    """text with each string literal reduced to what it interpolates (an f-string's `{x}`, a JS
+    template's `${x}`, Ruby's `#{x}`, PHP's `$x`, C#'s `$"{x}"`): the words inside a string
+    are not names (`f"FROM t c ON c.id"` holds no `c`). A string cut off keeps the rest."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        m = _STR_START.search(text, i)
+        if not m:
+            out.append(text[i:])
+            break
+        out.append(text[i:m.start()])
+        tok = m.group(0)
+        q = tok[-3:] if tok[-3:] in ('"' * 3, "'" * 3) else tok[-1]
+        pre = tok[:-len(q)].lower()
+        braces = "f" in pre or "$" in pre or q == "`"  # (`{x}` / `${x}` interpolate)
+        verbatim = "@" in pre
+        end = _string_end(text, m.end(), q, braces, verbatim)
+        if end is None:
+            out.append(text[m.start():])
+            break
+        body = text[m.end():end - len(q)]
+        if braces:
+            kept = _brace_parts(body, q == "`")
+        else:
+            kept = _INTERP.findall(body) if q[0] == '"' else []
+        out.append(" " + " ".join(kept) + " ")
+        i = end
+    return "".join(out)
+
+
+def _string_end(text: str, j: int, q: str, braces: bool, verbatim: bool) -> int | None:
+    """Where the string whose body starts at j ends (after its closing quote); None if it doesn't."""
+    depth, n = 0, len(text)
+    while j < n:
+        ch = text[j]
+        if braces and depth == 0 and q != "`" and text.startswith("{{", j):
+            j += 2
+            continue
+        if braces and ch == "{" and (q != "`" or text[j - 1:j] == "$"):
+            depth += 1
+        elif braces and ch == "}" and depth > 0:
+            depth -= 1
+        elif depth == 0:
+            if verbatim and len(q) == 1 and text.startswith(q * 2, j):
+                j += 2
+                continue
+            if ch == "\\" and not verbatim:
+                j += 2
+                continue
+            if text.startswith(q, j):
+                return j + len(q)
+        j += 1
+    return None
+
+
+def _brace_parts(body: str, dollar: bool) -> list[str]:
+    """An f-string's `{x}` (a template's `${x}`) contents, outermost first."""
+    kept, depth, start, k = [], 0, 0, 0
+    while k < len(body):
+        ch = body[k]
+        if depth == 0 and not dollar and body.startswith("{{", k):
+            k += 2
+            continue
+        if ch == "{" and (not dollar or depth > 0 or body[k - 1:k] == "$"):
+            depth += 1
+            if depth == 1:
+                start = k + 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0:
+                kept.append(body[start:k])
+        k += 1
+    return kept
+
+
+def _mask(s: str) -> str:
+    """s with what is inside strings and brackets blanked (the same length)."""
+    out, d, q, i = [], 0, "", 0
+    while i < len(s):
+        ch = s[i]
+        if q:
+            if ch == "\\":
+                out.append("  "[:len(s) - i])
+                i += 2
+                continue
+            q = "" if ch == q else q
+            out.append(" ")
+        elif ch in "\"'`":
+            q = ch
+            out.append(" ")
+        elif ch in "([{":
+            d += 1
+            out.append(" ")
+        elif ch in ")]}":
+            d -= 1
+            out.append(" ")
+        else:
+            out.append(ch if d == 0 else " ")
+        i += 1
+    return "".join(out)[:len(s)]
+
+
+def branches(e: str) -> list[str]:
+    """The values a conditional expression can take (`c ? '/a' : '/b'`, `'/a' if c else '/b'`);
+    [e] when it is none."""
+    e = e.strip()
+    masked = _mask(e)
+    py = re.search(r"\sif\s", masked)
+    if py:
+        el = re.search(r"\selse\s", masked[py.end():])
+        if el:
+            return branches(e[:py.start()]) + branches(e[py.end() + el.end():])
+    k = next((k for k, ch in enumerate(masked) if ch == "?" and masked[k + 1:k + 2] not in (".", "?") and masked[k - 1:k] != "?"), None)
+    if k is not None:
+        c = masked.find(":", k)
+        if c > 0:
+            return branches(e[k + 1:c]) + branches(e[c + 1:])
+    return [e]
+
+
+def same_site(e: str) -> bool:
+    """Every value e can take is a same-origin path (`"/a"`, `` `/a/${id}` ``, `c ? "/a" : "/b"`)."""
+    return all(_SAME_SITE.match(b) for b in branches(e))
+
+
+def _summarised(e: str, ctx, names) -> bool:
+    """e is one call to a function the summary names: by name (every function of it alike), or by
+    the functions the call resolves to exactly (`ctx.callees`, when the ctx has it)."""
+    n = _whole_call(e.strip())
+    if n is None:
+        return False
+    if n in names:
+        return True
+    ids = ctx.callees(n) if hasattr(ctx, "callees") else []
+    return bool(ids) and all(i in names for i in ids)
+
+
+def stored(project, stores: list, source, code, taint, dirty):
+    """A rule's `stores` (a request-scoped store's names: Flask's `session`): a key some function
+    writes the request's value to (`session["backup"] = json.dumps(data)`) holds the request's value
+    wherever it is read (`json.loads(session["backup"])`, `session.get("backup")`), so the source
+    grows to read it, a few rounds deep. `code(f)`: a function's own raw code; `taint(f, source)` its
+    taint; `dirty(text, source, tainted)`: the text carries the value."""
+    names = "|".join(map(re.escape, stores))
+    write = re.compile(rf"""^[ \t]*(?<![\w.])(?:{names})\[\s*(['"])([^'"\\\n]+)\1\s*\]\s*=(?!=)\s*(.+)$""", re.M)
+    base, keys = source, set()
+    for _ in range(3):  # (a key read back and written under another)
+        grown = False
+        for f in project.funcs.values():
+            if f.kind == "top":
+                continue
+            text = code(f)
+            if "[" not in text or not write.search(text) or not source.search(text):
+                continue
+            t = None
+            for m in write.finditer(text):
+                if m.group(2) in keys:
+                    continue
+                t = t or taint(f, source)
+                if dirty(m.group(3), source, t.at(f.start + text.count("\n", 0, m.start()))):
+                    keys.add(m.group(2))
+                    grown = True
+        if not grown:
+            break
+        k = "|".join(map(re.escape, sorted(keys)))
+        source = re.compile(rf"""(?:{base.pattern})|(?<![\w.])(?:{names})(?:\[\s*['"](?:{k})['"]\s*\]|\.(?:get|pop)\(\s*['"](?:{k})['"])""")
+    return source
 
 
 def sanitizers(project) -> list[str]:
@@ -478,12 +653,12 @@ def path_dirty(a: str, ctx, depth: int = 0, buffers=frozenset()) -> bool:
     that returns one or a confined path gives; `ctx.assigned(name)`, when the ctx has it: the
     latest plain assignment past calls that add to the object)."""
     a = a.strip()
-    if _BUFFER.match(a) or not ctx.dirty(a) or _whole_call(a) in buffers:
+    if _BUFFER.match(a) or not ctx.dirty(a) or _summarised(a, ctx, buffers):
         return False
     name = _bare(a)
     if name is not None:
         made = ctx.assigned(name) if hasattr(ctx, "assigned") else None
-        if made is not None and (_BUFFER.match(made[0].strip()) or _whole_call(made[0].strip()) in buffers):
+        if made is not None and (_BUFFER.match(made[0].strip()) or _summarised(made[0], made[1], buffers)):
             return False  # (`buffer = io.BytesIO()`, then `buffer.write(data)`: still a buffer)
         sub = ctx.rhs(name)
         return True if sub is None or depth > 6 else path_dirty(sub[0], sub[1], depth + 1, buffers)
@@ -507,12 +682,12 @@ def url_taint(a: str, ctx, depth: int = 0) -> str:
     """Where the value is in a URL: "head" (its scheme or host, or all of it), "tail" (only
     the path or query of a fixed host), "relative" (a same-origin path), or "clean"."""
     a = a.strip()
-    if _SAME_SITE.match(a):
+    if same_site(a):
         return "relative"
     name = _bare(a)
     if name is not None and depth < 6 and hasattr(ctx, "passed") and ctx.rhs(name) is None:
         given = ctx.passed(name)  # a parameter: what every caller passes (`requestJson('/chat/api/x', ...)`)
-        if given and all(_SAME_SITE.match(g) for g in given):
+        if given and all(same_site(g) for g in given):
             return "relative"
     if not ctx.dirty(a):
         return "clean"

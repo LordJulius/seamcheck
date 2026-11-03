@@ -199,6 +199,23 @@ sets `confined` / `same_site` (memoised per load), arch/taint.rs keeps `adds` an
 answers `assigned`; tests/security_paths.rs reads tests/fixtures/flask_round3
 (TheAppShape), and its check parity is identical.
 
+Round 4 (same lane, both halves: the path port is the lane's for this round;
+tests/test_security_round4.py, tests/fixtures/flask_round4): `security::code_parts`
+(a string literal reduced to what it interpolates) is what `taint::dirty` matches the
+tainted names in, after a `len(...)` becomes `0`; the source still reads the raw text.
+`security::branches` / `all_same_site` (every branch of a ternary) in `url_taint`;
+`At::passed` reads a caller's bare local as its last value in that caller
+(`At::in_caller`, a Taint of the caller). The summaries also hold function ids
+(`returns`' buffers, `summaries`' confined / same-site), checked by
+`TaintCtx::callees` (the exact callees named so on the line) in `summarised`.
+`stores` (`security::stored`, called by arch/path.rs before the readers): a store key
+written with the value joins the source. A Python `for a, b in ...` binds every name.
+security_paths.rs ports round 3's and round 4's rule-level classes from the Python
+tests' own inputs and findings. Check parity identical on flask_sqla, flask_round3,
+flask_round4 and the vulnerable apps but railsgoat, where 4 Ruby sinks are written
+`Object.constantize()` by Python and `.constantize()` by Rust (the Ruby adapters'
+receiver, the same sinks).
+
 Flask types (same lane): `infer_flask.py` / `graph/infer/flask.rs` (a
 model's `.query` as an `Ext` value tagged `\0rows`, Flask-Login's
 `current_user`), `_PY_ROW` in both Python adapters (`db.session.get(User,

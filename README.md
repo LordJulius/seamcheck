@@ -451,6 +451,18 @@ sanitizers = ["coerce_safe_redirect_target"]  # their return value is clean
   no path the request can move. A function whose returns all start with
   `url_for(...)` or a literal `/path` (`url_for(endpoint) + "?" +
   urlencode(request.args)`) gives a same-site URL, no open redirect.
+- The words inside a string are no names (`f"""FROM t c ON c.id"""` holds no
+  tainted `c`; only what a string interpolates counts), a length is a number
+  (`",".join(["%s"] * len(ids))`), and a parameter's callers are read in
+  their own code (`const listUrl = archived ? "/chat/?all=1" : "/chat/";
+  requestJson(listUrl)` passes a same-origin path either way). A summary that
+  two functions of one name disagree on still holds for a call resolved to
+  the one that returns the buffer. Every name a loop binds holds part of the
+  value (`for table, rows in data.items()`).
+- A request-scoped store (`stores`, Flask's `session` in the pack) carries the
+  value across requests: a key written with request data
+  (`session["backup"] = json.dumps(data)`) is request data where another
+  handler reads it (`json.loads(session["backup"])`).
 - A redirect back to the Referer (`redirect(request.referrer or
   url_for("index"))`), the request's only part in it, is a warning
   (`referer_severity`, `"off"` drops it): the page the user came from, not a
@@ -1121,7 +1133,8 @@ only the argument it uses, as the security pack's Python and JS rules do
 a fixed host's path, a fixed program's arguments and a redirect back to the Referer, `lookups` (a regex) names the
 assignments that hold a database row rather than the value, and
 `source_scope` (a regex over a file's text) keeps the source to the files that
-match it and the functions they reach. The built-in `security`
+match it and the functions they reach, and `stores` (names of a request-scoped
+store: `["session"]`) makes a key written with the value a source where it is read. The built-in `security`
 pack is this rule for seven languages:
 
 ```toml

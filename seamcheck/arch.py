@@ -307,6 +307,11 @@ def path(project, r: dict) -> list:
     # a short one, `int`, only as the whole name), or a method of that name (`params[:id].to_i`)
     names = "|".join(rf"\w*{re.escape(u)}\w*" if len(u) > 3 else rf"(?<![\w.]){re.escape(u)}" for u in unless)
     clean = (re.compile(rf"(?:{names})\s*\("), re.compile(rf"\.(?:{'|'.join(map(re.escape, unless))})\b")) if unless else None
+    if source is not None and r.get("stores"):  # (`session["k"] = request...` in one handler, read in another)
+        source = security.stored(project, r["stores"] if isinstance(r["stores"], list) else [r["stores"]], source,
+                                 lambda f: _own_code(project, f, raw=True),
+                                 lambda f, src: _Taint(project, f, src, clean, frozenset()),
+                                 lambda text, src, tainted: _dirty(text, src, clean, tainted))
     depth = int(r.get("depth", 6))
     fuzzy = bool(r.get("fuzzy", False))
     starts = []
@@ -414,7 +419,7 @@ def _sink(project, f, c, text: str, sinks: list, kinds, source, clean, taint) ->
     entry's reach comes here: the receiver and the arguments are read only for a sink.)"""
     sev = kinds.severity
     hit = any(p.search(text) for p in sinks)
-    if not hit and not (kinds.url and f.file.endswith(".py") and any(p.search(f"session.{c.name}") for p in kinds.url)):
+    if not hit and not (kinds.url and f.file.endswith(PY_EXTS) and any(p.search(f"session.{c.name}") for p in kinds.url)):
         return None, ""
     ctx = _Ctx(taint, source, clean, c.line) if source is not None else None
     recv = None
@@ -464,8 +469,16 @@ class _Ctx:
         got = self.taint.assigned(name, self.line)
         return None if got is None else (got[0], _Ctx(self.taint, self.source, self.clean, got[1]))
 
+    def callees(self, name: str) -> list:
+        """The functions a call named `name` on this line resolves to exactly (ids)."""
+        project, f = self.taint.project, self.taint.f
+        return [dst for dst, ln, exact in project.edges.get(f.id, [])
+                if exact and ln == self.line and dst in project.funcs and project.funcs[dst].name == name]
+
     def passed(self, name: str):
-        """What every exact caller passes for parameter `name` (raw texts), None when one passes nothing we can read."""
+        """What every exact caller passes for parameter `name` (raw texts; a caller's local is read as the
+        value it was last assigned there: `listUrl` for `const listUrl = c ? '/a' : '/b'`), None when
+        one passes nothing we can read."""
         project, f = self.taint.project, self.taint.f
         params = _params(project, f)
         if name not in params:
@@ -480,12 +493,23 @@ class _Ctx:
                 kw = [a.split("=", 1)[1] for a in args if re.match(rf"\s*{re.escape(name)}\s*[=:](?!=)", a)]
                 pos = [a for a in args if not security._kwarg(a)]
                 if kw:
-                    out.append(kw[0])
+                    got = kw[0]
                 elif k < len(pos):
-                    out.append(pos[k])
+                    got = pos[k]
                 else:
                     return None
+                out.append(self._in_caller(g, got.strip(), ln))
         return out or None
+
+    def _in_caller(self, g, arg: str, line: int) -> str:
+        if not re.fullmatch(r"[A-Za-z_$][\w$]*", arg):
+            return arg
+        cache = self.taint.project.__dict__.setdefault("_caller_taint", {})
+        key = (g.id, self.source.pattern if self.source else "")
+        if key not in cache:
+            cache[key] = _Taint(self.taint.project, g, self.source, self.clean, frozenset())
+        got = cache[key].rhs(arg, line)
+        return arg if got is None else got[0]
 
 
 def _reads_source(project, f, source, not_param: bool = False) -> bool:
@@ -585,8 +609,9 @@ class _Taint:
             found.append((am.start(), am.group(1), [am.group(2)], am.end()))
             adds.add(am.end())
             conds[am.end()] = _close(code, am.end())
-        for am in re.finditer(r"^([ \t]*)(?:async[ \t]+)?for[ \t]+([A-Za-z_]\w*)(?:[ \t]*,[ \t]*[A-Za-z_]\w*)*[ \t]+in[ \t]+(.+?):?[ \t]*$", code, re.M):
-            found.append((am.start(), am.group(1), [am.group(2)], am.start(3)))
+        for am in re.finditer(r"^([ \t]*)(?:async[ \t]+)?for[ \t]+([A-Za-z_]\w*(?:[ \t]*,[ \t]*[A-Za-z_]\w*)*)[ \t]+in[ \t]+(.+?):?[ \t]*$", code, re.M):
+            # (`for table, rows in data.items()`: each name holds part of it)
+            found.append((am.start(), am.group(1), re.findall(r"[A-Za-z_]\w*", am.group(2)), am.start(3)))
             adds.add(am.start(3))
             conds[am.start(3)] = am.end(3)
         # a containment check that turns the value away: `if (!p.startsWith(base)) return`,
@@ -759,6 +784,7 @@ def _dirty(arg: str, source, clean, tainted: set) -> bool:
     # only its literal
     arg = re.sub(r"[\w.]+\.get\(\s*[^()]*\btype\s*=\s*(?:int|float|bool)\b[^()]*\)", " ", arg)
     arg = re.sub(r"""\.join\(\s*(?:"[^"]*"|'[^']*')\s+for\s+[\w, ]+\s+in\s+[^()]*(?:\([^()]*\)[^()]*)*\)""", ".join()", arg)
+    arg = re.sub(r"\blen\s*\((?:[^()]|\([^()]*\))*\)", "0", arg)  # (a length is a number: `["%s"] * len(exact)`)
     if clean:
         call, method = clean
         if re.search(rf"{method.pattern}\s*(?:\([^()]*\))?\s*$", arg.strip()):
@@ -775,7 +801,9 @@ def _dirty(arg: str, source, clean, tainted: set) -> bool:
                     break
                 j += 1
             arg = arg[:m.start()] + arg[j + 1:]
-    return bool(source.search(arg)) or any(_names(t, arg) for t in tainted)
+    # the words inside a string are no names (`f"""FROM t c ON c.id"""` holds no `c`): only what it interpolates
+    # (the source still reads its keys: `session["backup"]`)
+    return bool(source.search(arg)) or bool(tainted) and any(_names(t, words) for words in (security.code_parts(arg),) for t in tainted)
 
 
 def _carries(project, f, c, source, clean, tainted: set, sink: bool = False) -> bool:

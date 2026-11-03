@@ -13,7 +13,7 @@ use crate::graph::infer::{esc, re, rxd};
 use crate::graph::Graph;
 use crate::model::{Call, Func};
 use crate::pyre::{strip, Rx};
-use crate::rules::security::{anchored, guarded, Sinks, TaintCtx};
+use crate::rules::security::{self, anchored, guarded, Sinks, TaintCtx};
 
 /// The sanitizers of `unless`: a call whose name holds one, and a method of that name.
 pub struct Clean {
@@ -128,8 +128,10 @@ pub fn dirty(arg: &str, cx: &Ctx, tainted: &HashSet<String>) -> bool {
     // Flask / Werkzeug: `request.args.get("page", 1, type=int)` is an int; `",".join("?" for _ in ids)` holds
     // only its literal
     let arg = re!(r"[\w.]+\.get\(\s*[^()]*\btype\s*=\s*(?:int|float|bool)\b[^()]*\)").sub_with(arg, |_| " ".to_string());
-    let mut arg = re!(r#"\.join\(\s*(?:"[^"]*"|'[^']*')\s+for\s+[\w, ]+\s+in\s+[^()]*(?:\([^()]*\)[^()]*)*\)"#)
+    let arg = re!(r#"\.join\(\s*(?:"[^"]*"|'[^']*')\s+for\s+[\w, ]+\s+in\s+[^()]*(?:\([^()]*\)[^()]*)*\)"#)
         .sub_with(&arg, |_| ".join()".to_string());
+    // (a length is a number: `["%s"] * len(exact)`)
+    let mut arg = re!(r"\blen\s*\((?:[^()]|\([^()]*\))*\)").sub_with(&arg, |_| "0".to_string());
     if let Some(cl) = &cx.clean {
         let mp = cl.method.pattern();
         if rxd(&format!(r"{mp}\s*(?:\([^()]*\))?\s*$")).is_match(strip(&arg)) {
@@ -153,7 +155,16 @@ pub fn dirty(arg: &str, cx: &Ctx, tainted: &HashSet<String>) -> bool {
             arg = format!("{}{}", &arg[..s], tail);
         }
     }
-    cx.source.is_match(&arg) || tainted.iter().any(|t| names(t, &arg))
+    // the words inside a string are no names (`f"""FROM t c ON c.id"""` holds no `c`): only what it
+    // interpolates (the source still reads its keys: `session["backup"]`)
+    if cx.source.is_match(&arg) {
+        return true;
+    }
+    if tainted.is_empty() {
+        return false;
+    }
+    let words = security::code_parts(&arg);
+    tainted.iter().any(|t| names(t, &words))
 }
 
 /// The call's arguments as written (raw text, split at top-level commas) (arch._call_args).
@@ -480,11 +491,13 @@ impl Taint {
             adds.insert(am.end());
             conds.insert(am.end(), close(&code, am.end()));
         }
-        for am in re!(r"(?m)^([ \t]*)(?:async[ \t]+)?for[ \t]+([A-Za-z_]\w*)(?:[ \t]*,[ \t]*[A-Za-z_]\w*)*[ \t]+in[ \t]+(.+?):?[ \t]*$")
+        for am in re!(r"(?m)^([ \t]*)(?:async[ \t]+)?for[ \t]+([A-Za-z_]\w*(?:[ \t]*,[ \t]*[A-Za-z_]\w*)*)[ \t]+in[ \t]+(.+?):?[ \t]*$")
             .find_iter(&code)
         {
             let (s3, e3) = am.span(3).unwrap();
-            found.push((am.start(), am.s(1).into(), vec![am.s(2).into()], s3));
+            // (`for table, rows in data.items()`: each name holds part of it)
+            let ns: Vec<String> = re!(r"[A-Za-z_]\w*").findall(am.s(2)).into_iter().map(String::from).collect();
+            found.push((am.start(), am.s(1).into(), ns, s3));
             adds.insert(s3);
             conds.insert(s3, e3);
         }
@@ -539,7 +552,9 @@ impl Taint {
                 continue; // (adding a clean value cleans nothing)
             }
             if muts.contains(&val) {
-                t.adds.entry(ns[0].clone()).or_default().insert(ln);
+                if let Some(n) = ns.first() {
+                    t.adds.entry(n.clone()).or_default().insert(ln);
+                }
             }
             if !adds.contains(&val) && ns.len() == 1 {
                 t.values.insert((ln, ns[0].clone()), strip(value).to_string());
@@ -569,13 +584,14 @@ impl Taint {
         self.values.get(&(last, name.to_string())).map(|v| (v.clone(), last))
     }
 
-    /// Like `rhs`, past the calls that only add to the object (`buf.write(x)` keeps it a
-    /// buffer); None when a parameter, a loop or a destructuring came after it, or there is none
-    /// (arch._Taint.assigned).
+    /// (the value's text, its line) of name's latest plain assignment before line, past the calls
+    /// that only add to it (`buf.write(x)`); None when a parameter, a loop or a destructuring came
+    /// after it, or there is none (arch._Taint.assigned).
     pub fn assigned(&self, name: &str, line: usize) -> Option<(String, usize)> {
         let mut lns: Vec<usize> = self.steps.iter().filter(|s| s.1 == name && s.0 < line).map(|s| s.0).collect();
-        lns.sort_unstable_by(|a, b| b.cmp(a));
-        for ln in lns {
+        lns.sort_unstable();
+        lns.dedup();
+        for ln in lns.into_iter().rev() {
             if let Some(v) = self.values.get(&(ln, name.to_string())) {
                 return Some((v.clone(), ln));
             }
@@ -673,8 +689,22 @@ impl TaintCtx for At<'_> {
         Some((v, Box::new(At { g: self.g, f: self.f, taint: self.taint, cx: self.cx, line: ln })))
     }
 
-    /// What every exact caller passes for parameter `name` (raw texts), None when one passes
-    /// nothing we can read (arch._Ctx.passed).
+    /// The functions a call named `name` on this line resolves to exactly (arch._Ctx.callees).
+    fn callees(&self, name: &str) -> Vec<String> {
+        self.g
+            .edges
+            .get(&self.f.id)
+            .map(|es| {
+                es.iter()
+                    .filter(|(d, ln, ex)| *ex && *ln == self.line && self.g.func(d).is_some_and(|h| h.name == name))
+                    .map(|(d, _, _)| d.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// What every exact caller passes for parameter `name` (raw texts; a caller's local is read as
+    /// the value it was last assigned there), None when one passes nothing we can read (arch._Ctx.passed).
     fn passed(&self, name: &str) -> Option<Vec<String>> {
         let (g, f) = (self.g, self.f);
         let params: Vec<String> = param_decls(g, f).into_iter().map(|x| x.0).collect();
@@ -688,16 +718,29 @@ impl TaintCtx for At<'_> {
                 let kw: Vec<&str> =
                     args.iter().filter(|a| kw_rx.match_start(a).is_some()).map(|a| a.split_once('=').map(|x| x.1).unwrap_or("")).collect();
                 let pos: Vec<&String> = args.iter().filter(|a| crate::rules::security::kwarg(a).is_none()).collect();
-                if let Some(v) = kw.first() {
-                    out.push(v.to_string());
+                let got = if let Some(v) = kw.first() {
+                    v.to_string()
                 } else if k < pos.len() {
-                    out.push(pos[k].clone());
+                    pos[k].clone()
                 } else {
                     return None;
-                }
+                };
+                out.push(self.in_caller(h, strip(&got), *ln));
             }
         }
         (!out.is_empty()).then_some(out)
+    }
+}
+
+impl At<'_> {
+    /// A caller's local read as the value it was last assigned before `line` (`listUrl` for
+    /// `const listUrl = c ? '/a' : '/b'`), else the text as passed (arch._Ctx._in_caller).
+    fn in_caller(&self, h: &Func, arg: &str, line: usize) -> String {
+        if re!(r"[A-Za-z_$][\w$]*").fullmatch(arg).is_none() {
+            return arg.to_string();
+        }
+        let t = Taint::new(self.g, h, self.cx, &[], None);
+        t.rhs(arg, line).map(|x| x.0).unwrap_or_else(|| arg.to_string())
     }
 }
 

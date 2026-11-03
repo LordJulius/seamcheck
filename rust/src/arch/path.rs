@@ -83,6 +83,22 @@ pub fn path(p: &Project, r: &Rule) -> Res<Vec<Finding>> {
     let fuzzy = truthy(r.get("fuzzy"));
     need(r, "from")?;
     let g = p.graph();
+    // (`session["k"] = request...` in one handler, read in another: security.stored)
+    let source = match (source, str_list(r, "stores")) {
+        (Some(src), Some(stores)) if !stores.is_empty() => {
+            let written = |f: &Func, cur: &crate::pyre::Rx, line: usize, value: &str| -> bool {
+                let (Ok(cur), Ok(cl)) = (compile(cur.pattern()), clean_of(&unless)) else { return false };
+                let c = Ctx { source: cur, clean: cl, readers: None };
+                let t = Taint::new(&g, f, &c, &[], None);
+                taint::dirty(value, &c, &t.at(line))
+            };
+            match security::stored(&g, &stores, &src, &|f: &Func| own_code(&g, f, true), &written) {
+                Some(grown) => Some(compile(grown.pattern())?),
+                None => Some(src),
+            }
+        }
+        (src, _) => src,
+    };
     let mut starts: Vec<&Func> = Vec::new();
     for spec in str_list(r, "from").unwrap_or_default() {
         starts.extend(g.find(&spec));
@@ -139,9 +155,9 @@ pub fn path(p: &Project, r: &Rule) -> Res<Vec<Finding>> {
             let (done, buffers) = (got.0.clone(), got.1.clone());
             kinds.buffers = buffers;
             // (a path checked under a root, a same-site URL)
-            let sums = p.memo("security.summaries", || security::summaries(&g, &|h: &Func| own_code(&g, h, true)));
-            kinds.confined = sums.0.clone();
-            kinds.same_site = sums.1.clone();
+            let sum = p.memo("security.summaries", || security::summaries(&g, &|h: &Func| own_code(&g, h, true)));
+            kinds.confined = sum.0.clone();
+            kinds.same_site = sum.1.clone();
             if !done.is_empty() {
                 let mut names: Vec<&String> = done.iter().collect();
                 names.sort();
@@ -340,7 +356,7 @@ fn sink(
 ) -> Option<(String, String)> {
     let sev = kinds.severity.clone();
     let hit = sinks.iter().any(|p| p.is_match(text));
-    if !hit && !(!kinds.url.is_empty() && f.file.ends_with(".py") && kinds.url.iter().any(|p| p.is_match(&format!("session.{}", c.name)))) {
+    if !hit && !(!kinds.url.is_empty() && crate::model::is_py(&f.file) && kinds.url.iter().any(|p| p.is_match(&format!("session.{}", c.name)))) {
         return None;
     }
     let at = taint.map(|(cx, tn)| At { g, f, taint: tn, cx, line: c.line });

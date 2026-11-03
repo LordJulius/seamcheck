@@ -18,6 +18,7 @@ use std::sync::OnceLock;
 use serde_json::Value;
 
 use crate::config::{str_list, Rule};
+use crate::graph::infer::re;
 use crate::graph::Graph;
 use crate::model::{Call, Func, Module};
 use crate::pyre::Rx;
@@ -37,6 +38,10 @@ pub trait TaintCtx {
     /// it a buffer); None when unknown.
     fn assigned(&self, _name: &str) -> Option<(String, Box<dyn TaintCtx + '_>)> {
         None
+    }
+    /// The functions a call named `name` on this line resolves to exactly (ids); empty when unknown.
+    fn callees(&self, _name: &str) -> Vec<String> {
+        Vec::new()
     }
 }
 
@@ -110,6 +115,10 @@ rx!(
     r#"(?i)\brequest\.referrer\b|\b(?:req|request)\.(?:headers|META|environ)(?:\.get\s*\(|\[)\s*['"](?:referr?er|http_referer)['"][^)\]]*[)\]]|\breq\.headers\.referr?er\b|\breq\.(?:get|header)\s*\(\s*['"]referr?er['"]\s*\)"#
 );
 rx!(free_name, r"(?<![\w.$])[A-Za-z_]\w*");
+// a string literal's start: Python's prefixes (f-strings), C#'s `$"` / `@$"`, a triple quote
+rx!(str_start, r#"(?<![\w$])(?:[rRbBuUfF]{1,2}|\$@?|@\$?)?(?:"{3}|'{3}|["'`])"#);
+// what a non-f string interpolates: Ruby / Elixir `#{x}`, `${x}`, PHP `{$x}` and `$x->y`, Swift `\(x)`
+rx!(interp, r"#\{[^}]*\}|\$\{[^}]*\}|\{\$[^}]*\}|\$[A-Za-z_]\w*(?:->\w+|\[[^\]]*\])*|\\\([^)]*\)");
 rx!(site_hint, r#"(?i)\breturn\b[ \t]*[fbru]{0,2}["'`]/[^/]"#);
 rx!(interp_rx, r"#\{|\$\{");
 rx!(relative_lead, r"/[^/\\]");
@@ -167,15 +176,20 @@ pub fn anchored(m: &Module) -> HashSet<String> {
     m.raw.iter().filter_map(|ln| anchored_rx().match_start(ln).map(|c| c.s(1).to_string())).collect()
 }
 
-/// What functions return, by name (security.returns): (sanitized, buffers). `code(f)`: a function's
+/// The files whose functions are summarised: Python and JS / TS.
+fn summed(file: &str) -> bool {
+    crate::model::is_py(file) || [".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"].iter().any(|e| file.ends_with(e))
+}
+
+/// What functions return (security.returns): (sanitized, buffers); the buffers by name (every
+/// function of it alike) and by function id (a call resolved exactly). `code(f)`: a function's
 /// own raw code; `call`: the rule's sanitizer-call pattern.
 pub fn returns(g: &Graph, code: &dyn Fn(&Func) -> String, call: Option<&Rx>) -> (HashSet<String>, HashSet<String>) {
-    const EXTS: [&str; 7] = [".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"];
     let mut rets: Vec<(&Func, String, Vec<String>)> = Vec::new();
     let mut by_id: HashMap<&str, usize> = HashMap::new();
     for id in g.funcs.keys() {
         let Some(f) = g.func(id) else { continue };
-        if f.kind == "top" || !EXTS.iter().any(|e| f.file.ends_with(e)) {
+        if f.kind == "top" || !summed(&f.file) {
             continue;
         }
         let body = code(f);
@@ -214,12 +228,14 @@ pub fn returns(g: &Graph, code: &dyn Fn(&Func) -> String, call: Option<&Rx>) -> 
             break;
         }
     }
-    let mut buffers = HashSet::new();
-    for (name, ids) in &by_name {
-        if !ids.is_empty() && ids.iter().all(|i| by_id.get(i).is_some_and(|&k| returns_buffer(&rets[k].1, &rets[k].2))) {
-            buffers.insert(name.to_string());
-        }
-    }
+    let mut buffers: HashSet<String> =
+        rets.iter().filter(|(_, b, es)| returns_buffer(b, es)).map(|(f, _, _)| f.id.clone()).collect();
+    let names: Vec<String> = by_name
+        .iter()
+        .filter(|(_, ids)| !ids.is_empty() && ids.iter().all(|i| buffers.contains(*i)))
+        .map(|(n, _)| n.to_string())
+        .collect();
+    buffers.extend(names);
     (sanit, buffers)
 }
 
@@ -278,52 +294,65 @@ fn returns_buffer(body: &str, exprs: &[String]) -> bool {
     })
 }
 
-/// What else functions give back, by name (security.summaries): (confined, same_site). Confined:
-/// it resolves a path and checks it is under a root (`.resolve()`, then `.relative_to(root)` /
-/// `.is_relative_to` / `commonpath`, raising or returning None when it isn't), or calls such a
-/// function; same-site: each `return` is a URL with the site's scheme, host and path
-/// (`url_for(...) + "?" + urlencode(q)`, a literal "/path", such a function's result).
+/// What else functions give back (security.summaries): (confined, same_site), each by name (every
+/// function of it alike) and by function id (a call resolved exactly). Confined: it resolves a path
+/// and checks it is under a root (`.resolve()`, then `.relative_to(root)` / `.is_relative_to` /
+/// `commonpath`, raising or returning None when it isn't), or calls such a function; same-site: each
+/// `return` is a URL with the site's scheme, host and path (`url_for(...) + "?" + urlencode(q)`, a
+/// literal "/path", such a function's result).
 pub fn summaries(g: &Graph, code: &dyn Fn(&Func) -> String) -> (HashSet<String>, HashSet<String>) {
-    const EXTS: [&str; 7] = [".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"];
     let mut bodies: HashMap<&str, (&Func, String)> = HashMap::new();
     let mut by_name: HashMap<&str, Vec<&str>> = HashMap::new();
     for id in g.funcs.keys() {
         let Some(f) = g.func(id) else { continue };
         by_name.entry(f.name.as_str()).or_default().push(id.as_str());
-        if f.kind != "top" && EXTS.iter().any(|e| f.file.ends_with(e)) {
+        if f.kind != "top" && summed(&f.file) {
             bodies.insert(id.as_str(), (f, code(f)));
         }
     }
-    let every = |name: &str, ok: &dyn Fn(&str, &str) -> bool| {
-        by_name.get(name).is_some_and(|ids| !ids.is_empty() && ids.iter().all(|i| bodies.get(i).is_some_and(|(_, b)| ok(i, b))))
+    // the names every function of which is in ids
+    let named = |ids: &HashSet<String>| -> HashSet<String> {
+        ids.iter()
+            .filter_map(|i| bodies.get(i.as_str()).map(|(f, _)| f.name.as_str()))
+            .filter(|n| by_name.get(n).is_some_and(|all| all.iter().all(|i| ids.contains(*i))))
+            .map(String::from)
+            .collect()
     };
-    let base = |b: &str| {
-        (b.contains("relative_to") || b.contains("commonpath")) && within().is_match(b) && resolves().is_match(b) && rejects().is_match(b)
-    };
-    let mut confined: HashSet<String> = HashSet::new();
-    for (f, _) in bodies.values() {
-        if !confined.contains(&f.name) && every(&f.name, &|_, b| base(b)) {
-            confined.insert(f.name.clone());
+    let calls_rx = |names: &HashSet<String>| -> Option<Rx> {
+        if names.is_empty() {
+            return None;
         }
-    }
+        let mut ns: Vec<&String> = names.iter().collect();
+        ns.sort();
+        let alt: Vec<String> = ns.iter().map(|n| regex::escape(n)).collect();
+        Some(Rx::lit(&format!(r"(?<![\w$])(?:{})\s*\(", alt.join("|"))))
+    };
+    let mut conf: HashSet<String> = bodies
+        .iter()
+        .filter(|(_, (_, b))| {
+            (b.contains("relative_to") || b.contains("commonpath")) && within().is_match(b) && resolves().is_match(b) && rejects().is_match(b)
+        })
+        .map(|(id, _)| id.to_string())
+        .collect();
     for _ in 0..6 {
         // (a method that calls the check: `resolve_managed_path` -> `self._is_allowed_path`)
-        if confined.is_empty() {
+        if conf.is_empty() {
             break;
         }
-        let mut names: Vec<&String> = confined.iter().collect();
-        names.sort();
-        let alt: Vec<String> = names.iter().map(|n| regex::escape(n)).collect();
-        let calls = Rx::lit(&format!(r"(?<![\w$])(?:{})\s*\(", alt.join("|")));
-        let grown: HashSet<String> = bodies
-            .values()
-            .filter(|(f, _)| !confined.contains(&f.name) && every(&f.name, &|_, b| base(b) || calls.is_match(b)))
-            .map(|(f, _)| f.name.clone())
+        let calls = calls_rx(&named(&conf));
+        let grown: Vec<String> = bodies
+            .iter()
+            .filter(|(id, (_, b))| {
+                !conf.contains(**id)
+                    && (g.edges.get(**id).is_some_and(|es| es.iter().any(|(d, _, ex)| *ex && conf.contains(d)))
+                        || calls.as_ref().is_some_and(|c| c.is_match(b)))
+            })
+            .map(|(id, _)| id.to_string())
             .collect();
         if grown.is_empty() {
             break;
         }
-        confined.extend(grown);
+        conf.extend(grown);
     }
     // (only a function with a URL-ish return can be one: url_for, reverse, a "/path", or a call to one found)
     let site_rets = |b: &str| -> Option<Vec<String>> {
@@ -340,31 +369,31 @@ pub fn summaries(g: &Graph, code: &dyn Fn(&Func) -> String) -> (HashSet<String>,
     }
     let mut same: HashSet<String> = HashSet::new();
     for _ in 0..6 {
-        let grown: HashSet<String> = rets
-            .keys()
-            .filter_map(|id| bodies.get(id).map(|(f, _)| f.name.clone()))
-            .filter(|n| {
-                !same.contains(n)
-                    && every(n, &|i, _| rets.get(i).is_some_and(|es| es.iter().all(|e| same_site_ret(e, Some(&same)) == Some(true))))
-            })
+        let names = named(&same);
+        let grown: Vec<String> = rets
+            .iter()
+            .filter(|(id, es)| !same.contains(**id) && es.iter().all(|e| same_site_ret(e, Some(&names)) == Some(true)))
+            .map(|(id, _)| id.to_string())
             .collect();
         if grown.is_empty() {
             break;
         }
-        let mut names: Vec<&String> = grown.iter().collect();
-        names.sort();
-        let alt: Vec<String> = names.iter().map(|n| regex::escape(n)).collect();
-        let calls = Rx::lit(&format!(r"(?<![\w$])(?:{})\s*\(", alt.join("|")));
         same.extend(grown);
-        for (id, (_, b)) in &bodies {
-            if !rets.contains_key(id) && b.contains("return") && calls.is_match(b) {
-                if let Some(es) = site_rets(b) {
-                    rets.insert(id, es);
+        let new: HashSet<String> = named(&same).difference(&names).cloned().collect();
+        if let Some(calls) = calls_rx(&new) {
+            for (id, (_, b)) in &bodies {
+                if !rets.contains_key(id) && b.contains("return") && calls.is_match(b) {
+                    if let Some(es) = site_rets(b) {
+                        rets.insert(id, es);
+                    }
                 }
             }
         }
     }
-    (confined, same)
+    let (cn, sn) = (named(&conf), named(&same));
+    conf.extend(cn);
+    same.extend(sn);
+    (conf, same)
 }
 
 const URL_BUILDERS: [&str; 3] = ["url_for", "reverse", "reverse_lazy"];
@@ -389,7 +418,7 @@ fn same_site_ret(e: &str, same: Option<&HashSet<String>>) -> Option<bool> {
 /// a is a call to one of `names`, or a name last assigned one (security.via).
 pub fn via(a: &str, ctx: &dyn TaintCtx, names: &HashSet<String>, depth: usize) -> bool {
     let a = a.trim();
-    if whole_call(a).is_some_and(|n| names.contains(n)) {
+    if summarised(a, ctx, names) {
         return true;
     }
     let Some(name) = bare(a) else { return false };
@@ -422,6 +451,226 @@ pub fn referer_only(a: &str, ctx: &dyn TaintCtx, depth: usize) -> bool {
         rest = Rx::lit(&format!(r"(?<![\w.$]){}(?!\w)", regex::escape(&name))).sub("None", &rest);
     }
     seen && !ctx.dirty(&rest)
+}
+
+/// text with each string literal reduced to what it interpolates (an f-string's `{x}`, a JS
+/// template's `${x}`, Ruby's `#{x}`, PHP's `$x`, C#'s `$"{x}"`): the words inside a string are not
+/// names (`f"FROM t c ON c.id"` holds no `c`). A string cut off keeps the rest (security.code_parts).
+pub fn code_parts(text: &str) -> String {
+    let b = text.as_bytes();
+    let n = b.len();
+    let mut out = String::with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        let Some(m) = str_start().search_at(text, i) else {
+            out.push_str(&text[i..]);
+            break;
+        };
+        out.push_str(&text[i..m.start()]);
+        let tok = m.group0();
+        let q = if tok.ends_with("\"\"\"") || tok.ends_with("'''") { &tok[tok.len() - 3..] } else { &tok[tok.len() - 1..] };
+        let pre = tok[..tok.len() - q.len()].to_lowercase();
+        let braces = pre.contains('f') || pre.contains('$') || q == "`";
+        let verbatim = pre.contains('@');
+        let Some(end) = string_end(text, m.end(), q, braces, verbatim) else {
+            out.push_str(&text[m.start()..]);
+            break;
+        };
+        let body = &text[m.end()..end - q.len()];
+        let kept: Vec<String> = if braces {
+            brace_parts(body, q == "`")
+        } else if q.starts_with('"') {
+            interp().findall(body).into_iter().map(String::from).collect()
+        } else {
+            Vec::new()
+        };
+        out.push(' ');
+        out.push_str(&kept.join(" "));
+        out.push(' ');
+        i = end;
+    }
+    out
+}
+
+/// Where the string whose body starts at j ends (after its closing quote) (security._string_end).
+fn string_end(text: &str, mut j: usize, q: &str, braces: bool, verbatim: bool) -> Option<usize> {
+    let b = text.as_bytes();
+    let qb = q.as_bytes();
+    let mut depth = 0usize;
+    while j < b.len() {
+        let ch = b[j];
+        if braces && depth == 0 && q != "`" && b[j..].starts_with(b"{{") {
+            j += 2;
+            continue;
+        }
+        if braces && ch == b'{' && (q != "`" || (j > 0 && b[j - 1] == b'$')) {
+            depth += 1;
+        } else if braces && ch == b'}' && depth > 0 {
+            depth -= 1;
+        } else if depth == 0 {
+            if verbatim && qb.len() == 1 && b[j..].starts_with(&[qb[0], qb[0]]) {
+                j += 2;
+                continue;
+            }
+            if ch == b'\\' && !verbatim {
+                j += 2;
+                continue;
+            }
+            if b[j..].starts_with(qb) {
+                return Some(j + qb.len());
+            }
+        }
+        j += 1;
+    }
+    None
+}
+
+/// An f-string's `{x}` (a template's `${x}`) contents, outermost first (security._brace_parts).
+fn brace_parts(body: &str, dollar: bool) -> Vec<String> {
+    let b = body.as_bytes();
+    let (mut kept, mut depth, mut start, mut k) = (Vec::new(), 0usize, 0usize, 0usize);
+    while k < b.len() {
+        let ch = b[k];
+        if depth == 0 && !dollar && b[k..].starts_with(b"{{") {
+            k += 2;
+            continue;
+        }
+        if ch == b'{' && (!dollar || depth > 0 || (k > 0 && b[k - 1] == b'$')) {
+            depth += 1;
+            if depth == 1 {
+                start = k + 1;
+            }
+        } else if ch == b'}' && depth > 0 {
+            depth -= 1;
+            if depth == 0 {
+                kept.push(body[start..k].to_string());
+            }
+        }
+        k += 1;
+    }
+    kept
+}
+
+/// s with what is inside strings and brackets blanked, byte for byte (security._mask).
+fn mask(s: &str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let mut out = vec![b' '; b.len()];
+    let (mut d, mut q, mut i) = (0i32, 0u8, 0usize);
+    while i < b.len() {
+        let ch = b[i];
+        if q != 0 {
+            if ch == b'\\' {
+                i += 2;
+                continue;
+            }
+            if ch == q {
+                q = 0;
+            }
+        } else if b"\"'`".contains(&ch) {
+            q = ch;
+        } else if b"([{".contains(&ch) {
+            d += 1;
+        } else if b")]}".contains(&ch) {
+            d -= 1;
+        } else if d == 0 {
+            out[i] = ch;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The values a conditional expression can take (`c ? '/a' : '/b'`, `'/a' if c else '/b'`); [e]
+/// when it is none (security.branches).
+pub fn branches(e: &str) -> Vec<String> {
+    let e = e.trim();
+    let m = mask(e);
+    let ms = String::from_utf8_lossy(&m).into_owned();
+    if let Some(py) = re!(r"\sif\s").search(&ms) {
+        if let Some(el) = re!(r"\selse\s").search(&ms[py.end()..]) {
+            let mut out = branches(&e[..py.start()]);
+            out.extend(branches(&e[py.end() + el.end()..]));
+            return out;
+        }
+    }
+    let k = (0..m.len()).find(|&k| m[k] == b'?' && m.get(k + 1).is_none_or(|c| *c != b'.' && *c != b'?') && (k == 0 || m[k - 1] != b'?'));
+    if let Some(k) = k {
+        if let Some(c) = (k..m.len()).find(|&c| m[c] == b':') {
+            let mut out = branches(&e[k + 1..c]);
+            out.extend(branches(&e[c + 1..]));
+            return out;
+        }
+    }
+    vec![e.to_string()]
+}
+
+/// Every value e can take is a same-origin path (security.same_site).
+pub fn all_same_site(e: &str) -> bool {
+    branches(e).iter().all(|b| same_site().match_start(b).is_some())
+}
+
+/// e is one call to a function the summary names: by name (every function of it alike), or by the
+/// functions the call resolves to exactly (security._summarised).
+fn summarised(e: &str, ctx: &dyn TaintCtx, names: &HashSet<String>) -> bool {
+    let Some(n) = whole_call(e.trim()) else { return false };
+    if names.contains(n) {
+        return true;
+    }
+    let ids = ctx.callees(n);
+    !ids.is_empty() && ids.iter().all(|i| names.contains(i))
+}
+
+/// A rule's `stores` (a request-scoped store's names: Flask's `session`): a key some function writes
+/// the request's value to holds it wherever it is read, so the source grows to read it
+/// (security.stored). `code(f)`: a function's own raw code; `written(f, source, line, value)`: the
+/// value written at that line carries the value.
+pub fn stored(
+    g: &Graph,
+    stores: &[String],
+    source: &Rx,
+    code: &dyn Fn(&Func) -> String,
+    written: &dyn Fn(&Func, &Rx, usize, &str) -> bool,
+) -> Option<Rx> {
+    let names: Vec<String> = stores.iter().map(|s| regex::escape(s)).collect();
+    let names = names.join("|");
+    let write = Rx::lit(&format!(r#"(?m)^[ \t]*(?<![\w.])(?:{names})\[\s*(['"])([^'"\\\n]+)\1\s*\]\s*=(?!=)\s*(.+)$"#));
+    let base = source.pattern().to_string();
+    let mut keys: Vec<String> = Vec::new();
+    let mut src: Option<Rx> = None;
+    for _ in 0..3 {
+        let mut grown = false;
+        for f in g.all_funcs() {
+            if f.kind == "top" {
+                continue;
+            }
+            let text = code(f);
+            let cur = src.as_ref().unwrap_or(source);
+            if !text.contains('[') || !write.is_match(&text) || !cur.is_match(&text) {
+                continue;
+            }
+            for m in write.find_iter(&text) {
+                let k = m.s(2).to_string();
+                if keys.contains(&k) {
+                    continue;
+                }
+                let line = f.start + text[..m.start()].matches('\n').count();
+                if written(f, cur, line, m.s(3)) {
+                    keys.push(k);
+                    grown = true;
+                }
+            }
+        }
+        if !grown {
+            break;
+        }
+        let mut ks: Vec<String> = keys.iter().map(|k| regex::escape(k)).collect();
+        ks.sort();
+        let k = ks.join("|");
+        src = Some(Rx::lit(&format!(
+            r#"(?:{base})|(?<![\w.])(?:{names})(?:\[\s*['"](?:{k})['"]\s*\]|\.(?:get|pop)\(\s*['"](?:{k})['"])"#
+        )));
+    }
+    src
 }
 
 /// `[security] sanitizers` from the merged config: the project's own clean-returning functions.
@@ -644,13 +893,13 @@ pub fn sql_dirty(a: &str, ctx: &dyn TaintCtx, depth: usize) -> bool {
 /// returns one or a confined path gives; `ctx.assigned` sees past `buf.write(x)`).
 pub fn path_dirty(a: &str, ctx: &dyn TaintCtx, depth: usize, buffers: &HashSet<String>) -> bool {
     let a = a.trim();
-    if buffer().match_start(a).is_some() || !ctx.dirty(a) || whole_call(a).is_some_and(|n| buffers.contains(n)) {
+    if buffer().match_start(a).is_some() || !ctx.dirty(a) || summarised(a, ctx, buffers) {
         return false;
     }
     if let Some(name) = bare(a) {
-        if let Some((v, _)) = ctx.assigned(name) {
+        if let Some((v, at)) = ctx.assigned(name) {
             let v = v.trim();
-            if buffer().match_start(v).is_some() || whole_call(v).is_some_and(|n| buffers.contains(n)) {
+            if buffer().match_start(v).is_some() || summarised(v, at.as_ref(), buffers) {
                 return false; // (`buffer = io.BytesIO()`, then `buffer.write(data)`: still a buffer)
             }
         }
@@ -680,14 +929,14 @@ pub fn argv(a: &str, ctx: &dyn TaintCtx, depth: usize) -> Option<Vec<String>> {
 /// of a fixed host), "relative" (a same-origin path) or "clean".
 pub fn url_taint(a: &str, ctx: &dyn TaintCtx, depth: usize) -> &'static str {
     let a = a.trim();
-    if same_site().match_start(a).is_some() {
+    if all_same_site(a) {
         return "relative";
     }
     if let Some(name) = bare(a) {
         if depth < 6 && ctx.rhs(name).is_none() {
             // a parameter: what every caller passes (`requestJson('/chat/api/x', ...)`)
             if let Some(given) = ctx.passed(name) {
-                if !given.is_empty() && given.iter().all(|x| same_site().match_start(x).is_some()) {
+                if !given.is_empty() && given.iter().all(|x| all_same_site(x)) {
                     return "relative";
                 }
             }
@@ -1204,6 +1453,53 @@ mod tests {
         let c = Filled(Ctx { names: vec!["buffer", "p"], values: HashMap::new() });
         assert!(!path_dirty("buffer", &c, 0, &HashSet::new()));
         assert!(path_dirty("p", &c, 0, &HashSet::new()));
+    }
+
+    /// test_security_round4.Helpers.test_code_parts
+    #[test]
+    fn code_parts_cases() {
+        let w = |t: &str| code_parts(t).split_whitespace().map(String::from).collect::<Vec<_>>();
+        assert!(w("f\"\"\"FROM t h\n JOIN c ON c.Id\"\"\"").is_empty());
+        assert_eq!(
+            vec!["a", "b['k']", "+", "+", "#{params[:id]}", "$id", "+", "y"],
+            w("f\"SELECT {a} {b['k']} {{x}}\" + 'q' + \"#{params[:id]} $id\" + `/x/${y}`")
+        );
+        assert_eq!("x + \"cut", code_parts("x + \"cut"));
+        assert_eq!(vec!["q"], w("$\"SELECT {q}\""));
+        assert!(w("@\"C:\\dir\"").is_empty());
+    }
+
+    /// test_security_round4.Helpers.test_branches_and_same_site
+    #[test]
+    fn branches_and_same_site() {
+        assert_eq!(vec!["'/a'", "'/b'"], branches("c ? '/a' : '/b'"));
+        assert_eq!(vec!["'/a'", "'/b'"], branches("'/a' if c else '/b'"));
+        assert_eq!(vec!["a?.b"], branches("a?.b"));
+        assert!(all_same_site("state.x ? '/chat/?include_archived=1' : '/chat/'"));
+        assert!(!all_same_site("c ? '/a' : u"));
+    }
+
+    struct Resolved(Ctx);
+    impl TaintCtx for Resolved {
+        fn dirty(&self, t: &str) -> bool {
+            self.0.dirty(t)
+        }
+        fn rhs(&self, n: &str) -> Option<(String, Box<dyn TaintCtx + '_>)> {
+            self.0.rhs(n)
+        }
+        fn callees(&self, n: &str) -> Vec<String> {
+            if n == "render_pdf" { vec!["app/pdf.render_pdf".to_string()] } else { Vec::new() }
+        }
+    }
+
+    /// test_security_round4.Helpers.test_summarised_by_the_calls_target
+    #[test]
+    fn summarised_by_the_calls_target() {
+        let c = Resolved(Ctx { names: vec![], values: HashMap::new() });
+        let ids = HashSet::from(["app/pdf.render_pdf".to_string()]);
+        assert!(summarised("render_pdf('x.html', po=po)", &c, &ids));
+        assert!(!summarised("other('x')", &c, &ids));
+        assert!(summarised("helper(1)", &c, &HashSet::from(["helper".to_string()])));
     }
 
     #[test]
