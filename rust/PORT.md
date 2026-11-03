@@ -413,7 +413,9 @@ Python's pickle. `precise::summary` is `stats --precise`'s line,
 CR / CRLF, waivers, holds, every helper and expression form, refused and
 broken rules, timeouts, killed and missing commands, grandchildren holding
 the pipe, fuzz replay quoting): 0 differences. `parity --edges --precise`
-compares the precise graphs from cold.
+compares the precise graphs from cold. Still to run (Pylon Primos was
+unreachable when this landed): `parity --edges --precise` on the bench repos
+with pyright, rust-analyzer, gopls and tsserver, all installed there.
 
 **Tests.** `tests/runtime_cmd.rs` (Breaks, Config, Cli of test_runtime.py,
 plus the JSON, float, seed, shlex and newline shapes), `tests/runtime_compile.rs`
