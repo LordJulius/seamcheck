@@ -32,6 +32,8 @@ struct Args {
     errors_only: bool,
     all: bool,
     ext: Option<String>,
+    q: seamcheck::queries::cli::Opts,
+    html: Option<String>,
 }
 
 fn usage_error(msg: &str) -> ! {
@@ -48,8 +50,20 @@ fn parse(argv: Vec<String>) -> Args {
         *i += 1;
         argv.get(*i).cloned().unwrap_or_else(|| usage_error(&format!("argument {name}: expected one argument")))
     };
+    // argparse fills `args` (nargs="*") from the first run of positionals
+    // that has any; a positional in a later run is unrecognized
+    let mut stray: Vec<String> = Vec::new();
     while i < argv.len() {
         let x = argv[i].clone();
+        let is_pos = !(x.starts_with('-') && x.len() > 1);
+        if !is_pos && positional.len() >= 2 && x != "--" {
+            stray.push(String::new()); // (a marker: the args run is closed)
+        }
+        if is_pos && !stray.is_empty() {
+            stray.push(x);
+            i += 1;
+            continue;
+        }
         let (flag, inline) = match x.split_once('=') {
             Some((f, v)) if f.starts_with("--") => (f.to_string(), Some(v.to_string())),
             _ => (x.clone(), None),
@@ -82,9 +96,17 @@ fn parse(argv: Vec<String>) -> Args {
             "--errors-only" => a.errors_only = true,
             "--all" => a.all = true,
             "--ext" => a.ext = Some(val(&mut i)),
-            "--no-cache" | "--exact" | "--precise" | "--fuzzy" | "--wide" | "--ids" | "--apply" | "--code"
-            | "--strict" | "--echo" | "--hook" | "--force" => {}
-            "--html" | "--depth" | "--log" | "--timeout" | "--seeds" | "--jobs" | "--limit" | "--level" | "--via" => {
+            "--fuzzy" => a.q.fuzzy = true,
+            "--wide" => a.q.wide = true,
+            "--code" => a.q.code = true,
+            "--html" => a.html = Some(val(&mut i)),
+            "--depth" | "--limit" => {
+                let v = val(&mut i);
+                let n: i64 = v.parse().unwrap_or_else(|_| usage_error(&format!("argument {flag}: invalid int value: '{v}'")));
+                if flag == "--depth" { a.q.depth = n } else { a.q.limit = n }
+            }
+            "--no-cache" | "--exact" | "--precise" | "--ids" | "--apply" | "--strict" | "--echo" | "--hook" | "--force" => {}
+            "--log" | "--timeout" | "--seeds" | "--jobs" | "--level" | "--via" => {
                 let _ = val(&mut i);
             }
             _ if x.starts_with('-') && x.len() > 1 => usage_error(&format!("unrecognized arguments: {x}")),
@@ -95,11 +117,19 @@ fn parse(argv: Vec<String>) -> Args {
     if positional.is_empty() {
         usage_error("the following arguments are required: cmd");
     }
+    let stray: Vec<String> = stray.into_iter().filter(|s| !s.is_empty()).collect();
+    if !stray.is_empty() {
+        usage_error(&format!("unrecognized arguments: {}", stray.join(" ")));
+    }
     a.cmd = positional.remove(0);
     if !COMMANDS.contains(&a.cmd.as_str()) {
         usage_error(&format!("argument cmd: invalid choice: '{}'", a.cmd));
     }
     a.args = positional;
+    a.q.args = a.args.clone();
+    a.q.json = a.format == "json";
+    a.q.since = a.since.clone();
+    a.q.staged = a.staged;
     a
 }
 
@@ -146,6 +176,9 @@ fn main() {
         "port-dump" => port_dump(&a, &root),
         "matrix" => matrix(&a, &root),
         "tighten" => tighten(&a, &root),
+        "callers" | "callees" | "path" | "find" | "context" | "search" | "impact" | "dead" | "stats" => query(&a, &root, t0),
+        "map" => map(&a, &root),
+        "serve" => seamcheck::serve::main(&root, &a.config),
         other => {
             eprintln!(
                 "seamcheck (rust, phase 1): `{other}` is not ported yet; it needs the call graph (phase 2). \
@@ -155,6 +188,39 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// The query commands (queries::cli), over one loaded graph.
+fn query(a: &Args, root: &Path, t0: Instant) -> i32 {
+    let p = Project::load(root, &a.config);
+    let g = seamcheck::graph::Graph::load(&p);
+    let q = seamcheck::queries::Q::new(&p, &g);
+    let r = if a.cmd == "stats" { q.cmd_stats(&a.q, Some(t0.elapsed().as_millis())) } else { q.command(&a.cmd, &a.q) };
+    print!("{}", r.out);
+    eprint!("{}", r.err);
+    r.code
+}
+
+/// `map --html out.html`: the interactive map (report.rs).
+fn map(a: &Args, root: &Path) -> i32 {
+    let p = Project::load(root, &a.config);
+    let g = seamcheck::graph::Graph::load(&p);
+    if let Some(out) = &a.html {
+        let only: Option<Vec<String>> = a.only.as_ref().map(|x| x.split(',').map(String::from).collect());
+        let skip: Option<Vec<String>> = a.skip.as_ref().map(|x| x.split(',').map(String::from).collect());
+        let findings = run_rules(&p, only.as_deref(), skip.as_deref());
+        if let Err(e) = seamcheck::report::write_html(&p, &g, &findings, Path::new(out)) {
+            eprintln!("seamcheck map: {out}: {e}");
+            return 1;
+        }
+    }
+    println!(
+        "map: {} modules, {} functions -> {}",
+        g.modules.len(),
+        g.funcs.len(),
+        a.html.as_deref().unwrap_or("(use --html out.html)")
+    );
+    0
 }
 
 fn check(a: &Args, root: &Path, t0: Instant) -> i32 {
@@ -170,6 +236,12 @@ fn check(a: &Args, root: &Path, t0: Instant) -> i32 {
     let mut findings = run_rules(&p, only.as_deref(), skip.as_deref());
     if a.errors_only {
         findings.retain(|f| f.severity == "error");
+    }
+    if let Some(out) = &a.html {
+        let g = seamcheck::graph::Graph::load(&p);
+        if let Err(e) = seamcheck::report::write_html(&p, &g, &findings, Path::new(out)) {
+            eprintln!("seamcheck check: {out}: {e}");
+        }
     }
     let w = whys(&p);
     let failed = findings.iter().any(|f| f.severity == "error");
@@ -356,7 +428,20 @@ fn port_dump(a: &Args, root: &Path) -> i32 {
                 println!("{line}");
             }
         }
-        _ => usage_error("port-dump: parse | edges | chains"),
+        Some("queries") => {
+            // port-dump queries FILE: each line a JSON argv (`["callers", "save", "--depth", "1"]`),
+            // run through the CLI's own parsing and printing over one loaded graph (parity --queries)
+            let g = seamcheck::graph::Graph::load(&p);
+            let q = seamcheck::queries::Q::new(&p, &g);
+            let list = std::fs::read_to_string(a.args.get(1).map(|s| s.as_str()).unwrap_or("-")).unwrap_or_default();
+            for line in list.lines().filter(|l| !l.trim().is_empty()) {
+                let argv: Vec<String> = serde_json::from_str(line).unwrap_or_default();
+                let qa = parse(argv.clone());
+                let r = q.command(&qa.cmd, &qa.q);
+                println!("{}", json!({"argv": argv, "code": r.code, "out": r.out}));
+            }
+        }
+        _ => usage_error("port-dump: parse | edges | chains | queries"),
     }
     eprintln!("port-dump: {} ms", t.elapsed().as_millis());
     0

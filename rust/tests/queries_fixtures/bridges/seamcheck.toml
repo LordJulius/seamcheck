@@ -1,0 +1,15 @@
+[project]
+name = "b"
+include = ["lib/**", "app/**", "web/**"]
+areas = { hub = ["lib/**"], phone = ["app/**"], web = ["web/**"] }
+
+[[bridge]]
+id = "http"
+match = "segments"
+from = { in = ["app/**"], pattern = '"[^"]*?(/api/[\w/$]*)', rewrite = [['\$\w+', ':p']] }
+to = { run = "cat routes.txt", pattern = '(?m)^\s*\w+\s+(/api/\S*)\s+(\S+)\s+:(\w+)', token = 1, rewrite = [[':\w+', ':p']], target = "{2}.{3}" }
+
+[[bridge]]
+id = "push"
+from = { in = ["lib/**"], pattern = 'push\(socket,\s*"(\w+)"' }
+to = { in = ["web/**"], pattern = '\.on\(\s*"(\w+)"' }

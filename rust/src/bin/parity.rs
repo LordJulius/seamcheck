@@ -2,7 +2,7 @@
 //! projects and diff their findings.
 //!
 //!   parity [--python DIR] [--rust BIN] [--gate] [--staged] [--fixtures DIR]
-//!          [--parse] [--edges] [--untyped] [--ext .ex,.exs] [--check] [REPO...]
+//!          [--parse] [--edges] [--untyped] [--ext .ex,.exs] [--check] [--queries] [--serve] [REPO...]
 //!
 //! For each REPO (and each sub-directory of --fixtures): `check --format json`
 //! from both (Python with `--skip` for the rules `port-status` defers), and
@@ -23,6 +23,8 @@
 //! every non-Elixir adapter's), Python answering the same sites on the same
 //! blanked code (PY_CHAINS, fed Rust's lang::probe output). With any of the
 //! three the `check` comparison runs only when --check is given too.
+//! --queries / --serve: the query commands and the MCP server over a
+//! spread of the project's functions (parity/queries.rs).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -30,6 +32,9 @@ use std::process::Command;
 use std::time::Instant;
 
 use serde_json::Value;
+
+#[path = "parity/queries.rs"]
+mod queries;
 
 /// How many differences to print (env PARITY_MAX, default 60).
 fn max_show() -> usize {
@@ -46,6 +51,8 @@ struct Opts {
     chains: bool,
     untyped: bool,
     check: bool,
+    queries: bool,
+    serve: bool,
     ext: Vec<String>,
     repos: Vec<PathBuf>,
 }
@@ -62,6 +69,8 @@ fn opts() -> Opts {
         chains: false,
         untyped: false,
         check: false,
+        queries: false,
+        serve: false,
         ext: seamcheck::lang::ported_exts().iter().map(|s| s.to_string()).collect(),
         repos: vec![],
     };
@@ -84,6 +93,8 @@ fn opts() -> Opts {
             "--chains" => o.chains = true,
             "--untyped" => o.untyped = true,
             "--check" => o.check = true,
+            "--queries" => o.queries = true,
+            "--serve" => o.serve = true,
             "--ext" => {
                 i += 1;
                 o.ext = args[i].split(',').map(String::from).collect();
@@ -102,7 +113,7 @@ fn opts() -> Opts {
             "-h" | "--help" => {
                 println!(
                     "parity [--python DIR] [--rust BIN] [--gate] [--staged] [--fixtures DIR] \
-                     [--parse] [--edges] [--untyped] [--ext .ex,.exs] [--check] [REPO...]"
+                     [--parse] [--edges] [--untyped] [--ext .ex,.exs] [--check] [--queries] [--serve] [REPO...]"
                 );
                 std::process::exit(0);
             }
@@ -110,7 +121,7 @@ fn opts() -> Opts {
         }
         i += 1;
     }
-    if !o.parse && !o.edges && !o.chains {
+    if !o.parse && !o.edges && !o.chains && !o.queries && !o.serve {
         o.check = true;
     }
     if o.repos.is_empty() {
@@ -576,6 +587,12 @@ fn main() {
         }
         if o.chains {
             total += chain_parity(&o, repo, &name);
+        }
+        if o.queries {
+            total += queries::query_parity(&o, repo, &name);
+        }
+        if o.serve {
+            total += queries::serve_parity(&o, repo, &name);
         }
         if !o.check {
             if total == before {

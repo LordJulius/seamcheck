@@ -13,9 +13,12 @@ pub mod model;
 pub mod output;
 pub mod project;
 pub mod pyre;
+pub mod queries;
+pub mod report;
 pub mod rules;
 pub mod runtime;
 pub mod scan;
+pub mod serve;
 pub mod verify;
 pub mod walk;
 

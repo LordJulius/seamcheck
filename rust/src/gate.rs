@@ -54,6 +54,12 @@ fn hunk() -> &'static Rx {
 /// Lines added or changed since `ref` (committed, staged, unstaged), per
 /// file; an untracked file counts whole. `staged`: only what is staged.
 pub fn changed_lines(p: &Project, r: &str, staged: bool) -> Lines {
+    changed_lines_with(p, r, staged, false)
+}
+
+/// `changed_lines`, and with `deletions` a pure deletion marks the line it
+/// happened after (impact: a function that lost lines changed too).
+pub fn changed_lines_with(p: &Project, r: &str, staged: bool, deletions: bool) -> Lines {
     let mut out: Lines = BTreeMap::new();
     let mut args = vec!["diff", "-U0", "--no-color"];
     if staged {
@@ -81,6 +87,9 @@ pub fn changed_lines(p: &Project, r: &str, staged: bool) -> Lines {
                     let start: usize = m.s(1).parse().unwrap_or(0);
                     let n: usize = m.get(2).map(|x| x.parse().unwrap_or(0)).unwrap_or(1);
                     out.entry(c.clone()).or_default().extend(start..start + n);
+                    if n == 0 && deletions {
+                        out.entry(c.clone()).or_default().extend([start.max(1), start + 1]);
+                    }
                 }
                 out.entry(c.clone()).or_default();
             }
