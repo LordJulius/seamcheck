@@ -44,6 +44,8 @@ struct Args {
     timeout: f64,
     seeds: String,
     jobs: i64,
+    hook: bool,
+    force: bool,
 }
 
 fn usage_error(msg: &str) -> ! {
@@ -132,7 +134,9 @@ fn parse(argv: Vec<String>) -> Args {
             }
             "--precise" => a.precise = true,
             "--no-cache" => a.no_cache = true,
-            "--exact" | "--ids" | "--apply" | "--hook" | "--force" => {}
+            "--exact" | "--ids" | "--apply" => {}
+            "--hook" => a.hook = true,
+            "--force" => a.force = true,
             _ if x.starts_with('-') && x.len() > 1 => usage_error(&format!("unrecognized arguments: {x}")),
             _ => positional.push(x),
         }
@@ -187,6 +191,9 @@ fn main() {
         std::process::exit(seamcheck::verify::main(&argv[1..]));
     }
     let a = parse(argv);
+    if a.cmd == "init" {
+        std::process::exit(seamcheck::init::main(&seamcheck::init::abspath(&a.root), a.hook, a.force));
+    }
     let root = if a.config.is_empty() {
         find_root(&a.root)
     } else {
