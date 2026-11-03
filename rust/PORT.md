@@ -194,10 +194,10 @@ code); `_Ctx.assigned` (`TaintCtx::assigned`: the latest plain assignment past t
 calls that only add to the object, `_Taint.assigned` over the `.append` / `.write`
 steps, not the loops) lets `path_dirty` see `buffer = io.BytesIO()` through
 `buffer.write(data)`; `referer_severity` and `security::referer_only` / `via` are
-inside `Sinks::verdict` already. Still to carry in arch/path.rs + arch/taint.rs:
-setting `confined` / `same_site`, and `assigned` on the path rule's ctx; until then
-Rust reports invoice, notes and managed in tests/fixtures/flask_round3 (no Rust test
-reads that fixture yet).
+inside `Sinks::verdict` already. The path port carries the rest: arch/path.rs
+sets `confined` / `same_site` (memoised per load), arch/taint.rs keeps `adds` and
+answers `assigned`; tests/security_paths.rs reads tests/fixtures/flask_round3
+(TheAppShape), and its check parity is identical.
 
 Flask types (same lane): `infer_flask.py` / `graph/infer/flask.rs` (a
 model's `.query` as an `Ext` value tagged `\0rows`, Flask-Login's

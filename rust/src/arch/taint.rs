@@ -409,6 +409,8 @@ pub struct Taint {
     steps: Vec<Step>,
     /// (line, name) -> the value's raw text, for a plain assignment (security's verdicts read it)
     values: HashMap<(usize, String), String>,
+    /// name -> the lines a value was added to it at (`buf.write(x)`, `xs.append(q)`)
+    adds: HashMap<String, HashSet<usize>>,
     given: Vec<String>,
     start: usize,
     lines: Vec<String>,
@@ -423,6 +425,7 @@ impl Taint {
         let mut t = Taint {
             steps: Vec::new(),
             values: HashMap::new(),
+            adds: HashMap::new(),
             given: given.to_vec(),
             start: f.start,
             lines: code.split('\n').map(String::from).collect(),
@@ -461,11 +464,13 @@ impl Taint {
         // only ever taint: a value put into an object (`sb.append(id)`, `doc.Load(Request.Body)`, `xs.push(q)`)
         // and a loop variable over a tainted collection (`for (T x : xs)`, `foreach (var x in xs)`, `for x in xs:`)
         let mut adds: HashSet<usize> = HashSet::new();
+        let mut muts: HashSet<usize> = HashSet::new(); // (the calls of those, not the loops)
         for am in re!(r"(?m)^([ \t]*)([$@]?[A-Za-z_]\w*)\.(?:append|add|addAll|put|push|extend|insert|concat|write|Append|AppendFormat|AppendLine|Add|AddRange|Insert|Load|LoadXml|Write)[ \t]*\(")
             .find_iter(&code)
         {
             found.push((am.start(), am.s(1).into(), vec![am.s(2).into()], am.end()));
             adds.insert(am.end());
+            muts.insert(am.end());
             conds.insert(am.end(), close(&code, am.end()));
         }
         for am in re!(r"(?m)^([ \t]*)(?:[\w}]+[ \t]+)?for(?:each)?[ \t]*\([ \t]*(?:(?:const|let|var|final)[ \t]+)?(?:[\w<>\[\],.?]+[ \t]+)?([A-Za-z_]\w*)[ \t]+(?:in|of|:)[ \t]+")
@@ -533,6 +538,9 @@ impl Taint {
             if adds.contains(&val) && !dt {
                 continue; // (adding a clean value cleans nothing)
             }
+            if muts.contains(&val) {
+                t.adds.entry(ns[0].clone()).or_default().insert(ln);
+            }
             if !adds.contains(&val) && ns.len() == 1 {
                 t.values.insert((ln, ns[0].clone()), strip(value).to_string());
             }
@@ -559,6 +567,23 @@ impl Taint {
     pub fn rhs(&self, name: &str, line: usize) -> Option<(String, usize)> {
         let last = self.steps.iter().filter(|s| s.1 == name && s.0 < line).map(|s| s.0).max()?;
         self.values.get(&(last, name.to_string())).map(|v| (v.clone(), last))
+    }
+
+    /// Like `rhs`, past the calls that only add to the object (`buf.write(x)` keeps it a
+    /// buffer); None when a parameter, a loop or a destructuring came after it, or there is none
+    /// (arch._Taint.assigned).
+    pub fn assigned(&self, name: &str, line: usize) -> Option<(String, usize)> {
+        let mut lns: Vec<usize> = self.steps.iter().filter(|s| s.1 == name && s.0 < line).map(|s| s.0).collect();
+        lns.sort_unstable_by(|a, b| b.cmp(a));
+        for ln in lns {
+            if let Some(v) = self.values.get(&(ln, name.to_string())) {
+                return Some((v.clone(), ln));
+            }
+            if !self.adds.get(name).is_some_and(|a| a.contains(&ln)) {
+                return None;
+            }
+        }
+        None
     }
 
     /// The names that hold the value just before `line`.
@@ -640,6 +665,11 @@ impl TaintCtx for At<'_> {
 
     fn rhs(&self, name: &str) -> Option<(String, Box<dyn TaintCtx + '_>)> {
         let (v, ln) = self.taint.rhs(name, self.line)?;
+        Some((v, Box::new(At { g: self.g, f: self.f, taint: self.taint, cx: self.cx, line: ln })))
+    }
+
+    fn assigned(&self, name: &str) -> Option<(String, Box<dyn TaintCtx + '_>)> {
+        let (v, ln) = self.taint.assigned(name, self.line)?;
         Some((v, Box::new(At { g: self.g, f: self.f, taint: self.taint, cx: self.cx, line: ln })))
     }
 

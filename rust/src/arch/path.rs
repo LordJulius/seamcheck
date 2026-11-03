@@ -138,6 +138,10 @@ pub fn path(p: &Project, r: &Rule) -> Res<Vec<Finding>> {
             let got = p.memo(&key, || security::returns(&g, &|h: &Func| own_code(&g, h, true), call.as_deref()));
             let (done, buffers) = (got.0.clone(), got.1.clone());
             kinds.buffers = buffers;
+            // (a path checked under a root, a same-site URL)
+            let sums = p.memo("security.summaries", || security::summaries(&g, &|h: &Func| own_code(&g, h, true)));
+            kinds.confined = sums.0.clone();
+            kinds.same_site = sums.1.clone();
             if !done.is_empty() {
                 let mut names: Vec<&String> = done.iter().collect();
                 names.sort();

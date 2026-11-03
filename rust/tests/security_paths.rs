@@ -1,6 +1,6 @@
 //! The security pack's taint rules end to end (kind = "path" calling
 //! rules::security), ported from test_security_precision.py's rule-level
-//! and test_security_round2.py's rule-level classes (their text helpers are
+//! and test_security_round2.py's rule-level classes, and the round-3 app shape (their text helpers are
 //! ported in src/rules/security.rs).
 
 mod common;
@@ -319,12 +319,11 @@ fn a_relative_fetch_is_same_origin() {
     );
 }
 
-// test_security_precision.py: TheAppShape.test_only_the_injections_are_errors
-#[test]
-fn only_the_injections_are_errors() {
+/// (severity, sink file, sink line) of the security pack on one of the Python suite's
+/// fixtures (copied, so nothing is written beside it); a finding with no chain is where it is.
+fn app_shape(name: &str) -> Vec<(String, String, usize)> {
     std::env::set_var("SEAMCHECK_RS_QUIET", "1");
-    // (the Python suite's tests/fixtures/flask_sqla, copied so nothing is written beside it)
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/flask_sqla");
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures").join(name);
     let d = tempfile::tempdir().unwrap();
     copy(&src, d.path());
     let p = Project::load(d.path(), &[]);
@@ -341,16 +340,34 @@ fn only_the_injections_are_errors() {
         })
         .collect();
     got.sort();
-    let mut want: Vec<(String, String, usize)> =
-        [58, 76, 106, 120, 144].iter().map(|ln| ("error".to_string(), "app/main/routes.py".to_string(), *ln)).collect();
+    got
+}
+
+fn at(sev: &str, file: &str, line: usize) -> (String, String, usize) {
+    (sev.into(), file.into(), line)
+}
+
+// test_security_precision.py: TheAppShape.test_only_the_injections_are_errors
+#[test]
+fn only_the_injections_are_errors() {
+    let mut want: Vec<(String, String, usize)> = [58, 76, 106, 120, 144].iter().map(|ln| at("error", "app/main/routes.py", *ln)).collect();
     want.extend([
-        ("error".into(), "run.py".into(), 6),
-        ("error".into(), "server.js".into(), 11),
-        ("error".into(), "server.js".into(), 16),
-        ("warn".into(), "app/main/routes.py".into(), 113),
-        ("warn".into(), "tools/viewer.py".into(), 31),
+        at("error", "run.py", 6),
+        at("error", "server.js", 11),
+        at("error", "server.js", 16),
+        at("warn", "app/main/routes.py", 113),
+        at("warn", "tools/viewer.py", 31),
     ]);
-    assert_eq!(got, want);
+    assert_eq!(app_shape("flask_sqla"), want);
+}
+
+// test_security_round3.py: TheAppShape.test_only_the_injections_are_errors
+#[test]
+fn round3_only_the_injections_are_errors() {
+    assert_eq!(
+        app_shape("flask_round3"),
+        vec![at("error", "app/main/files.py", 40), at("error", "app/main/files.py", 55), at("warn", "app/main/files.py", 50)]
+    );
 }
 
 fn copy(from: &std::path::Path, to: &std::path::Path) {
