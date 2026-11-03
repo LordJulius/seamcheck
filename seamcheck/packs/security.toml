@@ -14,7 +14,8 @@
 # read only the argument they use (seamcheck/security.py): SQL text built from the
 # value, a URL whose host comes from it (a fixed host with the value in its path is
 # `url_severity`), a path that isn't an in-memory buffer, a command run by a shell
-# (a fixed program's argument list is `argv_severity`). `lookups`: an assignment
+# (a fixed program's argument list is `argv_severity`), a redirect whose scheme or host
+# comes from the value (`redirect_sinks`). `lookups`: an assignment
 # from a database lookup holds the row, not the value. `source_scope`: the source
 # counts in files that use its framework and in the functions they reach. A
 # project's own sanitizers: `[security] sanitizers = ["coerce_safe_redirect_target"]`.
@@ -35,6 +36,7 @@ to = ['^subprocess\.(Popen|run|call|check_call|check_output|getoutput|getstatuso
       '^(requests|httpx|urllib\.request|urllib2|session)\.(get|post|put|request|urlopen)$', '^urlopen$']
 unless = ["escape", "sanitize", "quote", "safe_load", "secure_filename", "safe_join", "validate", "clean", "url_for", "reverse", "int", "float", "uuid"]
 sql_sinks = ['\.(execute|executemany|executescript|raw|extra)$']
+redirect_sinks = ['^(redirect|HttpResponseRedirect)$']
 url_sinks = ['^(requests|httpx|urllib\.request|urllib2|session)\.(get|post|put|request|urlopen)$', '^urlopen$']
 path_sinks = ['^open$', '^send_file$']
 shell_sinks = ['^subprocess\.(Popen|run|call|check_call|check_output)$']
@@ -48,12 +50,12 @@ severity = "warn"
 why = "a value the desktop user typed or picked (a file dialog, argv, input()) reaching a shell or eval runs what they may not mean to"
 fix = "pass it in an argument list (no shell), or parse it instead of evaluating it"
 from = ["**/*.py:*"]
-source = '\bQ(?:FileDialog|InputDialog)\.get\w+|\b(?:filedialog|simpledialog)\.ask\w+|\bsys\.argv\b|(?<![\w.])input\s*\(|\.parse_args\s*\('
+source = '\bQ(?:FileDialog|InputDialog)\.get\w+|\b(?:filedialog|simpledialog)\.ask\w+|\bsys\.argv\b|(?<![\w.])(?<!def )input\s*\(|\.parse_args\s*\('
 to = ['^subprocess\.(Popen|run|call|check_call|check_output|getoutput|getstatusoutput)$', '^os\.(system|popen)$', '^(eval|exec)$']
 shell_sinks = ['^subprocess\.(Popen|run|call|check_call|check_output)$']
 argv_severity = "off"
 unless = ["escape", "sanitize", "quote", "validate", "clean", "int", "float"]
-depth = 6
+depth = 4
 
 [[rule]]
 id = "js-injection"
@@ -71,6 +73,7 @@ to = ['^(child_process|cp)\.(exec|execSync|spawn|spawnSync|execFile|execFileSync
       '(?i)(col|collection|coll)\.(find|findOne|findOneAndUpdate|findOneAndDelete|updateOne|updateMany|deleteOne|deleteMany|remove|count|countDocuments|aggregate)$']
 unless = ["escape", "sanitize", "validate", "normalize", "basename", "url_for", "parseInt", "parseFloat", "Number"]
 url_sinks = ['^(needle|axios|got|superagent|request|http|https)\.(get|post|put|request)$', '^fetch$']
+redirect_sinks = ['^(res|reply)\.redirect$']
 depth = 6
 
 [[rule]]

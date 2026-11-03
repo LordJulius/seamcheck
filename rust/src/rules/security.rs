@@ -29,6 +29,10 @@ pub trait TaintCtx {
     /// The latest plain assignment of `name` before this line: (its value's text, the taint at
     /// its line); None for a parameter, a loop variable, a destructuring, or no assignment.
     fn rhs(&self, name: &str) -> Option<(String, Box<dyn TaintCtx + '_>)>;
+    /// What every exact caller passes for parameter `name` (raw texts); None when unknown.
+    fn passed(&self, _name: &str) -> Option<Vec<String>> {
+        None
+    }
 }
 
 macro_rules! rx {
@@ -44,7 +48,7 @@ const STR: &str = r#"[rRbBuU]{0,2}(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')"#;
 rx!(fstr, r#"(?s)^[rRbB]?[fF][rRbB]?(["'])(.*)\1$"#);
 rx!(plain, r#"(?s)^[rRbBuU]{0,2}(["'])((?:(?!\1)[^\\]|\\.)*)\1$"#);
 rx!(template, r"(?s)^`(.*)`$");
-rx!(same_site, r#"(?i)^\s*[fbru]{0,2}["'`]/(?![/\\])"#);
+rx!(same_site, r#"(?i)^\s*[fbru]{0,2}["'`]/[^/\\"'`]"#);
 rx!(
     query_object,
     r"(?:[A-Za-z_]\w*\.)*(?:select|insert|update|delete|union|union_all|exists|values|lateral|intersect|except_)\s*\(|[A-Z]\w*\.(?:query|objects|__table__)\b"
@@ -70,16 +74,30 @@ rx!(
         r"|(?:(?:re\.)?fullmatch\(\s*[^,()]+(?:\([^()]*\))?\s*,\s*(?P<n2>[A-Za-z_]\w*)\s*[,)])",
         r"|(?:(?<![\w.])(?!re\.)[A-Za-z_][\w.]*\.fullmatch\(\s*(?P<n3>[A-Za-z_]\w*)\s*[,)])",
         r"|(?:(?P<n5>[A-Za-z_]\w*)\.startswith\()",
+        r"|(?:(?P<rx>[A-Za-z_]\w*)\.match\(\s*(?P<n6>[A-Za-z_]\w*)\s*[,)])",
+        r#"|(?:(?:re\.)?match\(\s*[rbuRBU]{0,2}(?:"\^[^"\n]*\$"|'\^[^'\n]*\$')\s*,\s*(?P<n7>[A-Za-z_]\w*)\s*[,)])"#,
         r"|(?:(?:url_has_allowed_host_and_scheme|is_safe_url|is_safe_redirect)\(\s*(?:url\s*=\s*)?(?P<n4>[A-Za-z_]\w*)\s*[,)])"
     )
 );
+rx!(range_rx, r"(?<![\w.])([A-Za-z_]\w*)\s*(?:<=?|>=?)\s*-?\d|-?\d[\w.]*\s*(?:<=?|>=?)\s*([A-Za-z_]\w*)(?![\w.(\[])");
+rx!(anchored_rx, r#"^([A-Za-z_]\w*)\s*=\s*re\.compile\(\s*[rbuRBU]{0,2}(["'])(?:\^|\\A)[^"'\n]*(?:\$|\\Z|\\z)\2"#);
+rx!(return_rx, r"(?m)^[ \t]*return\b[ \t]*(.*)$");
+rx!(
+    const_rx,
+    r#"^(?:None|True|False|-?\d[\w.]*|null|undefined|true|false|[rbuRBU]{0,2}"(?:[^"\\$#]|\\.)*"|[rbuRBU]{0,2}'(?:[^'\\]|\\.)*')?;?$"#
+);
+rx!(buffer_ann, r#"->\s*['"]?(?:io\.)?(?:BytesIO|StringIO)\b"#);
+rx!(whole_call_rx, r"(?:await\s+)?(?:[A-Za-z_$][\w$]*\.)*([A-Za-z_$][\w$]*)\s*\(");
+rx!(trailing_comment, r"\s*#[^\n]*$");
+rx!(quoted, r#"(["'])(?:(?!\1)[^\\]|\\.)*\1"#);
 rx!(netloc, r"\b(?:urlsplit|urlparse)\(\s*([A-Za-z_]\w*)\s*\)\.netloc\b");
 rx!(allowed, r"(?<![\w.])([A-Za-z_]\w*)\s+(not\s+)?in\s+(?:[A-Z][A-Z0-9_]*\b|[\[({])");
 rx!(not_before, r"\bnot\s+$");
 rx!(kwarg_rx, r"(?s)\s*([A-Za-z_]\w*)\s*=(?!=)\s*(.*)$");
 rx!(bare_rx, r"[$@]?[A-Za-z_]\w*");
+rx!(bare_ident, r"[A-Za-z_]\w*");
 rx!(interp_rx, r"#\{|\$\{");
-rx!(relative_lead, r"/(?![/\\])");
+rx!(relative_lead, r"/[^/\\]");
 rx!(scheme_slashes, r"^(?:[A-Za-z][\w+.-]*:)?//");
 rx!(authority_end, r"^(?:[A-Za-z][\w+.-]*:)?//[^/?#]*[/?#]");
 rx!(scheme_only, r"^[A-Za-z][\w+.-]*:?/?$");
@@ -103,15 +121,22 @@ const SQL_KWS: [&str; 4] = ["sql", "statement", "query", "stmt"];
 
 /// The names a Python `if` condition checks (security.guarded): (name, inside), inside = only
 /// within the block (`if x.isdigit():`), else from the `if` on (`if not x.isdigit(): return`).
-pub fn guarded(cond: &str) -> Vec<(String, bool)> {
+/// `anchored`: the file's patterns compiled with both anchors, whose `.match(x)` is a full match.
+pub fn guarded(cond: &str, anchored: &HashSet<String>) -> Vec<(String, bool)> {
     let mut out: Vec<(String, bool)> = Vec::new();
     for m in validator().find_iter(cond) {
-        let Some(name) = ["n1", "n2", "n3", "n5", "n4"].iter().find_map(|n| m.name(n)) else { continue };
+        if m.name("rx").is_some_and(|rx| !anchored.contains(rx)) {
+            continue;
+        }
+        let Some(name) = ["n1", "n2", "n3", "n5", "n6", "n7", "n4"].iter().find_map(|n| m.name(n)) else { continue };
         let negated = not_before().is_match(&cond[..m.start()]);
         out.push((name.to_string(), !negated));
     }
     for m in netloc().find_iter(cond) {
         out.push((m.s(1).to_string(), false));
+    }
+    for m in range_rx().find_iter(cond) {
+        out.push((m.get(1).or(m.get(2)).unwrap_or("").to_string(), false));
     }
     for m in allowed().find_iter(cond) {
         if !["not", "and", "or", "is", "if"].contains(&m.s(1)) {
@@ -120,6 +145,122 @@ pub fn guarded(cond: &str) -> Vec<(String, bool)> {
     }
     let mut seen = HashSet::new();
     out.into_iter().filter(|(n, _)| seen.insert(n.clone())).collect()
+}
+
+/// A file's module-level `NAME = re.compile(r"^...$")` (security.anchored).
+pub fn anchored(m: &Module) -> HashSet<String> {
+    m.raw.iter().filter_map(|ln| anchored_rx().match_start(ln).map(|c| c.s(1).to_string())).collect()
+}
+
+/// What functions return, by name (security.returns): (sanitized, buffers). `code(f)`: a function's
+/// own raw code; `call`: the rule's sanitizer-call pattern.
+pub fn returns(g: &Graph, code: &dyn Fn(&Func) -> String, call: Option<&Rx>) -> (HashSet<String>, HashSet<String>) {
+    const EXTS: [&str; 7] = [".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"];
+    let mut rets: Vec<(&Func, String, Vec<String>)> = Vec::new();
+    let mut by_id: HashMap<&str, usize> = HashMap::new();
+    for id in g.funcs.keys() {
+        let Some(f) = g.func(id) else { continue };
+        if f.kind == "top" || !EXTS.iter().any(|e| f.file.ends_with(e)) {
+            continue;
+        }
+        let body = code(f);
+        if !body.contains("return") {
+            continue;
+        }
+        let exprs: Vec<String> = return_rx().find_iter(&body).iter().map(|m| ret_expr(&body, m.span(1).unwrap(), m.end())).collect();
+        if !exprs.is_empty() {
+            by_id.insert(id.as_str(), rets.len());
+            rets.push((f, body, exprs));
+        }
+    }
+    let mut by_name: HashMap<&str, Vec<&str>> = HashMap::new();
+    for id in g.funcs.keys() {
+        if let Some(f) = g.func(id) {
+            by_name.entry(f.name.as_str()).or_default().push(id.as_str());
+        }
+    }
+    let clean_ret = |e: &String, sanit: &HashSet<String>| const_rx().match_start(e).is_some() || sanitizing_call(e, call, sanit);
+    let mut sanit: HashSet<String> = HashSet::new();
+    for _ in 0..6 {
+        let mut grown = false;
+        for (f, _, exprs) in &rets {
+            if sanit.contains(&f.name) || !exprs.iter().all(|e| clean_ret(e, &sanit)) {
+                continue;
+            }
+            let all = by_name.get(f.name.as_str()).map(|ids| {
+                ids.iter().all(|i| by_id.get(i).is_some_and(|&k| rets[k].2.iter().all(|e| clean_ret(e, &sanit))))
+            });
+            if all == Some(true) {
+                sanit.insert(f.name.clone());
+                grown = true;
+            }
+        }
+        if !grown {
+            break;
+        }
+    }
+    let mut buffers = HashSet::new();
+    for (name, ids) in &by_name {
+        if !ids.is_empty() && ids.iter().all(|i| by_id.get(i).is_some_and(|&k| returns_buffer(&rets[k].1, &rets[k].2))) {
+            buffers.insert(name.to_string());
+        }
+    }
+    (sanit, buffers)
+}
+
+/// A `return`'s whole expression, on to the line its brackets close (security._ret_expr).
+fn ret_expr(body: &str, (a, b): (usize, usize), end: usize) -> String {
+    let mut text = body[a..b].to_string();
+    let mut k = end;
+    while depth_of(&text) > 0 && k < body.len() {
+        let nl = body[(k + 1).min(body.len())..].find('\n').map(|x| x + k + 1).unwrap_or(body.len());
+        text.push('\n');
+        text.push_str(&body[(k + 1).min(nl)..nl]);
+        k = nl;
+    }
+    let t = trailing_comment().sub("", text.trim());
+    t.trim_end_matches(';').trim().to_string()
+}
+
+fn depth_of(text: &str) -> i32 {
+    quoted().sub("", text).chars().map(|c| ("([{".contains(c) as i32) - (")]}".contains(c) as i32)).sum()
+}
+
+/// The called name when e is one call (`name(...)`, `x.name(...)`) with nothing after it.
+pub fn whole_call(e: &str) -> Option<&str> {
+    let m = whole_call_rx().match_start(e)?;
+    let c: Vec<(usize, char)> = e.char_indices().collect();
+    let start = c.iter().position(|(i, _)| *i == m.end() - 1)?;
+    let mut d = 0i32;
+    let mut j = start;
+    while j < c.len() {
+        d += "([{".contains(c[j].1) as i32;
+        d -= ")]}".contains(c[j].1) as i32;
+        if d == 0 {
+            break;
+        }
+        j += 1;
+    }
+    let rest = if j + 1 < c.len() { &e[c[j + 1].0..] } else { "" };
+    if rest.trim().is_empty() { m.get(1) } else { None }
+}
+
+fn sanitizing_call(e: &str, call: Option<&Rx>, sanit: &HashSet<String>) -> bool {
+    let Some(name) = whole_call(e) else { return false };
+    sanit.contains(name) || call.is_some_and(|c| c.match_start(&e[e.find(name).unwrap_or(0)..]).is_some())
+}
+
+fn returns_buffer(body: &str, exprs: &[String]) -> bool {
+    if body.splitn(4, '\n').take(3).any(|ln| ln.contains(':') && buffer_ann().is_match(ln)) {
+        return true;
+    }
+    exprs.iter().all(|e| {
+        buffer().match_start(e).is_some()
+            || (bare_ident().fullmatch(e).is_some()
+                && Rx::new(&format!(r"(?m)^[ \t]*{}[ \t]*=[ \t]*(?:io\.)?(?:BytesIO|StringIO)\s*\(", regex::escape(e)))
+                    .map(|r| r.is_match(body))
+                    .unwrap_or(false))
+    })
 }
 
 /// `[security] sanitizers` from the merged config: the project's own clean-returning functions.
@@ -167,6 +308,9 @@ pub struct Sinks {
     pub url: Vec<Rx>,
     pub path: Vec<Rx>,
     pub shell: Vec<Rx>,
+    pub redirect: Vec<Rx>,
+    /// functions that return an in-memory buffer (the path rule sets it from [`returns`])
+    pub buffers: HashSet<String>,
     pub lookups: Option<Rx>,
     pub severity: String,
     pub url_severity: String,
@@ -191,6 +335,8 @@ impl Sinks {
             url: pats("url_sinks")?,
             path: pats("path_sinks")?,
             shell: pats("shell_sinks")?,
+            redirect: pats("redirect_sinks")?,
+            buffers: HashSet::new(),
             lookups,
             severity: sv("severity", "error"),
             url_severity: sv("url_severity", "warn"),
@@ -199,14 +345,14 @@ impl Sinks {
     }
 
     pub fn kind(&self, text: &str) -> Option<&'static str> {
-        [("sql", &self.sql), ("url", &self.url), ("path", &self.path), ("shell", &self.shell)]
+        [("sql", &self.sql), ("url", &self.url), ("path", &self.path), ("shell", &self.shell), ("redirect", &self.redirect)]
             .into_iter()
             .find(|(_, ps)| ps.iter().any(|p| p.is_match(text)))
             .map(|(k, _)| k)
     }
 
     pub fn any(&self) -> bool {
-        !(self.sql.is_empty() && self.url.is_empty() && self.path.is_empty() && self.shell.is_empty())
+        !(self.sql.is_empty() && self.url.is_empty() && self.path.is_empty() && self.shell.is_empty() && self.redirect.is_empty())
     }
 
     /// An assignment from a database lookup holds the database's row, not the value.
@@ -231,7 +377,11 @@ impl Sinks {
         let hit = |sev: &str, note: &str| Some((sev.to_string(), note.to_string()));
         match kind {
             "sql" => pick(&SQL_KWS).filter(|(_, a)| sql_dirty(a, ctx, 0)).and_then(|_| hit(&self.severity, "")),
-            "path" => pick(&PATH_KWS).filter(|(_, a)| path_dirty(a, ctx, 0)).and_then(|_| hit(&self.severity, "")),
+            "path" => pick(&PATH_KWS).filter(|(_, a)| path_dirty(a, ctx, 0, &self.buffers)).and_then(|_| hit(&self.severity, "")),
+            // an open redirect needs the value in the scheme or host (a literal host can't leave)
+            "redirect" => pick(&["location", "url", "redirect_to"])
+                .filter(|(_, a)| url_taint(a, ctx, 0) == "head")
+                .and_then(|_| hit(&self.severity, "")),
             "url" => {
                 let first = pick(&URL_KWS);
                 let how = first.as_ref().map(|(_, a)| url_taint(a, ctx, 0)).unwrap_or("clean");
@@ -311,14 +461,14 @@ pub fn sql_dirty(a: &str, ctx: &dyn TaintCtx, depth: usize) -> bool {
 }
 
 /// The path argument carries the value (an in-memory buffer is no path).
-pub fn path_dirty(a: &str, ctx: &dyn TaintCtx, depth: usize) -> bool {
+pub fn path_dirty(a: &str, ctx: &dyn TaintCtx, depth: usize, buffers: &HashSet<String>) -> bool {
     let a = a.trim();
-    if buffer().match_start(a).is_some() || !ctx.dirty(a) {
+    if buffer().match_start(a).is_some() || !ctx.dirty(a) || whole_call(a).is_some_and(|n| buffers.contains(n)) {
         return false;
     }
     if let Some(name) = bare(a) {
         return match ctx.rhs(name) {
-            Some((v, sub)) if depth <= 6 => path_dirty(&v, sub.as_ref(), depth + 1),
+            Some((v, sub)) if depth <= 6 => path_dirty(&v, sub.as_ref(), depth + 1, buffers),
             _ => true,
         };
     }
@@ -346,6 +496,16 @@ pub fn url_taint(a: &str, ctx: &dyn TaintCtx, depth: usize) -> &'static str {
     if same_site().match_start(a).is_some() {
         return "relative";
     }
+    if let Some(name) = bare(a) {
+        if depth < 6 && ctx.rhs(name).is_none() {
+            // a parameter: what every caller passes (`requestJson('/chat/api/x', ...)`)
+            if let Some(given) = ctx.passed(name) {
+                if !given.is_empty() && given.iter().all(|x| same_site().match_start(x).is_some()) {
+                    return "relative";
+                }
+            }
+        }
+    }
     if !ctx.dirty(a) {
         return "clean";
     }
@@ -359,6 +519,9 @@ pub fn url_taint(a: &str, ctx: &dyn TaintCtx, depth: usize) -> &'static str {
     if let Some((false, lead)) = parts.first() {
         if relative_lead().match_start(lead).is_some() {
             return "relative";
+        }
+        if lead == "/" && parts.len() > 1 {
+            return if ctx.dirty(&parts[1].1) { "head" } else { "tail" }; // (`"/" + x`: x may start with another `/`)
         }
     }
     let mut head: Vec<&String> = Vec::new();
@@ -715,7 +878,8 @@ mod tests {
     /// test_security_precision.TextHelpers.test_guarded
     #[test]
     fn guarded_cases() {
-        let g = guarded;
+        let none = HashSet::new();
+        let g = |c: &str| guarded(c, &none);
         assert_eq!(vec![("n".to_string(), false)], g("not NAME.fullmatch(n)"));
         assert_eq!(vec![("n".to_string(), true)], g("n.isdigit() and x"));
         assert_eq!(vec![("nxt".to_string(), false)], g("not nxt or urlsplit(nxt).netloc != ''"));
@@ -745,6 +909,54 @@ mod tests {
         assert_eq!(Some("warn".to_string()), s.verdict("url", &a(&["f'{base}/x'", "params={'q': q}"]), &c).map(|v| v.0));
         assert_eq!(Some("error".to_string()), s.verdict("url", &a(&["q"]), &c).map(|v| v.0));
         assert_eq!(None, s.verdict("sql", &a(&["text('SELECT :n')", "{'n': q}"]), &c));
+    }
+
+    /// test_security_round2.RoundTwoHelpers.test_guards_ranges_and_anchored_matches
+    #[test]
+    fn guards_ranges_and_anchored_matches() {
+        let none = HashSet::new();
+        let st: HashSet<String> = HashSet::from(["_STATE_RE".to_string()]);
+        assert_eq!(vec![("port".to_string(), false)], guarded("port < 1024 or port > 65535", &none));
+        assert_eq!(vec![("state".to_string(), false)], guarded("not _STATE_RE.match(state)", &st));
+        assert!(guarded("not _LOOSE.match(state)", &st).is_empty());
+        assert_eq!(vec![("s".to_string(), true)], guarded("re.match(r'^[a-z]+$', s)", &none));
+    }
+
+    struct P(Ctx);
+    impl TaintCtx for P {
+        fn dirty(&self, t: &str) -> bool {
+            self.0.dirty(t)
+        }
+        fn rhs(&self, n: &str) -> Option<(String, Box<dyn TaintCtx + '_>)> {
+            self.0.rhs(n)
+        }
+        fn passed(&self, n: &str) -> Option<Vec<String>> {
+            (n == "url").then(|| vec!["'/chat/api/send'".to_string(), "`/chat/api/thread/${id}`".to_string()])
+        }
+    }
+
+    /// test_security_round2.RoundTwoHelpers.test_whole_calls_and_relative_paths
+    #[test]
+    fn whole_calls_and_relative_paths() {
+        assert_eq!(Some("mode_url_for"), whole_call("mode_url_for('a', x=b)"));
+        assert_eq!(None, whole_call("f(a) + b"));
+        let c = Ctx { names: vec!["x"], values: HashMap::new() };
+        assert_eq!("head", url_taint("'/' + x", &c, 0));
+        assert_eq!("relative", url_taint("'/a/' + x", &c, 0));
+        let p = P(Ctx { names: vec!["url"], values: HashMap::new() });
+        assert_eq!("relative", url_taint("url", &p, 0));
+    }
+
+    /// test_security_round2.SanitizedReturns / BufferReturns: the summaries on their own
+    #[test]
+    fn returns_summaries() {
+        let ret = |e: &str| sanitizing_call(e, Some(&Rx::lit(r"(?:\w*url_for\w*|\w*coerce\w*)\s*\(")), &HashSet::new());
+        assert!(ret("mode_url_for('panel', pid=pid)"));
+        assert!(!ret("request.args.get('next')"));
+        assert!(returns_buffer("def f(rows) -> io.BytesIO:\n    return x\n", &["x".to_string()]));
+        assert!(returns_buffer("def f():\n    buf = io.BytesIO()\n    return buf\n", &["buf".to_string()]));
+        assert!(!returns_buffer("def f(n):\n    return os.path.join('/srv', n)\n", &["os.path.join('/srv', n)".to_string()]));
+        assert_eq!("t(a,\n  b)", ret_expr("    return t(a,\n  b)\n", (11, 15), 15));
     }
 
     #[test]

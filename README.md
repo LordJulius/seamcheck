@@ -431,6 +431,18 @@ most of the noise (104 errors on one real app, nearly all false):
 sanitizers = ["coerce_safe_redirect_target"]  # their return value is clean
 ```
 
+- A redirect (`redirect_sinks`) is open only when the value is in its scheme or
+  host: `redirect(f"http://127.0.0.1:{port}/callback?{query}")` is not.
+- A function's return is summarised by name: one that returns a sanitizer's,
+  url_for's or such a function's result is clean for its callers
+  (`redirect(_panel_target(id, return_to_url=_ret()))`), one annotated or seen
+  to return a `BytesIO` is no path, and one that returns the request's value
+  taints the argument it is called in. A parameter every caller fills with a
+  same-origin path (`requestJson('/chat/api/send', ...)`) is one, a value
+  compared with a number (`if port < 1024 or port > 65535`) or matched by a
+  pattern anchored at both ends (`_STATE_RE = re.compile(r"^...$")`) is
+  checked, and a function called with tainted SQL by one caller and constant
+  SQL by another is walked with both.
 - A row looked up by the value (`User.query.filter_by(name=q).first()`,
   `db.session.get(Post, pid)`: a rule's `lookups`) is the database's, not the
   value; `os.path` is no tainted `path` (an attribute isn't the name).

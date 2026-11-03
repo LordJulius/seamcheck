@@ -21,7 +21,7 @@ pub const RULE_KEYS: &[&str] = &[
     "id", "kind", "pattern", "in", "allow", "why", "severity", "if", "then", "scope", "window", "text", "defined",
     "used", "check", "from", "when", "to", "depth", "unless", "message", "mode", "report", "skip", "strict", "ignore",
     "package", "path", "func", "ordered", "source", "source_entry", "source_param", "source_not_param", "source_scope",
-    "sql_sinks", "url_sinks", "path_sinks", "shell_sinks", "url_severity", "argv_severity", "lookups", "views",
+    "sql_sinks", "url_sinks", "path_sinks", "shell_sinks", "redirect_sinks", "url_severity", "argv_severity", "lookups", "views",
     "extra_severity", "match", "fallback", "normalize", "rewrite", "run", "timeout", "sep", "wildcard", "lint",
     "options", "gate", "bar", "controls", "menus", "repo", "files", "prefix", "fix", "tighten", "via", "layers",
     "level", "allow_to", "fuzzy",

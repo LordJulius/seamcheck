@@ -325,14 +325,28 @@ def path(project, r: dict) -> list:
                     if got:
                         bound[f.id] = got
         # a helper that reads the request and returns it: `getCookie(request, "x")`, `WebUtils.getRequestBody(request)`
-        rd = sorted({f.name for f in project.funcs.values() if f.kind != "top" and re.match(r"[A-Za-z_]\w*$", f.name)
-                     and not tidy.is_test(project, f.file) and re.search(r"\breturn\b", _own_code(project, f))
-                     and source.search(_own_code(project, f, raw=True))})
-        readers = re.compile(rf"(?<![\w$])((?:[A-Za-z_]\w*\.)?)(?:{'|'.join(rd)})\s*\(") if rd else None
+        rd = {f.name for f in project.funcs.values() if f.kind != "top" and re.match(r"[A-Za-z_]\w*$", f.name)
+              and not tidy.is_test(project, f.file) and re.search(r"\breturn\b", _own_code(project, f))
+              and source.search(_own_code(project, f, raw=True))}
         # (raw text: `"#{params[:id]}"` reads the source inside a string)
-        starts = [f for f in starts if not tidy.is_test(project, f.file)
-                  and (f.id in bound or _reads_source(project, f, source, r.get("source_not_param"))
-                       or _reads(readers, _own_code(project, f)))]
+        direct = [f for f in starts if not tidy.is_test(project, f.file)
+                  and (f.id in bound or _reads_source(project, f, source, r.get("source_not_param")))]
+        if not rd and not direct:
+            return []  # nothing reads the source
+        # what each function returns, by name: a sanitized value (its own sanitizer call, url_for, or such a
+        # function's result), an in-memory buffer (security.returns)
+        done = set()
+        if kinds.any():
+            done, kinds.buffers = security.returns(project, lambda g, raw=False: _own_code(project, g, raw), clean)
+            if done:
+                extra = re.compile(rf"(?<![\w$])(?:{'|'.join(map(re.escape, sorted(done)))})\s*\(")
+                clean = (re.compile(f"(?:{clean[0].pattern})|(?:{extra.pattern})") if clean else extra,
+                         clean[1] if clean else re.compile(r"(?!x)x"))
+        rd = sorted(rd - done)
+        readers = re.compile(rf"(?<![\w$])((?:[A-Za-z_]\w*\.)?)(?:{'|'.join(rd)})\s*\(") if rd else None
+        seen = {f.id for f in direct}
+        starts = direct + [f for f in starts if f.id not in seen and not tidy.is_test(project, f.file)
+                           and _reads(readers, _own_code(project, f))]
         if r.get("source_scope"):  # (the web request: not a desktop tool's QNetworkRequest named `request`)
             starts = security.scoped(project, starts, re.compile(r["source_scope"]), depth)
     out, best = [], {}
@@ -347,6 +361,8 @@ def path(project, r: dict) -> list:
             for fid in frontier:
                 f = project.funcs[fid]
                 taint = _Taint(project, f, source, clean, given[fid], readers, kinds) if source is not None else None
+                if taint is not None:
+                    taint.readers = readers
                 for c in f.calls:
                     # (Ruby's bare `system`; a chained call on its own line, `.FromSql(q)`, keeps its dot)
                     text = (f"{c.qual}." if c.qual and c.qual not in (".", "self") else "." if c.qual == "." else "") + c.name
@@ -356,7 +372,8 @@ def path(project, r: dict) -> list:
                     if sev and not (source is not None and taint.downstream(project, f, c, {ln for (fl, ln) in hits if fl == f.file})):
                         hits[(f.file, c.line)] = (fid, text, sev, note)
                 for dst, ln, exact in project.edges.get(fid, []):
-                    if not (exact or fuzzy) or dst in prev or dst not in project.funcs or project.funcs[dst].name in unless:
+                    if not (exact or fuzzy) or dst not in project.funcs or project.funcs[dst].name in unless \
+                            or (dst in prev and source is None):
                         continue
                     if source is not None:
                         g = project.funcs[dst]
@@ -364,8 +381,12 @@ def path(project, r: dict) -> list:
                         got = set()
                         for c in (c for c in f.calls if c.line == ln and c.name == g.name):
                             got |= _passed(project, f, c, g, params, source, clean, taint.at(c.line))
-                        if not got:
-                            continue  # nothing tainted goes in
+                        if not got or (dst in prev and got <= given[dst]):
+                            continue  # nothing (new) tainted goes in
+                        if dst in prev:  # another call passes it another tainted parameter: walk it again with both
+                            given[dst] = given[dst] | frozenset(got)
+                            nxt.append(dst)
+                            continue
                         given[dst] = frozenset(got)
                     prev[dst] = fid
                     nxt.append(dst)
@@ -387,17 +408,24 @@ def path(project, r: dict) -> list:
 def _sink(project, f, c, text: str, sinks: list, kinds, source, clean, taint) -> tuple[str | None, str]:
     """(severity, note) when call c is a sink the value reaches the way it does harm, else (None, "").
     A categorised sink (`sql_sinks`, `url_sinks`, ...) reads only the argument it uses (security.py);
-    Python's ORM session is no HTTP client, a project subclass of one is."""
+    Python's ORM session is no HTTP client, a project subclass of one is. (Every call of every
+    entry's reach comes here: the receiver and the arguments are read only for a sink.)"""
     sev = kinds.severity
-    m = project.modules.get(f.module)
-    line = m.raw[c.line - 1] if m is not None and 0 < c.line <= len(m.raw) else ""
-    ctx = _Ctx(taint, source, clean, c.line) if source is not None else None
-    rhs = ctx.rhs if ctx is not None else (lambda name: None)
-    recv = security.receiver(project, f, c, line, rhs) if kinds.any() else None
-    if recv == "http" and not any(p.search(text) for p in sinks):
-        text = f"session.{c.name}"  # `api.get(url)` with `class Api(requests.Session)`
-    if not any(p.search(text) for p in sinks):
+    hit = any(p.search(text) for p in sinks)
+    if not hit and not (kinds.url and f.file.endswith(".py") and any(p.search(f"session.{c.name}") for p in kinds.url)):
         return None, ""
+    ctx = _Ctx(taint, source, clean, c.line) if source is not None else None
+    recv = None
+    if not hit or kinds.kind(text) == "url":
+        m = project.modules.get(f.module)
+        line = m.raw[c.line - 1] if m is not None and 0 < c.line <= len(m.raw) else ""
+        recv = security.receiver(project, f, c, line, ctx.rhs if ctx is not None else (lambda name: None))
+    if not hit:
+        if recv != "http":
+            return None, ""
+        text = f"session.{c.name}"  # `api.get(url)` with `class Api(requests.Session)`
+        if not any(p.search(text) for p in sinks):
+            return None, ""
     kind = kinds.kind(text)
     if recv == "orm" and kind == "url":
         return None, ""  # `db.session.get(User, pk)`: a row by its key, no request
@@ -405,12 +433,12 @@ def _sink(project, f, c, text: str, sinks: list, kinds, source, clean, taint) ->
         return sev, ""
     if kind is None:
         return (sev, "") if _carries(project, f, c, source, clean, taint.at(c.line), sink=True) else (None, "")
+    args = _call_args(project, f, c)
     if kind == "url":
-        args = _call_args(project, f, c)
         first = next((a for a in args if not security._kwarg(a)), "")
         if re.fullmatch(r"\s*[A-Z]\w*\s*", first) and first.strip() in project.short and c.name == "get":
             return None, ""  # `session.get(Post, pk)`: a model class, so an ORM session
-    got = kinds.verdict(kind, _call_args(project, f, c), ctx)
+    got = kinds.verdict(kind, args, ctx)
     return got if got else (None, "")
 
 
@@ -421,11 +449,36 @@ class _Ctx:
         self.taint, self.source, self.clean, self.line = taint, source, clean, line
 
     def dirty(self, text: str) -> bool:
-        return _dirty(text, self.source, self.clean, self.taint.at(self.line))
+        readers = getattr(self.taint, "readers", None)  # (`redirect(raw_next())`: a helper that returns the request's value)
+        return _dirty(text, self.source, self.clean, self.taint.at(self.line)) or (
+            _reads(readers, text) and not (self.clean and any(c.search(text) for c in self.clean)))
 
     def rhs(self, name: str):
         got = self.taint.rhs(name, self.line)
         return None if got is None else (got[0], _Ctx(self.taint, self.source, self.clean, got[1]))
+
+    def passed(self, name: str):
+        """What every exact caller passes for parameter `name` (raw texts), None when one passes nothing we can read."""
+        project, f = self.taint.project, self.taint.f
+        params = _params(project, f)
+        if name not in params:
+            return None
+        k, out = params.index(name), []
+        for caller, ln, exact in project.redges.get(f.id, []):
+            g = project.funcs.get(caller)
+            if not exact or g is None:
+                return None
+            for c in (c for c in g.calls if c.line == ln and c.name == f.name):
+                args = _call_args(project, g, c)
+                kw = [a.split("=", 1)[1] for a in args if re.match(rf"\s*{re.escape(name)}\s*[=:](?!=)", a)]
+                pos = [a for a in args if not security._kwarg(a)]
+                if kw:
+                    out.append(kw[0])
+                elif k < len(pos):
+                    out.append(pos[k])
+                else:
+                    return None
+        return out or None
 
 
 def _reads_source(project, f, source, not_param: bool = False) -> bool:
@@ -459,7 +512,12 @@ def _reads(readers, text: str) -> bool:
 
 def _own_code(project, f, raw: bool = False) -> str:
     """f's code (comments and strings blanked, or `raw`, at the same offsets); a file's
-    `<top>`: its lines outside functions."""
+    `<top>`: its lines outside functions. (Kept per load: every path rule reads every function.)"""
+    cache = project.__dict__.setdefault("_own_code", {})
+    key = (f.id, f.file, f.start, raw)
+    got = cache.get(key)
+    if got is not None:
+        return got
     m = project.modules.get(f.module)
     if m is None:
         return ""
@@ -468,7 +526,8 @@ def _own_code(project, f, raw: bool = False) -> str:
         inner = {n for mod in project.by_file.get(f.file, []) for g in mod.funcs if g.kind != "top"
                  for n in range(g.start, g.end + 1)}
         lines = ["" if i in inner else ln for i, ln in enumerate(lines, f.start)]
-    return "\n".join(lines)
+    got = cache[key] = "\n".join(lines)
+    return got
 
 
 class _Taint:
@@ -483,6 +542,7 @@ class _Taint:
         no_interp = f.file.endswith((".java", ".go"))
         self.steps = []  # (line, name, dirty, indent)
         self.values = {}  # (line, name) -> the value's raw text, for an assignment (security's verdicts read it)
+        self.project, self.f = project, f
         self.given = set(given)
         self.source = source
         self.start, self.lines = f.start, code.split("\n")
@@ -532,7 +592,8 @@ class _Taint:
             # `if urlsplit(x).netloc != "": x = url_for(...)` clean x after the `if`; the same check
             # without `not` (`if x.isdigit():`) cleans it inside the block
             for am in re.finditer(r"^([ \t]*)(?:el)?if[ \t]+(.+?):(?=[ \t]*$|[ \t]+(?:return|raise|abort|continue|break)\b)", code, re.M):
-                for k, (name, inside) in enumerate(security.guarded(am.group(2))):
+                cond = raw[am.start(2):am.end(2)]  # (the raw text: `re.match(r"^[a-z]+$", x)` shows its pattern)
+                for k, (name, inside) in enumerate(security.guarded(cond, security.anchored(project, f.file))):
                     found.append((am.start() + k, am.group(1) + (" " if inside else ""), [name], am.start(2) + k))
                     guards.add(am.start(2) + k)
         for start, indent, names, val in sorted(found):
@@ -672,8 +733,10 @@ def _dirty(arg: str, source, clean, tainted: set) -> bool:
     (`(err, rows) => {...}`) is code, not the value, whatever names its body uses."""
     if _FUNCTION_LITERAL.match(arg):
         return False
-    # Flask / Werkzeug: `request.args.get("page", 1, type=int)` is an int
+    # Flask / Werkzeug: `request.args.get("page", 1, type=int)` is an int; `",".join("?" for _ in ids)` holds
+    # only its literal
     arg = re.sub(r"[\w.]+\.get\(\s*[^()]*\btype\s*=\s*(?:int|float|bool)\b[^()]*\)", " ", arg)
+    arg = re.sub(r"""\.join\(\s*(?:"[^"]*"|'[^']*')\s+for\s+[\w, ]+\s+in\s+[^()]*(?:\([^()]*\)[^()]*)*\)""", ".join()", arg)
     if clean:
         call, method = clean
         if re.search(rf"{method.pattern}\s*(?:\([^()]*\))?\s*$", arg.strip()):

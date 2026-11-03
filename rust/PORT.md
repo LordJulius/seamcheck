@@ -175,6 +175,16 @@ per hit), `_Taint.values` + `rhs()`, the Python guards from
 tainted `path`; `...x` and PHP `$x` still count), and `downstream` refusing a
 call whose own line reads the source.
 
+Round 2 (same lane), also for the path port: `redirect_sinks`; `security.returns`
+(sanitized / buffer-returning names: the sanitized ones join the rule's clean-call
+pattern and leave the reader helpers, the buffers go to `Sinks.buffers`), computed
+only when something reads the source (`path` returns early otherwise);
+`_Ctx.dirty` also counts a reader helper's call, `_Ctx.passed` (what exact callers
+pass a parameter: `TaintCtx::passed`); the Python `if` guard reads the raw
+condition and `security.anchored(file)`; `_dirty` drops `",".join("?" for _ in
+xs)`; the BFS walks a function again when a later call passes it another tainted
+parameter; `_own_code` is cached per load.
+
 Flask types (same lane): `infer_flask.py` / `graph/infer/flask.rs` (a
 model's `.query` as an `Ext` value tagged `\0rows`, Flask-Login's
 `current_user`), `_PY_ROW` in both Python adapters (`db.session.get(User,

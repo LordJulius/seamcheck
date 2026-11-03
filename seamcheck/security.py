@@ -38,7 +38,7 @@ _STR = r"""[rRbBuU]{0,2}(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')"""
 _FSTR = re.compile(r"""^[rRbB]?[fF][rRbB]?(["'])(.*)\1$""", re.S)
 _PLAIN = re.compile(r"""^[rRbBuU]{0,2}(["'])((?:(?!\1)[^\\]|\\.)*)\1$""", re.S)
 _TEMPLATE = re.compile(r"^`(.*)`$", re.S)
-_SAME_SITE = re.compile(r"""^\s*[fbru]{0,2}["'`]/(?![/\\])""", re.I)
+_SAME_SITE = re.compile(r"""^\s*[fbru]{0,2}["'`]/[^/\\"'`]""", re.I)
 # a query object, never SQL text: SQLAlchemy's builders, a model's query, Django's manager
 _QUERY_OBJECT = re.compile(r"(?:[A-Za-z_]\w*\.)*(?:select|insert|update|delete|union|union_all|exists|values|"
                            r"lateral|intersect|except_)\s*\(|[A-Z]\w*\.(?:query|objects|__table__)\b")
@@ -64,22 +64,32 @@ _VALIDATORS = (r"(?P<n1>[A-Za-z_]\w*)\.(?:isdigit|isnumeric|isdecimal|isalnum|is
                r"(?:re\.)?fullmatch\(\s*[^,()]+(?:\([^()]*\))?\s*,\s*(?P<n2>[A-Za-z_]\w*)\s*[,)]",
                r"(?<![\w.])(?!re\.)[A-Za-z_][\w.]*\.fullmatch\(\s*(?P<n3>[A-Za-z_]\w*)\s*[,)]",
                r"(?P<n5>[A-Za-z_]\w*)\.startswith\(",
+               r"(?P<rx>[A-Za-z_]\w*)\.match\(\s*(?P<n6>[A-Za-z_]\w*)\s*[,)]",
+               r"""(?:re\.)?match\(\s*[rbuRBU]{0,2}(?:"\^[^"\n]*\$"|'\^[^'\n]*\$')\s*,\s*(?P<n7>[A-Za-z_]\w*)\s*[,)]""",
                r"(?:url_has_allowed_host_and_scheme|is_safe_url|is_safe_redirect)\(\s*(?:url\s*=\s*)?(?P<n4>[A-Za-z_]\w*)\s*[,)]")
 _VALIDATOR = re.compile("|".join(f"(?:{v})" for v in _VALIDATORS))
+# a comparison with a number: the value is one (`if port < 1024 or port > 65535: abort(400)`)
+_RANGE = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\s*(?:<=?|>=?)\s*-?\d|-?\d[\w.]*\s*(?:<=?|>=?)\s*([A-Za-z_]\w*)(?![\w.(\[])")
+_ANCHORED = re.compile(r"""^([A-Za-z_]\w*)\s*=\s*re\.compile\(\s*[rbuRBU]{0,2}(["'])(?:\^|\\A)[^"'\n]*(?:\$|\\Z|\\z)\2""")
 _NETLOC = re.compile(r"\b(?:urlsplit|urlparse)\(\s*([A-Za-z_]\w*)\s*\)\.netloc\b")
 _ALLOWED = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\s+(not\s+)?in\s+(?:[A-Z][A-Z0-9_]*\b|[\[({])")
 
 
-def guarded(cond: str) -> list[tuple[str, bool]]:
+def guarded(cond: str, anchored=frozenset()) -> list[tuple[str, bool]]:
     """The names a Python `if` condition checks: (name, inside), inside = the value is checked
     within the block only (`if x.isdigit():`), else from the `if` on (`if not x.isdigit(): return`,
-    `if x not in ALLOWED: abort(400)`, `if urlsplit(x).netloc: x = "/"`)."""
+    `if x not in ALLOWED: abort(400)`, `if urlsplit(x).netloc: x = "/"`). `anchored`: the file's
+    compiled patterns anchored at both ends (`_STATE_RE = re.compile(r"^[a-z]{16}$")`), whose
+    `.match(x)` is a full match."""
     out = []
     for m in _VALIDATOR.finditer(cond):
-        name = next(v for k, v in m.groupdict().items() if v)
+        if m.group("rx") and m.group("rx") not in anchored:
+            continue
+        name = next(v for k, v in m.groupdict().items() if v and k != "rx")
         negated = bool(re.search(r"\bnot\s+$", cond[:m.start()]))
         out.append((name, not negated))
     out += [(m.group(1), False) for m in _NETLOC.finditer(cond)]
+    out += [(m.group(1) or m.group(2), False) for m in _RANGE.finditer(cond)]
     for m in _ALLOWED.finditer(cond):
         if m.group(1) not in ("not", "and", "or", "is", "if"):
             out.append((m.group(1), not m.group(2)))
@@ -89,6 +99,121 @@ def guarded(cond: str) -> list[tuple[str, bool]]:
             seen.add(name)
             uniq.append((name, inside))
     return uniq
+
+
+def anchored(project, rel: str) -> frozenset:
+    """A file's module-level `NAME = re.compile(r"^...$")`: patterns whose `.match` is a full match."""
+    cache = project.__dict__.setdefault("_anchored", {})
+    if rel not in cache:
+        mods = project.by_file.get(rel) or []
+        cache[rel] = frozenset(m.group(1) for m in map(_ANCHORED.match, mods[0].raw if mods else []) if m)
+    return cache[rel]
+
+
+_RETURN = re.compile(r"^[ \t]*return\b[ \t]*(.*)$", re.M)
+_CONST = re.compile(r"""^(?:None|True|False|-?\d[\w.]*|null|undefined|true|false|[rbuRBU]{0,2}"(?:[^"\\$#]|\\.)*"|[rbuRBU]{0,2}'(?:[^'\\]|\\.)*')?;?$""")
+_BUFFER_ANN = re.compile(r"->\s*['\"]?(?:io\.)?(?:BytesIO|StringIO)\b")
+
+
+def returns(project, code, clean) -> tuple[set, set]:
+    """What functions return, by name (every function of that name alike): (sanitized, buffers).
+    Sanitized: each `return` is a constant or a call to a sanitizer (the rule's `unless`, url_for, a
+    declared one) or to a function that is sanitized itself; buffers: annotated `-> BytesIO`, or each
+    `return` builds one or names a local assigned one. `code(f, raw)`: a function's own code."""
+    key = (clean[0].pattern if clean else "", len(project.funcs))
+    cache = project.__dict__.setdefault("_returns", {})
+    if key not in cache:
+        cache[key] = _returns(project, code, clean)
+    return cache[key]
+
+
+def _returns(project, code, clean) -> tuple[set, set]:
+    cands = [f for f in project.funcs.values() if f.kind != "top" and f.file.endswith((".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"))]
+    rets = {}
+    for f in cands:
+        body = code(f, True)
+        if "return" not in body:
+            continue
+        exprs = [_ret_expr(body, m) for m in _RETURN.finditer(body)]
+        if exprs:
+            rets[f.id] = (f, body, exprs)
+    by_name = {}
+    for f in project.funcs.values():
+        by_name.setdefault(f.name, []).append(f.id)
+    sanit = set()
+    call = clean[0] if clean else None
+    for _ in range(6):  # (a wrapper of a wrapper: a few rounds reach the fixed point)
+        grown = False
+        for fid, (f, _body, exprs) in rets.items():
+            if f.name in sanit:
+                continue
+            ok = all(_CONST.match(e) or _sanitizing_call(e, call, sanit) for e in exprs)
+            if ok and all(i in rets and all(_CONST.match(e) or _sanitizing_call(e, call, sanit) for e in rets[i][2])
+                          for i in by_name.get(f.name, [])):
+                sanit.add(f.name)
+                grown = True
+        if not grown:
+            break
+    buffers = set()
+    for name, ids in by_name.items():
+        if ids and all(i in rets and _returns_buffer(*rets[i]) for i in ids):
+            buffers.add(name)
+    return sanit, buffers
+
+
+def _ret_expr(body: str, m) -> str:
+    """A `return`'s whole expression (on to the line its brackets close)."""
+    text = m.group(1)
+    k = m.end()
+    while _depth(text) > 0 and k < len(body):
+        nl = body.find("\n", k + 1)
+        nl = len(body) if nl < 0 else nl
+        text += "\n" + body[k + 1:nl]
+        k = nl
+    return re.sub(r"\s*#[^\n]*$", "", text.strip()).rstrip(";").strip()
+
+
+def _depth(text: str) -> int:
+    d = 0
+    for ch in re.sub(r"""(["'])(?:(?!\1)[^\\]|\\.)*\1""", "", text):
+        d += ch in "([{"
+        d -= ch in ")]}"
+    return d
+
+
+def _whole_call(e: str) -> str | None:
+    """The called name when e is one call, `name(...)` / `x.name(...)` with nothing after it."""
+    m = re.match(r"(?:await\s+)?(?:[A-Za-z_$][\w$]*\.)*([A-Za-z_$][\w$]*)\s*\(", e)
+    if not m:
+        return None
+    d, j = 0, m.end() - 1
+    while j < len(e):
+        d += e[j] in "([{"
+        d -= e[j] in ")]}"
+        if d == 0:
+            break
+        j += 1
+    return m.group(1) if e[j + 1:].strip() == "" else None
+
+
+def _sanitizing_call(e: str, call, sanit: set) -> bool:
+    name = _whole_call(e)
+    if name is None:
+        return False
+    return name in sanit or bool(call and call.match(e[e.find(name):]))
+
+
+def _returns_buffer(f, body: str, exprs: list[str]) -> bool:
+    head = body.split("\n", 3)
+    if any(_BUFFER_ANN.search(ln) for ln in head[:3] if ":" in ln):
+        return True
+    for e in exprs:
+        if _BUFFER.match(e):
+            continue
+        if re.fullmatch(r"[A-Za-z_]\w*", e) and re.search(rf"^[ \t]*{re.escape(e)}[ \t]*=[ \t]*(?:io\.)?(?:BytesIO|StringIO)\s*\(", body, re.M):
+            continue
+        return False
+    return True
 
 
 def sanitizers(project) -> list[str]:
@@ -127,19 +252,21 @@ class Sinks:
             v = r.get(key, [])
             return [re.compile(p) for p in (v if isinstance(v, list) else [v])]
         self.sql, self.url, self.path, self.shell = pats("sql_sinks"), pats("url_sinks"), pats("path_sinks"), pats("shell_sinks")
+        self.redirect = pats("redirect_sinks")
+        self.buffers: set = set()  # functions that return an in-memory buffer (set by the path rule)
         self.lookups = re.compile(r["lookups"]) if r.get("lookups") else None
         self.severity = r.get("severity", "error")
         self.url_severity = r.get("url_severity", "warn")
         self.argv_severity = r.get("argv_severity", "warn")
 
     def kind(self, text: str) -> str | None:
-        for k, ps in (("sql", self.sql), ("url", self.url), ("path", self.path), ("shell", self.shell)):
+        for k, ps in (("sql", self.sql), ("url", self.url), ("path", self.path), ("shell", self.shell), ("redirect", self.redirect)):
             if any(p.search(text) for p in ps):
                 return k
         return None
 
     def any(self) -> bool:
-        return bool(self.sql or self.url or self.path or self.shell)
+        return bool(self.sql or self.url or self.path or self.shell or self.redirect)
 
     def lookup(self, rhs: str) -> bool:
         """An assignment from a database lookup holds what the database returned, not the value."""
@@ -157,7 +284,10 @@ class Sinks:
             return (self.severity, "") if first is not None and sql_dirty(first, ctx) else None
         if kind == "path":
             first = next((kws[k] for k in _PATH_KWS if k in kws), pos[0] if pos else None)
-            return (self.severity, "") if first is not None and path_dirty(first, ctx) else None
+            return (self.severity, "") if first is not None and path_dirty(first, ctx, 0, self.buffers) else None
+        if kind == "redirect":  # an open redirect needs the value in the scheme or host (a literal host can't leave)
+            first = next((kws[k] for k in ("location", "url", "redirect_to") if k in kws), pos[0] if pos else None)
+            return (self.severity, "") if first is not None and url_taint(first, ctx) == "head" else None
         if kind == "url":
             first = next((kws[k] for k in _URL_KWS if k in kws), pos[0] if pos else None)
             how = url_taint(first, ctx) if first is not None else "clean"
@@ -219,15 +349,16 @@ def sql_dirty(a: str, ctx, depth: int = 0) -> bool:
     return True
 
 
-def path_dirty(a: str, ctx, depth: int = 0) -> bool:
-    """The path argument carries the value (an in-memory buffer is no path)."""
+def path_dirty(a: str, ctx, depth: int = 0, buffers=frozenset()) -> bool:
+    """The path argument carries the value (an in-memory buffer is no path, nor what a function
+    that returns one gives)."""
     a = a.strip()
-    if _BUFFER.match(a) or not ctx.dirty(a):
+    if _BUFFER.match(a) or not ctx.dirty(a) or _whole_call(a) in buffers:
         return False
     name = _bare(a)
     if name is not None:
         sub = ctx.rhs(name)
-        return True if sub is None or depth > 6 else path_dirty(sub[0], sub[1], depth + 1)
+        return True if sub is None or depth > 6 else path_dirty(sub[0], sub[1], depth + 1, buffers)
     return True
 
 
@@ -250,6 +381,11 @@ def url_taint(a: str, ctx, depth: int = 0) -> str:
     a = a.strip()
     if _SAME_SITE.match(a):
         return "relative"
+    name = _bare(a)
+    if name is not None and depth < 6 and hasattr(ctx, "passed") and ctx.rhs(name) is None:
+        given = ctx.passed(name)  # a parameter: what every caller passes (`requestJson('/chat/api/x', ...)`)
+        if given and all(_SAME_SITE.match(g) for g in given):
+            return "relative"
     if not ctx.dirty(a):
         return "clean"
     parts = _parts(a)
@@ -257,8 +393,10 @@ def url_taint(a: str, ctx, depth: int = 0) -> str:
         name = _bare(a)
         sub = ctx.rhs(name) if name is not None and depth < 6 else None
         return "head" if sub is None else url_taint(sub[0], sub[1], depth + 1)
-    if parts[0][0] == "lit" and re.match(r"/(?![/\\])", parts[0][1]):
+    if parts[0][0] == "lit" and re.match(r"/[^/\\]", parts[0][1]):
         return "relative"
+    if parts[0] == ("lit", "/") and len(parts) > 1:
+        return "head" if ctx.dirty(parts[1][1]) else "tail"  # (`"/" + x`: x may start with another `/`)
     # the head: up to the end of the authority (`scheme://host:port`), or with no scheme up to
     # the first / ? # (a base URL held in a name: `f"{base}/forecast"`)
     head, seen = [], ""
