@@ -33,6 +33,11 @@ pub trait TaintCtx {
     fn passed(&self, _name: &str) -> Option<Vec<String>> {
         None
     }
+    /// Like [`TaintCtx::rhs`], past the calls that only add to the object (`buf.write(x)` keeps
+    /// it a buffer); None when unknown.
+    fn assigned(&self, _name: &str) -> Option<(String, Box<dyn TaintCtx + '_>)> {
+        None
+    }
 }
 
 macro_rules! rx {
@@ -96,6 +101,16 @@ rx!(not_before, r"\bnot\s+$");
 rx!(kwarg_rx, r"(?s)\s*([A-Za-z_]\w*)\s*=(?!=)\s*(.*)$");
 rx!(bare_rx, r"[$@]?[A-Za-z_]\w*");
 rx!(bare_ident, r"[A-Za-z_]\w*");
+rx!(resolves, r"\.resolve\s*\(|\b(?:os\.path\.)?(?:realpath|abspath)\s*\(");
+rx!(within, r"\.(?:is_)?relative_to\s*\(|\bcommonpath\s*\(");
+rx!(rejects, r"\braise\b|\babort\s*\(|\bthrow\b|\breturn\s+(?:None|False|null|false)\b");
+// where the user came from: `request.referrer`, `request.headers.get("Referer")`, Django's `META["HTTP_REFERER"]`
+rx!(
+    referer,
+    r#"(?i)\brequest\.referrer\b|\b(?:req|request)\.(?:headers|META|environ)(?:\.get\s*\(|\[)\s*['"](?:referr?er|http_referer)['"][^)\]]*[)\]]|\breq\.headers\.referr?er\b|\breq\.(?:get|header)\s*\(\s*['"]referr?er['"]\s*\)"#
+);
+rx!(free_name, r"(?<![\w.$])[A-Za-z_]\w*");
+rx!(site_hint, r#"(?i)\breturn\b[ \t]*[fbru]{0,2}["'`]/[^/]"#);
 rx!(interp_rx, r"#\{|\$\{");
 rx!(relative_lead, r"/[^/\\]");
 rx!(scheme_slashes, r"^(?:[A-Za-z][\w+.-]*:)?//");
@@ -263,6 +278,152 @@ fn returns_buffer(body: &str, exprs: &[String]) -> bool {
     })
 }
 
+/// What else functions give back, by name (security.summaries): (confined, same_site). Confined:
+/// it resolves a path and checks it is under a root (`.resolve()`, then `.relative_to(root)` /
+/// `.is_relative_to` / `commonpath`, raising or returning None when it isn't), or calls such a
+/// function; same-site: each `return` is a URL with the site's scheme, host and path
+/// (`url_for(...) + "?" + urlencode(q)`, a literal "/path", such a function's result).
+pub fn summaries(g: &Graph, code: &dyn Fn(&Func) -> String) -> (HashSet<String>, HashSet<String>) {
+    const EXTS: [&str; 7] = [".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"];
+    let mut bodies: HashMap<&str, (&Func, String)> = HashMap::new();
+    let mut by_name: HashMap<&str, Vec<&str>> = HashMap::new();
+    for id in g.funcs.keys() {
+        let Some(f) = g.func(id) else { continue };
+        by_name.entry(f.name.as_str()).or_default().push(id.as_str());
+        if f.kind != "top" && EXTS.iter().any(|e| f.file.ends_with(e)) {
+            bodies.insert(id.as_str(), (f, code(f)));
+        }
+    }
+    let every = |name: &str, ok: &dyn Fn(&str, &str) -> bool| {
+        by_name.get(name).is_some_and(|ids| !ids.is_empty() && ids.iter().all(|i| bodies.get(i).is_some_and(|(_, b)| ok(i, b))))
+    };
+    let base = |b: &str| {
+        (b.contains("relative_to") || b.contains("commonpath")) && within().is_match(b) && resolves().is_match(b) && rejects().is_match(b)
+    };
+    let mut confined: HashSet<String> = HashSet::new();
+    for (f, _) in bodies.values() {
+        if !confined.contains(&f.name) && every(&f.name, &|_, b| base(b)) {
+            confined.insert(f.name.clone());
+        }
+    }
+    for _ in 0..6 {
+        // (a method that calls the check: `resolve_managed_path` -> `self._is_allowed_path`)
+        if confined.is_empty() {
+            break;
+        }
+        let mut names: Vec<&String> = confined.iter().collect();
+        names.sort();
+        let alt: Vec<String> = names.iter().map(|n| regex::escape(n)).collect();
+        let calls = Rx::lit(&format!(r"(?<![\w$])(?:{})\s*\(", alt.join("|")));
+        let grown: HashSet<String> = bodies
+            .values()
+            .filter(|(f, _)| !confined.contains(&f.name) && every(&f.name, &|_, b| base(b) || calls.is_match(b)))
+            .map(|(f, _)| f.name.clone())
+            .collect();
+        if grown.is_empty() {
+            break;
+        }
+        confined.extend(grown);
+    }
+    // (only a function with a URL-ish return can be one: url_for, reverse, a "/path", or a call to one found)
+    let site_rets = |b: &str| -> Option<Vec<String>> {
+        let es: Vec<String> = return_rx().find_iter(b).iter().map(|m| ret_expr(b, m.span(1).unwrap(), m.end())).collect();
+        (!es.is_empty() && es.iter().all(|e| same_site_ret(e, None) != Some(false))).then_some(es)
+    };
+    let mut rets: HashMap<&str, Vec<String>> = HashMap::new();
+    for (id, (_, b)) in &bodies {
+        if b.contains("return") && (b.contains("url_for") || b.contains("reverse") || site_hint().is_match(b)) {
+            if let Some(es) = site_rets(b) {
+                rets.insert(id, es);
+            }
+        }
+    }
+    let mut same: HashSet<String> = HashSet::new();
+    for _ in 0..6 {
+        let grown: HashSet<String> = rets
+            .keys()
+            .filter_map(|id| bodies.get(id).map(|(f, _)| f.name.clone()))
+            .filter(|n| {
+                !same.contains(n)
+                    && every(n, &|i, _| rets.get(i).is_some_and(|es| es.iter().all(|e| same_site_ret(e, Some(&same)) == Some(true))))
+            })
+            .collect();
+        if grown.is_empty() {
+            break;
+        }
+        let mut names: Vec<&String> = grown.iter().collect();
+        names.sort();
+        let alt: Vec<String> = names.iter().map(|n| regex::escape(n)).collect();
+        let calls = Rx::lit(&format!(r"(?<![\w$])(?:{})\s*\(", alt.join("|")));
+        same.extend(grown);
+        for (id, (_, b)) in &bodies {
+            if !rets.contains_key(id) && b.contains("return") && calls.is_match(b) {
+                if let Some(es) = site_rets(b) {
+                    rets.insert(id, es);
+                }
+            }
+        }
+    }
+    (confined, same)
+}
+
+const URL_BUILDERS: [&str; 3] = ["url_for", "reverse", "reverse_lazy"];
+
+/// The return expression is a same-site URL (security._same_site_ret): with `same` None, None when
+/// it could be one (a call, once its callee is known) and Some(false) when it can't.
+fn same_site_ret(e: &str, same: Option<&HashSet<String>>) -> Option<bool> {
+    if ["None", "null", "undefined", ""].contains(&e) {
+        return Some(true);
+    }
+    let parts = if e.contains('+') { split_top(e, '+') } else { vec![e.to_string()] };
+    let lead = parts.first().map(|x| x.trim()).unwrap_or("");
+    if same_site().match_start(lead).is_some() || whole_call(lead).is_some_and(|n| URL_BUILDERS.contains(&n)) {
+        return Some(true);
+    }
+    match same {
+        None => whole_call(e).map_or(Some(false), |_| None),
+        Some(same) => Some(whole_call(e).is_some_and(|n| same.contains(n))),
+    }
+}
+
+/// a is a call to one of `names`, or a name last assigned one (security.via).
+pub fn via(a: &str, ctx: &dyn TaintCtx, names: &HashSet<String>, depth: usize) -> bool {
+    let a = a.trim();
+    if whole_call(a).is_some_and(|n| names.contains(n)) {
+        return true;
+    }
+    let Some(name) = bare(a) else { return false };
+    if depth > 6 {
+        return false;
+    }
+    match ctx.rhs(name) {
+        Some((v, sub)) => via(&v, sub.as_ref(), names, depth + 1),
+        None => false,
+    }
+}
+
+/// The request's only part in a is the Referer header (`request.referrer or url_for("index")`, or
+/// a name assigned it): the page the user came from, not a link someone else wrote.
+pub fn referer_only(a: &str, ctx: &dyn TaintCtx, depth: usize) -> bool {
+    let mut seen = referer().is_match(a);
+    let mut rest = referer().sub("None", a);
+    let mut names: Vec<String> = free_name().findall(&rest).into_iter().map(String::from).collect();
+    names.sort();
+    names.dedup();
+    for name in names {
+        if !ctx.dirty(&name) {
+            continue;
+        }
+        match ctx.rhs(&name) {
+            Some((v, sub)) if depth <= 6 && referer_only(&v, sub.as_ref(), depth + 1) => {}
+            _ => return false,
+        }
+        seen = true;
+        rest = Rx::lit(&format!(r"(?<![\w.$]){}(?!\w)", regex::escape(&name))).sub("None", &rest);
+    }
+    seen && !ctx.dirty(&rest)
+}
+
 /// `[security] sanitizers` from the merged config: the project's own clean-returning functions.
 pub fn sanitizers(config: &Value) -> Vec<String> {
     match config.get("security").and_then(|t| t.get("sanitizers")) {
@@ -311,10 +472,15 @@ pub struct Sinks {
     pub redirect: Vec<Rx>,
     /// functions that return an in-memory buffer (the path rule sets it from [`returns`])
     pub buffers: HashSet<String>,
+    /// functions that return a path checked to be under a root (the path rule sets it from [`summaries`])
+    pub confined: HashSet<String>,
+    /// functions that return a same-site URL (from [`summaries`])
+    pub same_site: HashSet<String>,
     pub lookups: Option<Rx>,
     pub severity: String,
     pub url_severity: String,
     pub argv_severity: String,
+    pub referer_severity: String,
 }
 
 /// (severity, note) of a sink the value reaches the way it does harm.
@@ -337,10 +503,13 @@ impl Sinks {
             shell: pats("shell_sinks")?,
             redirect: pats("redirect_sinks")?,
             buffers: HashSet::new(),
+            confined: HashSet::new(),
+            same_site: HashSet::new(),
             lookups,
             severity: sv("severity", "error"),
             url_severity: sv("url_severity", "warn"),
             argv_severity: sv("argv_severity", "warn"),
+            referer_severity: sv("referer_severity", "warn"),
         })
     }
 
@@ -377,11 +546,22 @@ impl Sinks {
         let hit = |sev: &str, note: &str| Some((sev.to_string(), note.to_string()));
         match kind {
             "sql" => pick(&SQL_KWS).filter(|(_, a)| sql_dirty(a, ctx, 0)).and_then(|_| hit(&self.severity, "")),
-            "path" => pick(&PATH_KWS).filter(|(_, a)| path_dirty(a, ctx, 0, &self.buffers)).and_then(|_| hit(&self.severity, "")),
+            "path" => {
+                let safe: HashSet<String> = self.buffers.union(&self.confined).cloned().collect();
+                pick(&PATH_KWS).filter(|(_, a)| path_dirty(a, ctx, 0, &safe)).and_then(|_| hit(&self.severity, ""))
+            }
             // an open redirect needs the value in the scheme or host (a literal host can't leave)
-            "redirect" => pick(&["location", "url", "redirect_to"])
-                .filter(|(_, a)| url_taint(a, ctx, 0) == "head")
-                .and_then(|_| hit(&self.severity, "")),
+            "redirect" => {
+                let (_, first) = pick(&["location", "url", "redirect_to"])?;
+                if via(&first, ctx, &self.same_site, 0) || url_taint(&first, ctx, 0) != "head" {
+                    return None;
+                }
+                if referer_only(&first, ctx, 0) {
+                    // (back where the user came from: worth a look, not someone else's link)
+                    return if self.referer_severity != "off" { hit(&self.referer_severity, " (a redirect to the Referer)") } else { None };
+                }
+                hit(&self.severity, "")
+            }
             "url" => {
                 let first = pick(&URL_KWS);
                 let how = first.as_ref().map(|(_, a)| url_taint(a, ctx, 0)).unwrap_or("clean");
@@ -460,13 +640,20 @@ pub fn sql_dirty(a: &str, ctx: &dyn TaintCtx, depth: usize) -> bool {
     true
 }
 
-/// The path argument carries the value (an in-memory buffer is no path).
+/// The path argument carries the value (an in-memory buffer is no path, nor what a function that
+/// returns one or a confined path gives; `ctx.assigned` sees past `buf.write(x)`).
 pub fn path_dirty(a: &str, ctx: &dyn TaintCtx, depth: usize, buffers: &HashSet<String>) -> bool {
     let a = a.trim();
     if buffer().match_start(a).is_some() || !ctx.dirty(a) || whole_call(a).is_some_and(|n| buffers.contains(n)) {
         return false;
     }
     if let Some(name) = bare(a) {
+        if let Some((v, _)) = ctx.assigned(name) {
+            let v = v.trim();
+            if buffer().match_start(v).is_some() || whole_call(v).is_some_and(|n| buffers.contains(n)) {
+                return false; // (`buffer = io.BytesIO()`, then `buffer.write(data)`: still a buffer)
+            }
+        }
         return match ctx.rhs(name) {
             Some((v, sub)) if depth <= 6 => path_dirty(&v, sub.as_ref(), depth + 1, buffers),
             _ => true,
@@ -957,6 +1144,66 @@ mod tests {
         assert!(returns_buffer("def f():\n    buf = io.BytesIO()\n    return buf\n", &["buf".to_string()]));
         assert!(!returns_buffer("def f(n):\n    return os.path.join('/srv', n)\n", &["os.path.join('/srv', n)".to_string()]));
         assert_eq!("t(a,\n  b)", ret_expr("    return t(a,\n  b)\n", (11, 15), 15));
+    }
+
+    /// test_security_round3.RoundThreeHelpers.test_referer_only
+    #[test]
+    fn referer_only_cases() {
+        let c = Ctx { names: vec!["request", "ref", "nxt"], values: HashMap::from([("ref", "request.headers.get('Referer')")]) };
+        assert!(referer_only("request.referrer or url_for('index')", &c, 0));
+        assert!(referer_only("ref or '/'", &c, 0));
+        assert!(referer_only("request.META.get('HTTP_REFERER', '/')", &c, 0));
+        assert!(!referer_only("request.args.get('next') or request.referrer", &c, 0));
+        assert!(!referer_only("nxt", &c, 0));
+    }
+
+    /// test_security_round3.RoundThreeHelpers.test_same_site_returns
+    #[test]
+    fn same_site_returns() {
+        let none = HashSet::new();
+        let ok = |e: &str, s: &HashSet<String>| same_site_ret(e, Some(s)) == Some(true);
+        assert!(ok("url_for(endpoint, **values) + '?' + urlencode(q)", &none));
+        assert!(ok("f'/x?{q}'", &none));
+        assert!(ok("helper(a)", &HashSet::from(["helper".to_string()])));
+        assert_eq!(None, same_site_ret("helper(a)", None));
+        assert!(!ok("request.args['h'] + '?'", &none));
+        assert!(!ok("'//evil' + q", &none));
+    }
+
+    /// test_security_round3.Redirects.test_referer_severity_off_drops_it
+    #[test]
+    fn referer_severity_off_drops_it() {
+        let c = Ctx { names: vec!["request"], values: HashMap::new() };
+        let mut r = Rule::new();
+        r.insert("redirect_sinks".into(), Value::Array(vec![Value::String("^redirect$".into())]));
+        let on = Sinks::new(&r).unwrap();
+        r.insert("referer_severity".into(), Value::String("off".into()));
+        let off = Sinks::new(&r).unwrap();
+        let a = |x: &str| vec![x.to_string()];
+        assert_eq!(Some(("warn".to_string(), " (a redirect to the Referer)".to_string())), on.verdict("redirect", &a("request.referrer"), &c));
+        assert_eq!(None, off.verdict("redirect", &a("request.referrer"), &c));
+        assert_eq!(Some(("error".to_string(), String::new())), off.verdict("redirect", &a("request.args['next']"), &c));
+    }
+
+    struct Filled(Ctx);
+    impl TaintCtx for Filled {
+        fn dirty(&self, t: &str) -> bool {
+            self.0.dirty(t)
+        }
+        fn rhs(&self, _n: &str) -> Option<(String, Box<dyn TaintCtx + '_>)> {
+            None // (the latest step is `buffer.write(data)`)
+        }
+        fn assigned(&self, n: &str) -> Option<(String, Box<dyn TaintCtx + '_>)> {
+            (n == "buffer").then(|| ("io.BytesIO()".to_string(), Box::new(Ctx { names: vec![], values: HashMap::new() }) as Box<dyn TaintCtx>))
+        }
+    }
+
+    /// test_security_round3.FilledBuffers: a buffer written to is still a buffer
+    #[test]
+    fn filled_buffer_is_no_path() {
+        let c = Filled(Ctx { names: vec!["buffer", "p"], values: HashMap::new() });
+        assert!(!path_dirty("buffer", &c, 0, &HashSet::new()));
+        assert!(path_dirty("p", &c, 0, &HashSet::new()));
     }
 
     #[test]

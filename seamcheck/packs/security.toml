@@ -15,7 +15,8 @@
 # value, a URL whose host comes from it (a fixed host with the value in its path is
 # `url_severity`), a path that isn't an in-memory buffer, a command run by a shell
 # (a fixed program's argument list is `argv_severity`), a redirect whose scheme or host
-# comes from the value (`redirect_sinks`). `lookups`: an assignment
+# comes from the value (`redirect_sinks`; back to the Referer alone is `referer_severity`,
+# warn). `lookups`: an assignment
 # from a database lookup holds the row, not the value. `source_scope`: the source
 # counts in files that use its framework and in the functions they reach. A
 # project's own sanitizers: `[security] sanitizers = ["coerce_safe_redirect_target"]`.

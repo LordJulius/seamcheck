@@ -443,6 +443,18 @@ sanitizers = ["coerce_safe_redirect_target"]  # their return value is clean
   pattern anchored at both ends (`_STATE_RE = re.compile(r"^...$")`) is
   checked, and a function called with tainted SQL by one caller and constant
   SQL by another is walked with both.
+- A buffer written to (`buffer = io.BytesIO()`, `buffer.write(data)`) is still
+  a buffer. A function that resolves a path and checks it is under a root
+  (`.resolve()`, then `.relative_to(root)` / `.is_relative_to` / `commonpath`,
+  raising or returning None when it isn't), or calls one that does (a
+  controller's `resolve_managed_path` calling `self._is_allowed_path`), returns
+  no path the request can move. A function whose returns all start with
+  `url_for(...)` or a literal `/path` (`url_for(endpoint) + "?" +
+  urlencode(request.args)`) gives a same-site URL, no open redirect.
+- A redirect back to the Referer (`redirect(request.referrer or
+  url_for("index"))`), the request's only part in it, is a warning
+  (`referer_severity`, `"off"` drops it): the page the user came from, not a
+  link someone else wrote. A declared sanitizer around it still cleans it.
 - A row looked up by the value (`User.query.filter_by(name=q).first()`,
   `db.session.get(Post, pid)`: a rule's `lookups`) is the database's, not the
   value; `os.path` is no tainted `path` (an attribute isn't the name).
@@ -1105,8 +1117,8 @@ is a constant first argument (a parameterized query) unless it names a shell.
 Each sink is reported once, with its shortest chain. With `sql_sinks`, `url_sinks`,
 `path_sinks` and `shell_sinks` (regexes over the same call text) a sink reads
 only the argument it uses, as the security pack's Python and JS rules do
-(above); `url_severity` / `argv_severity` set the severity of a fixed host's
-path and a fixed program's arguments, `lookups` (a regex) names the
+(above); `url_severity` / `argv_severity` / `referer_severity` set the severity of
+a fixed host's path, a fixed program's arguments and a redirect back to the Referer, `lookups` (a regex) names the
 assignments that hold a database row rather than the value, and
 `source_scope` (a regex over a file's text) keeps the source to the files that
 match it and the functions they reach. The built-in `security`

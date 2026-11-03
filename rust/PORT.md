@@ -186,6 +186,19 @@ xs)`; the BFS walks a function again when a later call passes it another tainted
 parameter; `_own_code` is cached per load (Rust: `security::returns` is
 memoised per load and sanitizer pattern; `own_code` is cheap enough uncached).
 
+Round 3 (same lane; rules/security.rs has its half, tests/test_security_round3.py
+and tests/fixtures/flask_round3): `security.summaries` / `security::summaries`
+gives (confined, same_site) names, which the path rule puts in `Sinks.confined` and
+`Sinks.same_site` beside `Sinks.buffers` (computed with `returns`, from the same own
+code); `_Ctx.assigned` (`TaintCtx::assigned`: the latest plain assignment past the
+calls that only add to the object, `_Taint.assigned` over the `.append` / `.write`
+steps, not the loops) lets `path_dirty` see `buffer = io.BytesIO()` through
+`buffer.write(data)`; `referer_severity` and `security::referer_only` / `via` are
+inside `Sinks::verdict` already. Still to carry in arch/path.rs + arch/taint.rs:
+setting `confined` / `same_site`, and `assigned` on the path rule's ctx; until then
+Rust reports invoice, notes and managed in tests/fixtures/flask_round3 (no Rust test
+reads that fixture yet).
+
 Flask types (same lane): `infer_flask.py` / `graph/infer/flask.rs` (a
 model's `.query` as an `Ext` value tagged `\0rows`, Flask-Login's
 `current_user`), `_PY_ROW` in both Python adapters (`db.session.get(User,

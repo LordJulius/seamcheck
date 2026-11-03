@@ -216,6 +216,122 @@ def _returns_buffer(f, body: str, exprs: list[str]) -> bool:
     return True
 
 
+_RESOLVES = re.compile(r"\.resolve\s*\(|\b(?:os\.path\.)?(?:realpath|abspath)\s*\(")
+_WITHIN = re.compile(r"\.(?:is_)?relative_to\s*\(|\bcommonpath\s*\(")
+_REJECTS = re.compile(r"\braise\b|\babort\s*\(|\bthrow\b|\breturn\s+(?:None|False|null|false)\b")
+_URL_BUILDERS = ("url_for", "reverse", "reverse_lazy")
+
+
+def summaries(project, code) -> tuple[set, set]:
+    """What else functions give back, by name (every function of that name alike): (confined,
+    same_site). Confined: it resolves a path and checks it is under a root (`.resolve()`, then
+    `.relative_to(root)` / `.is_relative_to(root)` / `commonpath`, raising or returning None when
+    it isn't), or calls such a function: what it returns is no path the request can move.
+    Same-site: each `return` is a URL whose scheme, host and path are the site's (`url_for(...)
+    + "?" + urlencode(q)`, a literal "/path", such a function's result), so request data in it is
+    only the query. `code(f, raw)`: a function's own code."""
+    key = len(project.funcs)
+    cache = project.__dict__.setdefault("_summaries", {})
+    if key not in cache:
+        cache[key] = _summaries(project, code)
+    return cache[key]
+
+
+def _summaries(project, code) -> tuple[set, set]:
+    cands = [f for f in project.funcs.values() if f.kind != "top" and f.file.endswith((".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"))]
+    by_name = {}
+    for f in project.funcs.values():
+        by_name.setdefault(f.name, []).append(f.id)
+    bodies = {f.id: (f, code(f, True)) for f in cands}
+
+    def every(name, ok):
+        ids = by_name.get(name, [])
+        return bool(ids) and all(i in bodies and ok(*bodies[i]) for i in ids)
+
+    confined = set()
+    base = lambda f, body: bool(("relative_to" in body or "commonpath" in body) and _WITHIN.search(body)  # noqa: E731
+                                and _RESOLVES.search(body) and _REJECTS.search(body))
+    for f, body in bodies.values():
+        if f.name not in confined and every(f.name, base):
+            confined.add(f.name)
+    for _ in range(6):  # (a method that calls the check: `resolve_managed_path` -> `self._is_allowed_path`)
+        if not confined:
+            break
+        calls = re.compile(rf"(?<![\w$])(?:{'|'.join(map(re.escape, sorted(confined)))})\s*\(")
+        grown = {f.name for f, body in bodies.values() if f.name not in confined
+                 and every(f.name, lambda g, b: base(g, b) or bool(calls.search(b)))}
+        if not grown:
+            break
+        confined |= grown
+    # (only a function with a URL-ish return can be one: url_for, reverse, a "/path", or a call to one found)
+    def site_rets(body):
+        es = [_ret_expr(body, m) for m in _RETURN.finditer(body)]
+        return es if es and all(_same_site_ret(e, None) is not False for e in es) else None
+    rets = {fid: es for fid, (f, body) in bodies.items()
+            if "return" in body and ("url_for" in body or "reverse" in body or _SITE_HINT.search(body))
+            and (es := site_rets(body))}
+    same = set()
+    for _ in range(6):
+        grown = {bodies[fid][0].name for fid in rets if bodies[fid][0].name not in same
+                 and every(bodies[fid][0].name, lambda g, b: g.id in rets and all(_same_site_ret(e, same) for e in rets[g.id]))}
+        if not grown:
+            break
+        same |= grown
+        calls = re.compile(rf"(?<![\w$])(?:{'|'.join(map(re.escape, sorted(grown)))})\s*\(")
+        rets.update({fid: es for fid, (f, body) in bodies.items() if fid not in rets and "return" in body
+                     and calls.search(body) and (es := site_rets(body))})
+    return confined, same
+
+
+_SITE_HINT = re.compile(r"""\breturn\b[ \t]*[fbru]{0,2}["'`]/[^/]""", re.I)
+
+
+def _same_site_ret(e: str, same):
+    """The return expression is a same-site URL; with `same` None, None when it could be one (a
+    call, once its callee is known) and False when it can't."""
+    if e in ("None", "null", "undefined", ""):
+        return True
+    lead = _split_top(e, "+")[0].strip() if "+" in e else e
+    if _SAME_SITE.match(lead) is not None or _whole_call(lead) in _URL_BUILDERS:
+        return True
+    if same is None:
+        return None if _whole_call(e) is not None else False
+    return _whole_call(e) in same
+
+
+def via(a: str, ctx, names, depth: int = 0) -> bool:
+    """a is a call to one of `names`, or a name last assigned one."""
+    a = a.strip()
+    if _whole_call(a) in names:
+        return True
+    name = _bare(a)
+    if name is None or depth > 6:
+        return False
+    sub = ctx.rhs(name)
+    return sub is not None and via(sub[0], sub[1], names, depth + 1)
+
+
+# where the user came from: `request.referrer`, `request.headers.get("Referer")`, Django's `META["HTTP_REFERER"]`
+_REFERER = re.compile(r"""\brequest\.referrer\b|\b(?:req|request)\.(?:headers|META|environ)(?:\.get\s*\(|\[)\s*['"](?:referr?er|http_referer)['"][^)\]]*[)\]]"""
+                      r"""|\breq\.headers\.referr?er\b|\breq\.(?:get|header)\s*\(\s*['"]referr?er['"]\s*\)""", re.I)
+
+
+def referer_only(a: str, ctx, depth: int = 0) -> bool:
+    """The request's only part in a is the Referer header (`request.referrer or url_for("index")`,
+    or a name assigned it): the page the user came from, not a link someone else wrote."""
+    seen = bool(_REFERER.search(a))
+    rest = _REFERER.sub("None", a)
+    for name in sorted(set(re.findall(r"(?<![\w.$])[A-Za-z_]\w*", rest))):
+        if not ctx.dirty(name):
+            continue
+        sub = ctx.rhs(name)
+        if sub is None or depth > 6 or not referer_only(sub[0], sub[1], depth + 1):
+            return False
+        seen = True
+        rest = re.sub(rf"(?<![\w.$]){re.escape(name)}(?!\w)", "None", rest)
+    return seen and not ctx.dirty(rest)
+
+
 def sanitizers(project) -> list[str]:
     """`[security] sanitizers`: the project's own functions whose return value is clean."""
     got = (project.config.get("security", {}) or {}).get("sanitizers", [])
@@ -254,10 +370,13 @@ class Sinks:
         self.sql, self.url, self.path, self.shell = pats("sql_sinks"), pats("url_sinks"), pats("path_sinks"), pats("shell_sinks")
         self.redirect = pats("redirect_sinks")
         self.buffers: set = set()  # functions that return an in-memory buffer (set by the path rule)
+        self.confined: set = set()  # functions that return a path checked to be under a root (summaries)
+        self.same_site: set = set()  # functions that return a same-site URL (summaries)
         self.lookups = re.compile(r["lookups"]) if r.get("lookups") else None
         self.severity = r.get("severity", "error")
         self.url_severity = r.get("url_severity", "warn")
         self.argv_severity = r.get("argv_severity", "warn")
+        self.referer_severity = r.get("referer_severity", "warn")
 
     def kind(self, text: str) -> str | None:
         for k, ps in (("sql", self.sql), ("url", self.url), ("path", self.path), ("shell", self.shell), ("redirect", self.redirect)):
@@ -284,10 +403,15 @@ class Sinks:
             return (self.severity, "") if first is not None and sql_dirty(first, ctx) else None
         if kind == "path":
             first = next((kws[k] for k in _PATH_KWS if k in kws), pos[0] if pos else None)
-            return (self.severity, "") if first is not None and path_dirty(first, ctx, 0, self.buffers) else None
+            safe = self.buffers | self.confined
+            return (self.severity, "") if first is not None and path_dirty(first, ctx, 0, safe) else None
         if kind == "redirect":  # an open redirect needs the value in the scheme or host (a literal host can't leave)
             first = next((kws[k] for k in ("location", "url", "redirect_to") if k in kws), pos[0] if pos else None)
-            return (self.severity, "") if first is not None and url_taint(first, ctx) == "head" else None
+            if first is None or via(first, ctx, self.same_site) or url_taint(first, ctx) != "head":
+                return None
+            if referer_only(first, ctx):  # (back where the user came from: worth a look, not someone else's link)
+                return (self.referer_severity, " (a redirect to the Referer)") if self.referer_severity != "off" else None
+            return self.severity, ""
         if kind == "url":
             first = next((kws[k] for k in _URL_KWS if k in kws), pos[0] if pos else None)
             how = url_taint(first, ctx) if first is not None else "clean"
@@ -351,12 +475,16 @@ def sql_dirty(a: str, ctx, depth: int = 0) -> bool:
 
 def path_dirty(a: str, ctx, depth: int = 0, buffers=frozenset()) -> bool:
     """The path argument carries the value (an in-memory buffer is no path, nor what a function
-    that returns one gives)."""
+    that returns one or a confined path gives; `ctx.assigned(name)`, when the ctx has it: the
+    latest plain assignment past calls that add to the object)."""
     a = a.strip()
     if _BUFFER.match(a) or not ctx.dirty(a) or _whole_call(a) in buffers:
         return False
     name = _bare(a)
     if name is not None:
+        made = ctx.assigned(name) if hasattr(ctx, "assigned") else None
+        if made is not None and (_BUFFER.match(made[0].strip()) or _whole_call(made[0].strip()) in buffers):
+            return False  # (`buffer = io.BytesIO()`, then `buffer.write(data)`: still a buffer)
         sub = ctx.rhs(name)
         return True if sub is None or depth > 6 else path_dirty(sub[0], sub[1], depth + 1, buffers)
     return True

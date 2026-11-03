@@ -337,7 +337,9 @@ def path(project, r: dict) -> list:
         # function's result), an in-memory buffer (security.returns)
         done = set()
         if kinds.any():
-            done, kinds.buffers = security.returns(project, lambda g, raw=False: _own_code(project, g, raw), clean)
+            own = lambda g, raw=False: _own_code(project, g, raw)  # noqa: E731
+            done, kinds.buffers = security.returns(project, own, clean)
+            kinds.confined, kinds.same_site = security.summaries(project, own)  # (a path checked under a root, a same-site URL)
             if done:
                 extra = re.compile(rf"(?<![\w$])(?:{'|'.join(map(re.escape, sorted(done)))})\s*\(")
                 clean = (re.compile(f"(?:{clean[0].pattern})|(?:{extra.pattern})") if clean else extra,
@@ -457,6 +459,11 @@ class _Ctx:
         got = self.taint.rhs(name, self.line)
         return None if got is None else (got[0], _Ctx(self.taint, self.source, self.clean, got[1]))
 
+    def assigned(self, name: str):
+        """Like rhs, past the calls that add to the object (`buffer.write(data)` keeps it a buffer)."""
+        got = self.taint.assigned(name, self.line)
+        return None if got is None else (got[0], _Ctx(self.taint, self.source, self.clean, got[1]))
+
     def passed(self, name: str):
         """What every exact caller passes for parameter `name` (raw texts), None when one passes nothing we can read."""
         project, f = self.taint.project, self.taint.f
@@ -542,6 +549,7 @@ class _Taint:
         no_interp = f.file.endswith((".java", ".go"))
         self.steps = []  # (line, name, dirty, indent)
         self.values = {}  # (line, name) -> the value's raw text, for an assignment (security's verdicts read it)
+        self.adds = {}  # name -> the lines a value was added to it at (`buf.write(x)`, `xs.append(q)`)
         self.project, self.f = project, f
         self.given = set(given)
         self.source = source
@@ -565,11 +573,12 @@ class _Taint:
             conds[am.end()] = _close(code, am.end())
         # only ever taint: a value put into an object (`sb.append(id)`, `doc.Load(Request.Body)`, `xs.push(q)`)
         # and a loop variable over a tainted collection (`for (T x : xs)`, `foreach (var x in xs)`, `for x in xs:`)
-        adds = set()
+        adds, muts = set(), set()  # (muts: the calls of those, not the loops)
         for am in re.finditer(r"^([ \t]*)([$@]?[A-Za-z_]\w*)\.(?:append|add|addAll|put|push|extend|insert|concat|write|"
                               r"Append|AppendFormat|AppendLine|Add|AddRange|Insert|Load|LoadXml|Write)[ \t]*\(", code, re.M):
             found.append((am.start(), am.group(1), [am.group(2)], am.end()))
             adds.add(am.end())
+            muts.add(am.end())
             conds[am.end()] = _close(code, am.end())
         for am in re.finditer(r"^([ \t]*)(?:[\w}]+[ \t]+)?for(?:each)?[ \t]*\([ \t]*(?:(?:const|let|var|final)[ \t]+)?(?:[\w<>\[\],.?]+[ \t]+)?"
                               r"([A-Za-z_]\w*)[ \t]+(?:in|of|:)[ \t]+", code, re.M):
@@ -610,6 +619,8 @@ class _Taint:
                 dirty = False  # `user = User.query.filter_by(name=q).first()`: the database's row, not the value
             if val in adds and not dirty:
                 continue  # (adding a clean value cleans nothing)
+            if val in muts:
+                self.adds.setdefault(names[0], set()).add(ln)
             if val not in adds and len(names) == 1:
                 self.values[(ln, names[0])] = raw[val:end].strip()
             self.steps += [(ln, name, dirty, len(indent.expandtabs(4))) for name in names]
@@ -646,6 +657,17 @@ class _Taint:
         if last is None or (last, name) not in self.values:
             return None
         return self.values[(last, name)], last
+
+    def assigned(self, name: str, line: int):
+        """(the value's text, its line) of name's latest plain assignment before line, past the
+        calls that only add to it (`buf.write(x)`); None when a parameter, a loop or a
+        destructuring came after it, or there is none."""
+        for ln in sorted((ln for ln, n, _, _ in self.steps if n == name and ln < line), reverse=True):
+            if (ln, name) in self.values:
+                return self.values[(ln, name)], ln
+            if ln not in self.adds.get(name, ()):
+                return None
+        return None
 
     def at(self, line: int) -> set:
         state = {n: 0 for n in self.given}  # name -> the indentation it was tainted at
