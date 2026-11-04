@@ -469,3 +469,46 @@ server's six cases, the four real servers where installed).
   `invalid character` ...) read `invalid syntax`.
 - `trace` of a missing file exits 1 with one line on stderr, not a traceback.
 
+
+## Queries lane status (phases 3-4: queries, serve, map; 2026-11-03)
+
+**In.** `queries/` (queries.py: `where`, `walk`, `possible_callers`,
+`shortest`, `find`, `search`, `changed_functions`, `target_functions`,
+`impact`, `context`, `stats`, as `serde_json::Value`s in Python's key
+order) and `queries/cli.rs` (__main__.py's printing of `callers`,
+`callees`, `path`, `find`, `context`, `search`, `impact`, `dead`, `stats`,
+line for line, into a `Ran` so the harness runs hundreds over one graph);
+`graph/query.rs` (Project.find, core.reach / path / edge_split / impact /
+dead); `graph/link/count.rs` (Project.resolution and Project.possible,
+counted where `_build_edges`, `_param_flow` and `_param_receivers` count
+them); `serve.rs` (serve.py: the same tool list and schemas, stamps-based
+reload, JSON-RPC errors); `report.rs` + `report_page.html` (report.py's page
+byte for byte, the same data JSON); `map --html` and `check --html`. The CLI
+parser now refuses a positional after the options that follow the args run,
+as argparse does (`search x --code 'src/**'` is exit 2 in both).
+
+**Parity.** `parity --queries --serve` (src/bin/parity/queries.rs) picks
+PARITY_PICKS functions (every k-th by id) and asks ~21 command lines about
+each (callers / callees with depth, fuzzy, wide; find by name, file:line,
+glob; context and impact, text and JSON; path to a reached and a far
+function; search with globs, --code, --limit) plus dead / stats; and the
+same as ~10 tools/call requests each, plus initialize, ping, tools/list,
+check, and the error replies. Timings (`N ms`, `load_ms`) are masked.
+
+| where | queries | serve requests | differ |
+|-------|--------:|---------------:|-------:|
+| tests/fixtures/* + tests/queries_fixtures/* (desk) | 973 | 595 | 0 |
+| flask (Pylon, before the argparse fix) | 517 | 264 | 0 serve; 25 queries, all the argparse case |
+
+**Not yet.** serve's `gate`, `refs`, `unused` and `tests` tools answer "not
+ported" until the gate-graph lane's tidy lands (the tool list and schemas are
+already Python's); `stats` doesn't write the exactness record (tidy/exactness).
+
+**Known differences.**
+- `path FROM TO` where TO matches several functions with chains of one
+  length: Python iterates a set (hash order, per process), Rust the
+  functions in load order. `impact` over several start functions likewise
+  lists areas of equal size in BFS order from the sorted starts; `context`'s
+  tests that share a file and line are ordered by id.
+- A crashing tool answers `{"error": "panic: ..."}`, not Python's
+  `TypeError: ...`; a bad `search` regex is each engine's own words.

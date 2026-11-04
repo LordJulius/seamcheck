@@ -149,6 +149,7 @@ fn show_diff(a: &str, b: &str) -> String {
 }
 
 pub fn query_parity(o: &Opts, repo: &Path, name: &str) -> usize {
+    let repo = &std::path::absolute(repo).unwrap_or_else(|_| repo.to_path_buf());
     let (ps, _) = pick(o, repo);
     let list = argvs(&ps);
     let tmp = std::env::temp_dir().join(format!("parity-queries-{}-{name}.jsonl", std::process::id()));
@@ -250,6 +251,14 @@ fn norm(mut v: Value) -> Value {
         let mut inner: Value = serde_json::from_str(text).unwrap_or(Value::String(text.into()));
         if let Some(m) = inner.as_object_mut() {
             m.remove("load_ms");
+        }
+        // a bad regex is reported by both, each in its own engine's words (PORT.md, known differences)
+        for f in inner.as_array_mut().into_iter().flatten() {
+            if let Some(msg) = f.get("message").and_then(|m| m.as_str()) {
+                if let Some(k) = msg.find(": ").filter(|_| msg.starts_with("bad pattern in rule ")) {
+                    f["message"] = Value::String(msg[..k].to_string());
+                }
+            }
         }
         v["result"]["content"][0]["text"] = inner;
     }
