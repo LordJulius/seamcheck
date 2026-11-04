@@ -21,6 +21,7 @@ use crate::scan::blank;
 pub mod blocks;
 pub mod calls;
 pub mod fields;
+pub mod infer;
 pub mod link;
 pub mod pats;
 pub mod recv;

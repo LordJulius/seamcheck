@@ -145,8 +145,7 @@ fn injected_imports(g: &Graph, use_: &str, depth: i32) -> Vec<String> {
 
 /// core._resolve_imports.
 fn resolve_imports(g: &mut Graph, p: &Project) {
-    crate::lang::ruby::link::link(g); // Ruby: requires, constants and supertypes, across files
-    crate::lang::ruby::link::library_receivers(g, p); // Ruby: a call on a library's value is the library's
+    crate::lang::ruby::link::link(g, p); // Ruby: requires, constants, supertypes and the types its call sites give
     crate::graph::qt::qt_dbus_interfaces(g); // Qt: a generated D-Bus proxy stands for the class it calls
     crate::graph::qt::qml_page_props(g); // QML: what each page's untyped properties are handed
     let names: Vec<String> = g.modules.keys().cloned().collect();

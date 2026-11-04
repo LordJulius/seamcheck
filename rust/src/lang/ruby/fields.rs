@@ -95,7 +95,7 @@ pub fn class_fields(st: &mut St, mod_idx: &IndexMap<String, usize>, funcs: &[usi
     }
 }
 
-fn params_of(f: &Func) -> HashSet<String> {
+pub(crate) fn params_of(f: &Func) -> HashSet<String> {
     let pat = format!(r"\s*def\s+(?:\w+\.)?{}\s*\(([^)]*)\)", escape(&f.name));
     match cached(&pat).ok().and_then(|r| r.match_start(&f.code).map(|m| m.s(1).to_string())) {
         Some(g) => rx(0, r"[a-z_]\w*").findall(&g).into_iter().map(String::from).collect(),

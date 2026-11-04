@@ -370,6 +370,19 @@ pub fn parse(rel: &str, text: &str) -> Vec<Module> {
         }
     }
     fm.type_imports = type_imports.into_iter().collect();
+    if ext == ".c" || ext == ".h" {
+        // C: the files it includes, for a `.c` among them (a test pulling in the unit it tests)
+        let d = dir_of(rel);
+        fm.c_includes = re!(r#"(?m)^[ \t]*#[ \t]*include[ \t]*"([^"]+\.[ch])""#)
+            .find_iter(text)
+            .iter()
+            .map(|im| {
+                let spec = im.s(1);
+                let joined = if spec.starts_with('/') || d.is_empty() { spec.to_string() } else { format!("{d}/{spec}") };
+                crate::lang::ruby::link::normpath(&joined)
+            })
+            .collect();
+    }
 
     // --- function spans -------------------------------------------------------------
     let n = code.len();

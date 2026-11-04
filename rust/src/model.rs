@@ -238,7 +238,7 @@ impl Module {
             "decls": self.decls, "package": self.package, "uses": self.uses,
             "imported": self.imported.iter().map(|(k, (w, n))| (k.clone(), json!([w, n]))).collect::<serde_json::Map<_, _>>(),
             "bound": self.bound, "using": self.using, "owner": self.owner, "bases": self.bases, "kind": self.kind,
-            "methods": self.methods, "reexports": self.reexports, "funcs": funcs,
+            "methods": self.methods, "reexports": self.reexports, "c_includes": self.c_includes, "funcs": funcs,
         })
     }
 }

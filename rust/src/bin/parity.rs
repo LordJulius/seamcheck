@@ -321,7 +321,8 @@ def md(m):
     return {"name": m.name, "lines": m.lines, "parent": m.parent, "aliases": m.aliases, "decls": m.decls,
             "package": m.package, "uses": m.uses, "imported": {k: list(v) for k, v in m.imported.items()},
             "bound": m.bound, "using": m.using, "owner": m.owner, "bases": m.bases, "kind": m.kind,
-            "methods": m.methods, "reexports": m.reexports, "funcs": [fd(f) for f in m.funcs]}
+            "methods": m.methods, "reexports": m.reexports, "c_includes": list(getattr(m, "c_includes", ())),
+            "funcs": [fd(f) for f in m.funcs]}
 for _, rel, _ in todo:
     mods = out.get(rel, [])
     errs = [m[1] for m in mods if isinstance(m, tuple)]
@@ -568,9 +569,10 @@ fn parse_parity(o: &Opts, repo: &Path, name: &str) -> usize {
 fn edge_parity(o: &Opts, repo: &Path, name: &str) -> usize {
     let exts = o.ext.join(",");
     let pr = py_inline(o, repo, PY_EDGES, &exts);
-    let mut rargs = vec!["port-dump", "edges", "--ext", exts.as_str()];
+    // (from cold: what is compared is the resolver, not a graph an earlier run kept)
+    let mut rargs = vec!["port-dump", "edges", "--ext", exts.as_str(), "--no-cache"];
     if o.precise {
-        rargs.extend(["--precise", "--no-cache"]);
+        rargs.push("--precise");
     }
     let rr = rs(o, repo, &rargs);
     if o.precise {

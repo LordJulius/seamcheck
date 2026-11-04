@@ -173,7 +173,8 @@ impl Graph {
             bridges::apply_bridges(&mut g, p);
         }
         g.load_ms = t0.elapsed().as_millis();
-        if let Some(s) = &slot {
+        // (a graph with a bridge that couldn't be built here is not the tree's graph: a run with the tools would read it)
+        if let Some(s) = slot.as_ref().filter(|_| g.env_notes.is_empty()) {
             s.save(&g);
         }
         g
@@ -220,10 +221,15 @@ impl Graph {
     pub fn lookup(&self, mod_name: &str, name: &str) -> Option<&Func> {
         let mut seen: Vec<&str> = Vec::new();
         let mut cur = mod_name;
+        let mut key = String::with_capacity(mod_name.len() + name.len() + 8);
         while !cur.is_empty() && !seen.contains(&cur) {
             seen.push(cur);
             let m = self.modules.get(cur)?;
-            if let Some(f) = self.func(&format!("{cur}.{name}")) {
+            key.clear();
+            key.push_str(cur);
+            key.push('.');
+            key.push_str(name);
+            if let Some(f) = self.func(&key) {
                 return Some(f);
             }
             cur = &m.parent;

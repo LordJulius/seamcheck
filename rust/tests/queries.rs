@@ -385,7 +385,6 @@ fn ruby_libraries_reach_nothing_and_count_no_guess() {
 
 // test_ruby.py: RubyResolutionTest.test_a_core_method_on_an_untyped_receiver_is_rubys
 #[test]
-#[ignore = "the Ruby link still guesses `opts.each` onto Drop#each (a Ruby core method on an untyped receiver); Ruby lane"]
 fn ruby_core_methods_count_as_named() {
     let (_d, _p, g) = fixture("ruby_core_method");
     let got = edges(&g, "Use.go");
