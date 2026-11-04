@@ -138,6 +138,8 @@ pub struct Module {
     pub raw: Arc<Vec<String>>,
     /// lines with comments / string contents blanked
     pub code: Arc<Vec<String>>,
+    /// the raw lines with comments blanked (arch._text), made on first use
+    pub text: std::sync::OnceLock<Arc<Vec<String>>>,
     pub funcs: Vec<Func>,
     /// extends / parent module ("" = none)
     pub parent: String,
@@ -182,6 +184,12 @@ pub struct Module {
 impl Module {
     pub fn new(name: &str, file: &str, raw: Arc<Vec<String>>, code: Arc<Vec<String>>) -> Module {
         Module { name: name.into(), file: file.into(), lines: raw.len(), raw, code, ..Default::default() }
+    }
+
+    /// The raw lines with their comments blanked, strings as written: the text the taint reads
+    /// values from (arch._text).
+    pub fn text(&self) -> Arc<Vec<String>> {
+        self.text.get_or_init(|| Arc::new(uncommented(&self.raw, &self.code))).clone()
     }
 
     /// The innermost function holding `line` (Module.func_at).
@@ -229,4 +237,72 @@ impl Module {
             "methods": self.methods, "reexports": self.reexports, "funcs": funcs,
         })
     }
+}
+
+/// Where a comment starts in the raw text (`#{x}` is Ruby's interpolation; `*` a block comment's
+/// next line) (arch._COMMENT_OPEN).
+fn comment_open(r: &[char], j: usize) -> bool {
+    let at = |k: usize, c: char| r.get(j + k) == Some(&c);
+    (at(0, '#') && !at(1, '{')) || (at(0, '/') && (at(1, '/') || at(1, '*'))) || at(0, '*') || (at(0, '<') && at(1, '!') && at(2, '-') && at(3, '-'))
+}
+
+/// (the raw line r with its comments blanked, the string left open after it) from its blanked line
+/// c, given the string open before it ("" none, else its delimiter): the scanner keeps a string's
+/// quotes and blanks what is between them, so a run it blanked outside a string that opens with a
+/// comment marker is a comment (arch._blank_comments). r and c have one char per char.
+pub(crate) fn blank_comments(r: &[char], c: &[char], state: &str) -> (Vec<char>, String) {
+    let mut buf = r.to_vec();
+    let mut st: Vec<char> = state.chars().collect();
+    let starts = |j: usize, d: &[char]| !d.is_empty() && c.len() >= j + d.len() && c[j..j + d.len()] == *d;
+    let mut j = 0;
+    while j < c.len() {
+        let ch = c[j];
+        if !st.is_empty() {
+            if starts(j, &st) {
+                j += st.len();
+                st.clear();
+            } else {
+                j += 1;
+            }
+        } else if "\"'`".contains(ch) {
+            st = if ch != '`' && starts(j, &[ch, ch, ch]) { vec![ch; 3] } else { vec![ch] };
+            j += st.len();
+        } else if ch == ' ' && r[j] != ' ' && comment_open(r, j) {
+            let mut k = j;
+            while k < c.len() && c[k] == ' ' {
+                k += 1;
+            }
+            for x in &mut buf[j..k] {
+                *x = ' ';
+            }
+            j = k;
+        } else {
+            j += 1;
+        }
+    }
+    (buf, st.into_iter().collect())
+}
+
+/// The raw lines with their comments blanked (strings kept as written): the text the taint reads
+/// values from, where `x = f()  # note` is `f()` and a `# Log export` line is empty (arch._uncommented).
+pub fn uncommented(raw: &[String], code: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut state = String::new();
+    for (i, r) in raw.iter().enumerate() {
+        let c = code.get(i).unwrap_or(r);
+        if r == c && state.is_empty() && !c.contains(['\'', '"', '`']) {
+            out.push(r.clone()); // (nothing blanked, no string: most lines)
+            continue;
+        }
+        let (rc, cc): (Vec<char>, Vec<char>) = (r.chars().collect(), c.chars().collect());
+        if rc.len() != cc.len() {
+            out.push(r.clone());
+            state.clear();
+            continue;
+        }
+        let (line, st) = blank_comments(&rc, &cc, &state);
+        out.push(line.into_iter().collect());
+        state = if st.chars().count() == 1 && st != "`" { String::new() } else { st }; // (a quote no line ends inside: a lifetime, a char)
+    }
+    out
 }

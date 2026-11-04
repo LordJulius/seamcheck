@@ -257,6 +257,17 @@ assignment and an f-string / `+` / conditional through its parts: literals with 
 `/`, `\\` or `..`, values that are free themselves. Check parity identical on
 flask_sqla, flask_round3–6 and the vulnerable apps.
 
+Round 7 (same lane; tests/test_security_round7.py, tests/fixtures/flask_round7):
+`Module::text` (`model::uncommented`, made once per module: the raw lines with each run the
+scanner blanked outside a string that opens with a comment marker blanked again; arch._text)
+replaces the raw lines everywhere the taint reads them (`own_code(.., true)`, `call_args`,
+`carries`, the receiver line, `downstream`'s source test). `taint::statement_end` ends at the
+value's last line with code, and a line starting with a quote continues it only while a string
+or a bracket is open (a docstring after it is a statement). `taint::calls` matches a call to a
+function by its name or the name it is imported as (`Func.imported`, then the module's), in the
+BFS, `At::callees` and `At::passed`. Check parity identical on flask_sqla, flask_round3–7, the
+vulnerable apps and the bench apps.
+
 Flask types (same lane): `infer_flask.py` / `graph/infer/flask.rs` (a
 model's `.query` as an `Ext` value tagged `\0rows`, Flask-Login's
 `current_user`), `_PY_ROW` in both Python adapters (`db.session.get(User,

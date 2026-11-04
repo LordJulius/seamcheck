@@ -476,6 +476,13 @@ sanitizers = ["coerce_safe_redirect_target"]  # their return value is clean
   and literals stays separator-free: `f"{safe_name}.pdf"`, `safe_name + ".pdf"`
   and `safe_name if ... else f"{safe_name}.pdf"` after `os.path.basename`; a
   literal holding `/`, `\` or `..` (`f"../{safe_name}"`) breaks it.
+- A comment is no part of the code around it: a comment line, a trailing
+  comment or a docstring between `buf = render_pdf(...)` and
+  `send_file(buf)` leaves `buf` the helper's buffer (the taint reads values
+  from the raw text with its comments blanked, and a statement ends at its
+  last line with code). A function imported under another name
+  (`from app.pdf import render_pdf as rp`, in the function or the file) has
+  its summary and is walked into by that name.
 - A request-scoped store (`stores`, Flask's `session` in the pack) carries the
   value across requests: a key written with request data
   (`session["backup"] = json.dumps(data)`) is request data where another

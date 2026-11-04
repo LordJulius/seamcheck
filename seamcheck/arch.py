@@ -387,7 +387,7 @@ def path(project, r: dict) -> list:
                         g = project.funcs[dst]
                         params = _params(project, g)
                         got = set()
-                        for c in (c for c in f.calls if c.line == ln and c.name == g.name):
+                        for c in (c for c in f.calls if c.line == ln and _calls(project, f, c.name, g)):
                             got |= _passed(project, f, c, g, params, source, clean, taint.at(c.line))
                         if not got or (dst in prev and got <= given[dst]):
                             continue  # nothing (new) tainted goes in
@@ -426,7 +426,7 @@ def _sink(project, f, c, text: str, sinks: list, kinds, source, clean, taint) ->
     recv = None
     if not hit or kinds.kind(text) == "url":
         m = project.modules.get(f.module)
-        line = m.raw[c.line - 1] if m is not None and 0 < c.line <= len(m.raw) else ""
+        line = _text(project, m)[c.line - 1] if m is not None and 0 < c.line <= len(m.raw) else ""
         recv = security.receiver(project, f, c, line, ctx.rhs if ctx is not None else (lambda name: None))
     if not hit:
         if recv != "http":
@@ -448,6 +448,16 @@ def _sink(project, f, c, text: str, sinks: list, kinds, source, clean, taint) ->
             return None, ""  # `session.get(Post, pk)`: a model class, so an ORM session
     got = kinds.verdict(kind, args, ctx)
     return got if got else (None, "")
+
+
+def _calls(project, f, name: str, g) -> bool:
+    """A call named `name` in f is a call of g by its own name or by the name f imports it as
+    (`from app.pdf import render_pdf as rp`, in f or in its file)."""
+    if name == g.name:
+        return True
+    m = project.modules.get(f.module)
+    got = f.imported.get(name) or (m.imported.get(name) if m is not None else None)
+    return got is not None and got[1] == g.name
 
 
 class _Ctx:
@@ -474,7 +484,7 @@ class _Ctx:
         """The functions a call named `name` on this line resolves to exactly (ids)."""
         project, f = self.taint.project, self.taint.f
         return [dst for dst, ln, exact in project.edges.get(f.id, [])
-                if exact and ln == self.line and dst in project.funcs and project.funcs[dst].name == name]
+                if exact and ln == self.line and dst in project.funcs and _calls(project, f, name, project.funcs[dst])]
 
     def passed(self, name: str):
         """What every exact caller passes for parameter `name` (raw texts; a caller's local is read as the
@@ -489,7 +499,7 @@ class _Ctx:
             g = project.funcs.get(caller)
             if not exact or g is None:
                 return None
-            for c in (c for c in g.calls if c.line == ln and c.name == f.name):
+            for c in (c for c in g.calls if c.line == ln and _calls(project, g, c.name, f)):
                 args = _call_args(project, g, c)
                 kw = [a.split("=", 1)[1] for a in args if re.match(rf"\s*{re.escape(name)}\s*[=:](?!=)", a)]
                 pos = [a for a in args if not security._kwarg(a)]
@@ -542,9 +552,75 @@ def _reads(readers, text: str) -> bool:
     return bool(readers) and any(not q or q[0].isupper() for q in readers.findall(text))
 
 
+# where a comment starts in the raw text (`#{x}` is Ruby's interpolation; `*` a block comment's next line)
+_COMMENT_OPEN = re.compile(r"#(?!\{)|//|/\*|\*|<!--")
+
+
+def _blank_comments(r: str, c: str, state: str = "") -> tuple[str, str]:
+    """(the raw line r with its comments blanked, the string left open after it) from its blanked
+    line c, given the string open before it ("" none, else its delimiter): the scanner keeps a
+    string's quotes and blanks what is between them, so a run it blanked outside a string that
+    opens with a comment marker is a comment."""
+    if r == c and not (state or "'" in c or '"' in c or "`" in c):
+        return r, ""  # (nothing blanked, no string: most lines)
+    buf, j = list(r), 0
+    while j < len(c):
+        ch = c[j]
+        if state:
+            if c.startswith(state, j):
+                j += len(state)
+                state = ""
+            else:
+                j += 1
+        elif ch in "\"'`":
+            state = ch * 3 if ch != "`" and c.startswith(ch * 3, j) else ch
+            j += len(state)
+        elif ch == " " and r[j] != " " and _COMMENT_OPEN.match(r, j):
+            k = j
+            while k < len(c) and c[k] == " ":
+                k += 1
+            buf[j:k] = " " * (k - j)
+            j = k
+        else:
+            j += 1
+    return "".join(buf), state
+
+
+def _quote_state(code: str) -> str:
+    """The string a blanked text leaves open at its end ("" none)."""
+    return _blank_comments(code, code)[1]
+
+
+def _uncommented(raw: list[str], code: list[str]) -> list[str]:
+    """The raw lines with their comments blanked (strings kept as written): the text the taint
+    reads values from, where `x = f()  # note` is `f()` and a `# Log export` line is empty."""
+    out, state = [], ""
+    for i, r in enumerate(raw):
+        c = code[i] if i < len(code) else r
+        if len(r) != len(c):
+            out.append(r)
+            state = ""
+            continue
+        line, state = _blank_comments(r, c, state)
+        out.append(line)
+        if len(state) == 1 and state != "`":
+            state = ""  # (a quote no line ends inside: a lifetime, a char)
+    return out
+
+
+def _text(project, m) -> list[str]:
+    """m's raw lines with comments blanked (_uncommented), kept per load."""
+    cache = project.__dict__.setdefault("_text", {})
+    got = cache.get(m.file + "\0" + m.name)
+    if got is None:
+        got = cache[m.file + "\0" + m.name] = _uncommented(m.raw, m.code)
+    return got
+
+
 def _own_code(project, f, raw: bool = False) -> str:
-    """f's code (comments and strings blanked, or `raw`, at the same offsets); a file's
-    `<top>`: its lines outside functions. (Kept per load: every path rule reads every function.)"""
+    """f's code (comments and strings blanked, or `raw`: comments blanked, strings as written; at the
+    same offsets); a file's `<top>`: its lines outside functions. (Kept per load: every path rule
+    reads every function.)"""
     cache = project.__dict__.setdefault("_own_code", {})
     key = (f.id, f.file, f.start, raw)
     got = cache.get(key)
@@ -553,7 +629,7 @@ def _own_code(project, f, raw: bool = False) -> str:
     m = project.modules.get(f.module)
     if m is None:
         return ""
-    lines = (m.raw if raw else m.code)[f.start - 1:f.end]
+    lines = (_text(project, m) if raw else m.code)[f.start - 1:f.end]
     if f.kind == "top":  # (blanked, not dropped: line numbers hold)
         inner = {n for mod in project.by_file.get(f.file, []) for g in mod.funcs if g.kind != "top"
                  for n in range(g.start, g.end + 1)}
@@ -666,7 +742,7 @@ class _Taint:
         m = project.modules.get(f.module)
         line = m.code[c.line - 1] if m is not None and c.line <= len(m.code) else ""
         used = [t for t in self.at(c.line) if _names(t, line)]
-        if not used or not sunk or (self.source and m is not None and self.source.search(m.raw[c.line - 1])):
+        if not used or not sunk or (self.source and m is not None and self.source.search(_text(project, m)[c.line - 1])):
             return False  # (a call that reads the source itself is a new injection: `r = fetch(req.query.url)`)
         for t in used:
             ln = max((ln for ln, name, _, _ in self.steps if name == t and ln < c.line), default=None)
@@ -674,7 +750,7 @@ class _Taint:
                 return False
             # (`file = params[:type].constantize.new(path)` brings in a second value: path still counts)
             rhs = m.code[ln - 1].split("=", 1)[-1] if m is not None else ""
-            if sum(_names(u, rhs) for u in self.at(ln)) + bool(self.source and self.source.search(m.raw[ln - 1])) > 1:
+            if sum(_names(u, rhs) for u in self.at(ln)) + bool(self.source and self.source.search(_text(project, m)[ln - 1])) > 1:
                 return False
         return True
 
@@ -710,18 +786,30 @@ class _Taint:
         return set(state)
 
 
+def _depth(code: str) -> int:
+    """The brackets a blanked text leaves open."""
+    return sum(code.count(c) for c in "([{") - sum(code.count(c) for c in ")]}")
+
+
 def _statement_end(code: str, val: int, width: int) -> int:
-    """Where the statement whose value starts at `val` ends: before the next line that
-    starts at its indentation or less. A continuation is deeper, closes a bracket or a
-    string, or is inside one (blanked to spaces)."""
+    """Where the statement whose value starts at `val` ends: at its last line with code, before
+    the next line that starts at its indentation or less. A continuation is deeper, closes a
+    bracket, or starts with a quote while a string or a bracket is still open (a docstring line
+    after the value is a statement of its own); a blank line, or a comment's (blanked to spaces),
+    is in no statement."""
     k = code.find("\n", val)
+    last = len(code) if k < 0 else k  # (the end of the value's last line with code)
     while k >= 0:
-        line = code[k + 1:code.find("\n", k + 1) if code.find("\n", k + 1) >= 0 else len(code)]
+        nxt = code.find("\n", k + 1)
+        line = code[k + 1:nxt if nxt >= 0 else len(code)]
         body = line.lstrip()
-        if body and len(line[:len(line) - len(body)].expandtabs(4)) <= width and body[0] not in ")]}'\"`":
-            return k + 1
-        k = code.find("\n", k + 1)
-    return len(code)
+        if body and len(line[:len(line) - len(body)].expandtabs(4)) <= width and body[0] not in ")]}" \
+                and not (body[0] in "'\"`" and (_quote_state(code[val:k]) or _depth(code[val:k]) > 0)):
+            return last
+        if body:
+            last = nxt if nxt >= 0 else len(code)
+        k = nxt
+    return last
 
 
 _SHELLS = re.compile(r"""^\s*[fbru]*["'`](?:/bin/|/usr/bin/)?(?:sh|bash|zsh|cmd(?:\.exe)?|powershell|pwsh)["'`]""")
@@ -736,7 +824,7 @@ def _call_args(project, f, c) -> list[str]:
         return []
     # bounds from the blanked code (a `,` or `)` in a string is no boundary), text from the raw lines
     text = "\n".join(m.code[c.line - 1:c.line + 60])  # (a callback argument spans lines)
-    raw = "\n".join(m.raw[c.line - 1:c.line + 60])
+    raw = "\n".join(_text(project, m)[c.line - 1:c.line + 60])
     # (the occurrence that is called: `ProcessBuilder pb = new ProcessBuilder(cmd)` declares the type first)
     eol = text.find("\n") % (len(text) + 1)
     nm = re.compile(rf"(?<![\w$]){re.escape(c.name)}(?!\w)\s*(?=\()").search(text, 0, eol) \
@@ -819,7 +907,7 @@ def _carries(project, f, c, source, clean, tainted: set, sink: bool = False) -> 
     parameterized query, a fixed or same-site redirect) is clean, unless it names a shell."""
     args = _call_args(project, f, c)
     m = project.modules.get(f.module)
-    line = m.raw[c.line - 1] if m is not None and 0 < c.line <= len(m.raw) else ""
+    line = _text(project, m)[c.line - 1] if m is not None and 0 < c.line <= len(m.raw) else ""
     # the receiver: `params[:class].classify.constantize`, `user_input.to_sym.send`
     recv = re.search(rf"([\w@$:.\[\]'\"()]+?)\s*\.\s*{re.escape(c.name)}\b", line)
     if recv and sink and _dirty(recv.group(1), source, clean, tainted):
@@ -833,7 +921,7 @@ def _carries(project, f, c, source, clean, tainted: set, sink: bool = False) -> 
         # (`const searchCriteria = () => ({ $where: `... ${threshold}` })`)
         for g in project.by_name.get(cm_.group(1), ()):
             if g.file == f.file and f.start < g.start <= f.end and g.id != f.id:
-                body = "\n".join(m.raw[g.start:g.end])  # (after its head: the value it builds)
+                body = "\n".join(_text(project, m)[g.start:g.end])  # (after its head: the value it builds)
                 if any(_names(t, body) for t in tainted) or source.search(body):
                     return True
     if sink and f.file.endswith(".rb") and re.match(r":?\w+\s*(?::(?!:)|=>)", first):

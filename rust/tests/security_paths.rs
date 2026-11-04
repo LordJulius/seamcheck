@@ -715,3 +715,170 @@ fn round6_only_the_injections_are_errors() {
     assert_eq!(got, want);
 }
 
+
+// ---- test_security_round7.py: the rule-level classes (generated as above) ----
+
+// test_security_round7.py: Comments.test_a_comment_keeps_a_real_path
+#[test]
+fn round7_a_comment_keeps_a_real_path() {
+    let files: &[(&str, &str)] = &[
+        ("app/routes.py", "from flask import request\n\n\ndef read():\n    path = request.args['p']  # #1\n    # Read it\n    \"\"\"Still the request's.\"\"\"\n    return open(path).read()\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+        ("python-injection".into(), "error".into(), "app/routes.py".into(), 8),
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round7.py: Comments.test_a_trailing_comment
+#[test]
+fn round7_a_trailing_comment() {
+    let files: &[(&str, &str)] = &[
+        ("app/pdf.py", "from io import BytesIO\n\n\ndef render_pdf(template_name, **context):\n    buf = BytesIO()\n    buf.write(template_name.encode())\n    buf.seek(0)\n    return buf  # the PDF\n"),
+        ("app/routes.py", "from flask import request, send_file\nfrom app.pdf import render_pdf\n\n\ndef export():\n    name = request.args.get('d', '')\n    pdf_buffer = render_pdf('x.html', x=name)  # the report\n    return send_file(pdf_buffer, download_name='x.pdf')\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round7.py: Comments.test_nothing_between_the_call_and_the_sink_counts
+#[test]
+fn round7_nothing_between_the_call_and_the_sink_counts_0() {
+    let files: &[(&str, &str)] = &[
+        ("app/pdf.py", "from io import BytesIO\n\n\ndef render_pdf(template_name, **context):\n    buf = BytesIO()\n    buf.write(template_name.encode())\n    buf.seek(0)\n    return buf  # the PDF\n"),
+        ("app/routes.py", "from flask import request, send_file\nfrom app.pdf import render_pdf\n\n\ndef export():\n    name = request.args.get('d', '')\n    pdf_buffer = render_pdf('x.html', x=name)\n    return send_file(pdf_buffer, download_name='x.pdf')\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round7.py: Comments.test_nothing_between_the_call_and_the_sink_counts
+#[test]
+fn round7_nothing_between_the_call_and_the_sink_counts_1() {
+    let files: &[(&str, &str)] = &[
+        ("app/pdf.py", "from io import BytesIO\n\n\ndef render_pdf(template_name, **context):\n    buf = BytesIO()\n    buf.write(template_name.encode())\n    buf.seek(0)\n    return buf  # the PDF\n"),
+        ("app/routes.py", "from flask import request, send_file\nfrom app.pdf import render_pdf\n\n\ndef export():\n    name = request.args.get('d', '')\n    pdf_buffer = render_pdf('x.html', x=name)\n    # Log export\n    return send_file(pdf_buffer, download_name='x.pdf')\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round7.py: Comments.test_nothing_between_the_call_and_the_sink_counts
+#[test]
+fn round7_nothing_between_the_call_and_the_sink_counts_2() {
+    let files: &[(&str, &str)] = &[
+        ("app/pdf.py", "from io import BytesIO\n\n\ndef render_pdf(template_name, **context):\n    buf = BytesIO()\n    buf.write(template_name.encode())\n    buf.seek(0)\n    return buf  # the PDF\n"),
+        ("app/routes.py", "from flask import request, send_file\nfrom app.pdf import render_pdf\n\n\ndef export():\n    name = request.args.get('d', '')\n    pdf_buffer = render_pdf('x.html', x=name)\n    \"\"\"Log export.\"\"\"\n    return send_file(pdf_buffer, download_name='x.pdf')\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round7.py: Comments.test_nothing_between_the_call_and_the_sink_counts
+#[test]
+fn round7_nothing_between_the_call_and_the_sink_counts_3() {
+    let files: &[(&str, &str)] = &[
+        ("app/pdf.py", "from io import BytesIO\n\n\ndef render_pdf(template_name, **context):\n    buf = BytesIO()\n    buf.write(template_name.encode())\n    buf.seek(0)\n    return buf  # the PDF\n"),
+        ("app/routes.py", "from flask import request, send_file\nfrom app.pdf import render_pdf\n\n\ndef export():\n    name = request.args.get('d', '')\n    pdf_buffer = render_pdf('x.html', x=name)\n\n    return send_file(pdf_buffer, download_name='x.pdf')\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round7.py: Comments.test_nothing_between_the_call_and_the_sink_counts
+#[test]
+fn round7_nothing_between_the_call_and_the_sink_counts_4() {
+    let files: &[(&str, &str)] = &[
+        ("app/pdf.py", "from io import BytesIO\n\n\ndef render_pdf(template_name, **context):\n    buf = BytesIO()\n    buf.write(template_name.encode())\n    buf.seek(0)\n    return buf  # the PDF\n"),
+        ("app/routes.py", "from flask import request, send_file\nfrom app.pdf import render_pdf\n\n\ndef export():\n    name = request.args.get('d', '')\n    pdf_buffer = render_pdf('x.html', x=name)\n    pass\n    return send_file(pdf_buffer, download_name='x.pdf')\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round7.py: Comments.test_nothing_between_the_call_and_the_sink_counts
+#[test]
+fn round7_nothing_between_the_call_and_the_sink_counts_5() {
+    let files: &[(&str, &str)] = &[
+        ("app/pdf.py", "from io import BytesIO\n\n\ndef render_pdf(template_name, **context):\n    buf = BytesIO()\n    buf.write(template_name.encode())\n    buf.seek(0)\n    return buf  # the PDF\n"),
+        ("app/routes.py", "from flask import request, send_file\nfrom app.pdf import render_pdf\n\n\ndef export():\n    name = request.args.get('d', '')\n    pdf_buffer = render_pdf('x.html', x=name)\n    # one\n\n    # two\n    return send_file(pdf_buffer, download_name='x.pdf')\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round7.py: Aliases.test_imported_under_another_name
+#[test]
+fn round7_imported_under_another_name_0() {
+    let files: &[(&str, &str)] = &[
+        ("app/pdf.py", "from io import BytesIO\n\n\ndef render_pdf(template_name, **context):\n    buf = BytesIO()\n    buf.write(template_name.encode())\n    buf.seek(0)\n    return buf  # the PDF\n"),
+        ("app/routes.py", "from flask import request, send_file\nfrom app.pdf import render_pdf as make_pdf\n\n\ndef export():\n    name = request.args.get('d', '')\n    pdf_buffer = make_pdf('x.html', x=name)\n    return send_file(pdf_buffer, download_name='x.pdf')\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round7.py: Aliases.test_imported_under_another_name
+#[test]
+fn round7_imported_under_another_name_1() {
+    let files: &[(&str, &str)] = &[
+        ("app/pdf.py", "from io import BytesIO\n\n\ndef render_pdf(template_name, **context):\n    buf = BytesIO()\n    buf.write(template_name.encode())\n    buf.seek(0)\n    return buf  # the PDF\n"),
+        ("app/routes.py", "from flask import request, send_file\n\n\ndef export():\n    from app.pdf import render_pdf as rp\n    name = request.args.get('d', '')\n    pdf_buffer = rp('x.html', x=name)\n    return send_file(pdf_buffer, download_name='x.pdf')\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round7.py: TheAppShape.test_only_the_injections_are_errors
+#[test]
+fn round7_only_the_injections_are_errors() {
+    let got = fixture_findings("flask_round7");
+    let want: Vec<(String, String, usize)> = vec![
+        ("error".into(), "app/inventory/tp.py".into(), 18),
+        ("error".into(), "app/inventory/tp.py".into(), 25),
+        ("error".into(), "app/utils/reports.py".into(), 3),
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round7.py: Helpers.test_uncommented
+#[test]
+fn round7_uncommented() {
+    let v = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+    let raw = v(&["x = f()  # note", "# Log export", "s = '#1'  // two", "t = \"\"\"", "# in the string", "\"\"\"  # é",
+                  "u = \"#{q}\" # c", "v = `a ${b}` /* c */"]);
+    let code = v(&["x = f()        ", "            ", "s = '  '        ", "t = \"\"\"", "               ", "\"\"\"     ",
+                   "u = \"    \"    ", "v = `      `        "]);
+    let want = v(&["x = f()        ", "            ", "s = '#1'        ", "t = \"\"\"", "# in the string", "\"\"\"     ",
+                   "u = \"#{q}\"    ", "v = `a ${b}`        "]);
+    assert_eq!(seamcheck::model::uncommented(&raw, &code), want);
+}

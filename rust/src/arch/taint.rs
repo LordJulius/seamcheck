@@ -58,7 +58,13 @@ pub(crate) fn slice(s: &str, a: usize, b: usize) -> &str {
 /// file's `<top>`: its lines outside functions (arch._own_code).
 pub fn own_code(g: &Graph, f: &Func, raw: bool) -> String {
     let Some(m) = g.module(&f.module) else { return String::new() };
-    let src = if raw { &m.raw } else { &m.code };
+    let text;
+    let src = if raw {
+        text = m.text();
+        &*text
+    } else {
+        &*m.code
+    };
     let (a, b) = (f.start.saturating_sub(1).min(src.len()), f.end.min(src.len()));
     let lines: &[String] = if a < b { &src[a..b] } else { &[] };
     if f.kind != "top" {
@@ -77,6 +83,27 @@ pub fn own_code(g: &Graph, f: &Func, raw: bool) -> String {
         .map(|(i, ln)| if inner.contains(&(i + f.start)) { "" } else { ln.as_str() })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The string a blanked text leaves open at its end ("" none) (arch._quote_state).
+fn quote_state(code: &str) -> String {
+    let c: Vec<char> = code.chars().collect();
+    crate::model::blank_comments(&c, &c, "").1
+}
+
+/// The brackets a blanked text leaves open (arch._depth).
+fn depth(code: &str) -> i64 {
+    code.chars().map(|c| "([{".contains(c) as i64 - ")]}".contains(c) as i64).sum()
+}
+
+/// A call named `name` in f is a call of h by its own name or by the name f imports it as
+/// (`from app.pdf import render_pdf as rp`, in f or in its file) (arch._calls).
+pub fn calls(g: &Graph, f: &Func, name: &str, h: &Func) -> bool {
+    if name == h.name {
+        return true;
+    }
+    let got = f.imported.get(name).or_else(|| g.module(&f.module).and_then(|m| m.imported.get(name)));
+    got.is_some_and(|t| t.1 == h.name)
 }
 
 /// Where the bracket open before offset k closes (arch._close).
@@ -178,7 +205,7 @@ pub fn call_args(g: &Graph, f: &Func, c: &Call) -> Vec<String> {
     // bounds from the blanked code (a `,` or `)` in a string is no boundary), text from the raw lines
     let hi = |v: &[String]| v[(c.line - 1).min(v.len())..(c.line + 60).min(v.len())].join("\n");
     let mut text = hi(&m.code);
-    let mut raw = hi(&m.raw);
+    let mut raw = hi(&m.text());
     // (the occurrence that is called: `ProcessBuilder pb = new ProcessBuilder(cmd)` declares the type first)
     let eol = text.find('\n').unwrap_or(text.len());
     let name = esc(&c.name);
@@ -241,7 +268,8 @@ fn literal() -> &'static Rx {
 pub fn carries(g: &Graph, f: &Func, c: &Call, cx: &Ctx, tainted: &HashSet<String>, sink: bool) -> bool {
     let args = call_args(g, f, c);
     let m = g.module(&f.module);
-    let line = m.filter(|m| 0 < c.line && c.line <= m.raw.len()).map(|m| m.raw[c.line - 1].as_str()).unwrap_or("");
+    let text = m.map(|m| m.text());
+    let line = text.as_ref().filter(|t| 0 < c.line && c.line <= t.len()).map(|t| t[c.line - 1].as_str()).unwrap_or("");
     // the receiver: `params[:class].classify.constantize`, `user_input.to_sym.send`
     if sink {
         if let Some(rv) = rxd(&format!(r#"([\w@$:.\[\]'"()]+?)\s*\.\s*{}\b"#, esc(&c.name))).search(line) {
@@ -261,7 +289,8 @@ pub fn carries(g: &Graph, f: &Func, c: &Call, cx: &Ctx, tainted: &HashSet<String
             for mn in g.by_file.get(&f.file).map(|v| v.as_slice()).unwrap_or(&[]) {
                 for h in &g.modules[mn].funcs {
                     if h.name == want && h.file == f.file && f.start < h.start && h.start <= f.end && h.id != f.id {
-                        let body = m.raw[h.start.min(m.raw.len())..h.end.min(m.raw.len()).max(h.start.min(m.raw.len()))].join("\n");
+                        let t = m.text();
+                        let body = t[h.start.min(t.len())..h.end.min(t.len()).max(h.start.min(t.len()))].join("\n");
                         if tainted.iter().any(|t| names(t, &body)) || cx.source.is_match(&body) {
                             return true;
                         }
@@ -405,20 +434,27 @@ pub fn passed(g: &Graph, f: &Func, c: &Call, h: &Func, params: &[String], cx: &C
     got
 }
 
-/// Where the statement whose value starts at `val` ends: before the next
-/// line that starts at its indentation or less (arch._statement_end).
+/// Where the statement whose value starts at `val` ends: at its last line with code, before the
+/// next line that starts at its indentation or less. A continuation is deeper, closes a bracket, or
+/// starts with a quote while a string or a bracket is still open (a docstring line after the value
+/// is a statement of its own); a blank line, or a comment's, is in no statement (arch._statement_end).
 fn statement_end(code: &str, val: usize, w: usize) -> usize {
     let mut k = code.get(val..).and_then(|t| t.find('\n')).map(|x| x + val);
+    let mut last = k.unwrap_or(code.len()); // (the end of the value's last line with code)
     while let Some(kk) = k {
         let nxt = code[kk + 1..].find('\n').map(|x| x + kk + 1);
         let line = &code[kk + 1..nxt.unwrap_or(code.len())];
         let (lead, body) = split_lead(line);
-        if !body.is_empty() && width(lead) <= w && !")]}'\"`".contains(body.chars().next().unwrap()) {
-            return kk + 1;
+        if let Some(b0) = body.chars().next() {
+            let open = || !quote_state(&code[val..kk]).is_empty() || depth(&code[val..kk]) > 0;
+            if width(lead) <= w && !")]}".contains(b0) && !("'\"`".contains(b0) && open()) {
+                return last;
+            }
+            last = nxt.unwrap_or(code.len());
         }
         k = nxt;
     }
-    code.len()
+    last
 }
 
 /// One assignment step: (line, name, dirty, indent width).
@@ -646,7 +682,7 @@ impl Taint {
             .unwrap_or("");
         let used: Vec<String> = self.at(c.line).into_iter().filter(|t| names(t, line)).collect();
         // (a call that reads the source itself is a new injection: `r = fetch(req.query.url)`)
-        let reads_src = m.map(|m| cx.source.is_match(py_index(&m.raw, c.line as i64 - 1))).unwrap_or(false);
+        let reads_src = m.map(|m| cx.source.is_match(py_index(&m.text(), c.line as i64 - 1))).unwrap_or(false);
         if used.is_empty() || sunk.is_empty() || reads_src {
             return false;
         }
@@ -658,7 +694,7 @@ impl Taint {
             let code_ln = py_index(&m.code, ln as i64 - 1);
             let rhs = code_ln.split_once('=').map(|x| x.1).unwrap_or(code_ln);
             let n = self.at(ln).iter().filter(|u| names(u, rhs)).count()
-                + cx.source.is_match(py_index(&m.raw, ln as i64 - 1)) as usize;
+                + cx.source.is_match(py_index(&m.text(), ln as i64 - 1)) as usize;
             if n > 1 {
                 return false;
             }
@@ -711,7 +747,7 @@ impl TaintCtx for At<'_> {
             .get(&self.f.id)
             .map(|es| {
                 es.iter()
-                    .filter(|(d, ln, ex)| *ex && *ln == self.line && self.g.func(d).is_some_and(|h| h.name == name))
+                    .filter(|(d, ln, ex)| *ex && *ln == self.line && self.g.func(d).is_some_and(|h| calls(self.g, self.f, name, h)))
                     .map(|(d, _, _)| d.clone())
                     .collect()
             })
@@ -728,7 +764,7 @@ impl TaintCtx for At<'_> {
         let mut out = Vec::new();
         for (caller, ln, exact) in g.redges.get(&f.id).map(|v| v.as_slice()).unwrap_or(&[]) {
             let Some(h) = g.func(caller).filter(|_| *exact) else { return None };
-            for c in h.calls.iter().filter(|c| c.line == *ln && c.name == f.name) {
+            for c in h.calls.iter().filter(|c| c.line == *ln && calls(g, h, &c.name, f)) {
                 let args = call_args(g, h, c);
                 let kw: Vec<&str> =
                     args.iter().filter(|a| kw_rx.match_start(a).is_some()).map(|a| a.split_once('=').map(|x| x.1).unwrap_or("")).collect();

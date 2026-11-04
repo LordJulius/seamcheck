@@ -255,7 +255,7 @@ pub fn path(p: &Project, r: &Rule) -> Res<Vec<Finding>> {
                     if let (Some(cx), Some(tn)) = (&cx, &tn) {
                         let params: Vec<String> = taint::param_decls(&g, h).into_iter().map(|x| x.0).collect();
                         let mut got: HashSet<String> = HashSet::new();
-                        for c in f.calls.iter().filter(|c| c.line == *ln && c.name == h.name) {
+                        for c in f.calls.iter().filter(|c| c.line == *ln && taint::calls(&g, f, &c.name, h)) {
                             got.extend(taint::passed(&g, f, c, h, &params, cx, &tn.at(c.line)));
                         }
                         let had = given.get(dst);
@@ -363,7 +363,8 @@ fn sink(
     let at = taint.map(|(cx, tn)| At { g, f, taint: tn, cx, line: c.line });
     let mut recv = None;
     if !hit || kinds.kind(text) == Some("url") {
-        let line = g.module(&f.module).filter(|m| 0 < c.line && c.line <= m.raw.len()).map(|m| m.raw[c.line - 1].as_str()).unwrap_or("");
+        let text = g.module(&f.module).map(|m| m.text());
+        let line = text.as_ref().filter(|t| 0 < c.line && c.line <= t.len()).map(|t| t[c.line - 1].as_str()).unwrap_or("");
         recv = security::receiver(g, f, c, line, at.as_ref().map(|a| a as &dyn TaintCtx));
     }
     let mut text = text.to_string();
