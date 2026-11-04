@@ -123,3 +123,13 @@ pub fn lint(name: &str, files: &[(&str, &str)], options: &str) -> Vec<(String, u
 pub fn rule(lint: &str) -> String {
     format!("[[rule]]\nid = \"{lint}\"\nkind = \"lint\"\nlint = \"{lint}\"\n")
 }
+
+/// The exactness guard's records go to a scratch dir, not ~/.cache/seamcheck
+/// (every gate a test runs would leave a book for its temp repo there).
+pub fn scratch_cache() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let d = std::env::temp_dir().join(format!("seamcheck-test-cache-{}", std::process::id()));
+        std::env::set_var("SEAMCHECK_CACHE_DIR", d);
+    });
+}

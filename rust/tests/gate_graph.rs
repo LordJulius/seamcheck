@@ -38,6 +38,7 @@ fn base() -> tempfile::TempDir {
 }
 
 fn run(root: &Path) -> Report {
+    common::scratch_cache();
     let mut p = load(root);
     gate(&mut p, "HEAD", false)
 }
@@ -116,6 +117,7 @@ fn staged_ignores_unstaged_dead_code() {
             ("b/two.py", &format!("def big(a, b):\n{}\n    return x0\n", body())),
         ],
     );
+    common::scratch_cache();
     let mut p = load(d.path());
     assert!(!gate(&mut p, "HEAD", true).failed());
     git(d.path(), &["add", "lib/search.ex"]);

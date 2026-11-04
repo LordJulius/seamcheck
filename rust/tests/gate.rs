@@ -32,6 +32,7 @@ fn base() -> tempfile::TempDir {
 }
 
 fn run(root: &Path) -> Report {
+    common::scratch_cache();
     let mut p = load(root);
     gate(&mut p, "HEAD", false)
 }
@@ -130,6 +131,7 @@ fn a_waiver_lets_a_name_through() {
 fn staged_ignores_unstaged_work() {
     let d = base();
     write(d.path(), &[("lib/search.ex", &SEARCH.replacen("end\n", "end\n\n  def use_fallback(y), do: y\n", 1))]);
+    common::scratch_cache();
     let mut p = load(d.path());
     assert!(!gate(&mut p, "HEAD", true).failed());
     git(d.path(), &["add", "lib/search.ex"]);
