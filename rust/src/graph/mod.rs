@@ -8,6 +8,7 @@
 //! no edge here; `parity --edges` reports any such difference.
 
 pub mod bridges;
+pub mod cache;
 pub mod imports;
 pub mod infer;
 pub mod link;
@@ -21,6 +22,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use indexmap::IndexMap;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::lang::{self, ParseCtx};
 use crate::model::{Func, Module};
@@ -42,7 +44,7 @@ pub struct TraceRow {
     pub ids: Vec<String>,
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct Graph {
     /// name -> module, in load order (files in order, modules as parsed)
     pub modules: IndexMap<String, Module>,
@@ -66,6 +68,7 @@ pub struct Graph {
     /// C++ classes registered under a QML name: QML name -> class (core._qml_context)
     pub qml_names: IndexMap<String, String>,
     /// the packs' `[[param]]` / `[[returns]]` entries (config.pack_params)
+    #[serde(with = "cache::json_text")]
     pub params: IndexMap<String, serde_json::Value>,
     /// edges a `[[bridge]]` drew: (from, to) -> the bridge's id
     pub bridged: HashMap<(String, String), String>,
@@ -76,10 +79,13 @@ pub struct Graph {
     /// calls by a project function's name that reached none (core.Project.possible)
     pub possible: link::Possible,
     /// how long the load took (core.Project.parse_ms)
+    #[serde(skip)]
     pub load_ms: u128,
     /// every call's outcome in resolution order, when asked for (precise mode)
+    #[serde(skip)]
     pub trace: Option<Vec<TraceRow>>,
     /// what the language servers settled (precise/), when they were asked
+    #[serde(skip)]
     pub precise: Option<precise::Stats>,
 }
 
@@ -137,7 +143,17 @@ impl Graph {
     /// them all).
     pub fn load_precise(p: &Project, bridges: bool, precise: bool, cache: Option<&std::path::Path>) -> Graph {
         let t0 = std::time::Instant::now();
-        let mut g = Graph::assemble(parse_all(p, None));
+        // the linked graph of a tree seen before (not the precise one: language servers settle it)
+        let slot = if precise { None } else { cache::slot(p, bridges) };
+        if let Some(mut g) = slot.as_ref().and_then(|s| s.load()) {
+            g.load_ms = t0.elapsed().as_millis();
+            return g;
+        }
+        let parsed = parse_all(p, None);
+        if std::env::var_os("SEAM_TIMING").is_some() {
+            eprintln!("  parse: {} ms", t0.elapsed().as_millis());
+        }
+        let mut g = Graph::assemble(parsed);
         // what the frameworks in use hand the functions they call (packs' [[param]]):
         // type knowledge, so a detected framework's applies without being listed
         let mut packs: Vec<String> =
@@ -157,6 +173,9 @@ impl Graph {
             bridges::apply_bridges(&mut g, p);
         }
         g.load_ms = t0.elapsed().as_millis();
+        if let Some(s) = &slot {
+            s.save(&g);
+        }
         g
     }
 

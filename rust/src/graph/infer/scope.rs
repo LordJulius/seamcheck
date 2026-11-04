@@ -8,6 +8,18 @@ use crate::lang::chains::{self, Opts};
 use crate::model::{Func, Module};
 
 impl<'a> Types<'a> {
+    /// A verdict about one function that costs a pattern built from its name,
+    /// asked again by every call that reaches it: worked out once.
+    fn memo_flag(&self, kind: u8, gf: &Func, work: impl FnOnce() -> bool) -> bool {
+        let key = (kind, gf.id.clone());
+        if let Some(&v) = self.c.borrow().flags.get(&key) {
+            return v;
+        }
+        let v = work();
+        self.c.borrow_mut().flags.insert(key, v);
+        v
+    }
+
     /// `name` in a module, or in any file of a "pkg:" package. A module that
     /// only re-exports the name (an `index.ts` barrel, a package `__init__.py`)
     /// leads on to where it is defined (core._in_scope).
@@ -275,6 +287,10 @@ impl<'a> Types<'a> {
 
     /// A JS function stored as a property (`req.setTimeout = () => {}`): never called bare.
     pub fn js_property_fn(&self, gf: &Func) -> bool {
+        self.memo_flag(0, gf, || self.js_property_fn_work(gf))
+    }
+
+    fn js_property_fn_work(&self, gf: &Func) -> bool {
         let Some(m) = self.g.modules.get(&gf.module) else { return false };
         gf.start > 0
             && gf.start <= m.raw.len()
@@ -288,6 +304,10 @@ impl<'a> Types<'a> {
     /// not a class or object member, and never stored as a property or exported
     /// under its name in an object (`{ close }`, `x.close = close`).
     pub fn js_plain_function(&self, gf: &Func) -> bool {
+        self.memo_flag(1, gf, || self.js_plain_function_work(gf))
+    }
+
+    fn js_plain_function_work(&self, gf: &Func) -> bool {
         let Some(m) = self.g.modules.get(&gf.module) else { return false };
         if gf.start == 0 || gf.start > m.raw.len() {
             return false;
@@ -328,15 +348,17 @@ impl<'a> Types<'a> {
     /// calls made anywhere else.
     pub fn js_scoped_patch(&self, gf: &Func, caller: &Func) -> bool {
         let Some(m) = self.g.modules.get(&gf.module) else { return false };
-        if gf.start == 0
-            || gf.start > m.raw.len()
-            || rxd(&format!(
-                r"^\s*(?:Object|Array|String|Function|Number|Boolean)\.prototype\.{}\s*=",
-                esc(&gf.name)
-            ))
-            .match_start(&m.raw[gf.start - 1])
-            .is_none()
-        {
+        let patched = self.memo_flag(2, gf, || {
+            gf.start > 0
+                && gf.start <= m.raw.len()
+                && rxd(&format!(
+                    r"^\s*(?:Object|Array|String|Function|Number|Boolean)\.prototype\.{}\s*=",
+                    esc(&gf.name)
+                ))
+                .match_start(&m.raw[gf.start - 1])
+                .is_some()
+        });
+        if !patched {
             return false;
         }
         let around: Vec<&Func> = self

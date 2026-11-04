@@ -197,6 +197,8 @@ pub(crate) struct Caches {
     // core's scope helpers
     js_factory: HashMap<(String, String), Option<String>>,
     js_arg_members: HashMap<String, bool>,
+    /// per function, the verdict of a pattern built from its name (see `Types::memo_flag`)
+    pub(crate) flags: HashMap<(u8, String), bool>,
     js_stored: HashMap<String, HashSet<String>>,
     cpp_ns: Option<HashSet<String>>,
 }

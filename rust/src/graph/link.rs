@@ -343,7 +343,15 @@ pub fn walk_order(g: &Graph) -> Vec<String> {
 
 /// Imports resolved, then every call of every function to edges.
 pub fn build_edges(g: &mut Graph, p: &Project) {
+    let t0 = std::time::Instant::now();
+    // SEAM_TIMING=1 prints where a load's time goes
+    let tick = |what: &str| {
+        if std::env::var_os("SEAM_TIMING").is_some() {
+            eprintln!("  link {what}: {} ms", t0.elapsed().as_millis());
+        }
+    };
     resolve_imports(g, p);
+    tick("resolve_imports");
     // short names for qualifiers in path-named languages: the file's stem
     // and the types it declares (a class that is its own module: its types only)
     let mut short: HashMap<String, Vec<String>> = HashMap::new();
@@ -367,9 +375,11 @@ pub fn build_edges(g: &mut Graph, p: &Project) {
     }
     g.short = short;
     cpp_header_fields(g);
+    tick("short+cpp");
     // supertypes as modules, then every module's descendants (for overrides
     // and for an interface's implementations)
     crate::graph::infer::resolve_bases(g, p);
+    tick("resolve_bases");
     let children = {
         let t = crate::graph::infer::Types::new(g, p);
         let mut children: HashMap<String, Vec<String>> = HashMap::new();
@@ -381,10 +391,12 @@ pub fn build_edges(g: &mut Graph, p: &Project) {
         children
     };
     g.children = children;
+    tick("children");
     let groups = pylink::groups(g, p);
     let missing = pylink::group_problems(g, p);
     g.problems.extend(missing);
     let order = walk_order(g);
+    tick("groups+order");
     let mut site_out: HashMap<(String, usize, i64, String), Targets> = HashMap::new();
     let mut edges: flow::Edges = Default::default();
     let mut redges: flow::Edges = Default::default();
@@ -442,8 +454,11 @@ pub fn build_edges(g: &mut Graph, p: &Project) {
                 }
             }
         }
+        tick("resolve loop");
         r.param_flow(&mut edges, &mut redges, &pending, &mut counts);
+        tick("param_flow");
         r.param_receivers(&mut edges, &mut redges, &pending_recv, &mut counts);
+        tick("param_receivers");
     }
     g.edges = edges;
     g.redges = redges;

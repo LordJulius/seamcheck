@@ -15,7 +15,33 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// Longest haystack the ASCII engine is offered (the ASCII check is linear).
+const ASCII_MAX: usize = 1 << 16;
+
+/// A pattern both ways: on an ASCII haystack the `(?-u)` byte engine (a
+/// compile 25x cheaper than the Unicode tables' and a lean automaton: the
+/// patterns built from names are compiled by the thousand), on anything
+/// else the Unicode engine, built when first needed.
+struct Dual {
+    ascii: regex::bytes::Regex,
+    /// the pattern in Python's dialect, for the Unicode engine's translation
+    src: String,
+    uni: OnceLock<Engine>,
+}
+
+impl Dual {
+    fn uni(&self) -> &Engine {
+        self.uni.get_or_init(|| Engine::build(&translate(&self.src)).unwrap_or_else(|e| panic!("pattern {:?} compiles for ASCII only: {e}", self.src)))
+    }
+}
+
+fn verify() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("SEAM_RX_VERIFY").is_some())
+}
+
 enum Engine {
+    Dual(Box<Dual>),
     Plain(regex::Regex),
     /// the backtracker, with `pre`: the pattern less its lookarounds, a
     /// superset of its matches (same start positions) that the fast engine
@@ -24,6 +50,22 @@ enum Engine {
 }
 
 impl Engine {
+    /// The pattern (Python dialect) as an engine: the dual form when the
+    /// byte engine takes it (no lookaround, backreference or Unicode
+    /// property, which only the Unicode one reads), else the Unicode one.
+    fn compile(pat: &str) -> Result<Engine, String> {
+        if pat.is_ascii() {
+            if let Ok(ascii) = regex::bytes::RegexBuilder::new(&translate_ascii(pat)).size_limit(64 << 20).build() {
+                let d = Dual { ascii, src: pat.to_string(), uni: OnceLock::new() };
+                if verify() || cfg!(debug_assertions) {
+                    d.uni(); // a pattern the byte engine takes but the Unicode one refuses is a bug: say so now
+                }
+                return Ok(Engine::Dual(Box::new(d)));
+            }
+        }
+        Engine::build(&translate(pat))
+    }
+
     fn build(t: &str) -> Result<Engine, String> {
         if let Ok(re) = regex::RegexBuilder::new(t).size_limit(64 << 20).build() {
             return Ok(Engine::Plain(re));
@@ -35,8 +77,25 @@ impl Engine {
             .map(|re| Engine::Fancy(re, pre))
             .map_err(|e| e.to_string())
     }
+    /// The byte engine answers for this haystack (all ASCII, not long).
+    fn ascii_for(&self, t: &str) -> bool {
+        matches!(self, Engine::Dual(_)) && t.len() <= ASCII_MAX && t.is_ascii()
+    }
     fn captures_at<'t>(&self, t: &'t str, pos: usize) -> Option<Caps<'t>> {
+        self.captures_in(t, pos, self.ascii_for(t))
+    }
+    /// `captures_at` with the haystack's ASCII check made by the caller.
+    fn captures_in<'t>(&self, t: &'t str, pos: usize, ascii: bool) -> Option<Caps<'t>> {
         match self {
+            Engine::Dual(d) => {
+                let r = if ascii { d.ascii.captures_at(t.as_bytes(), pos).map(|c| Caps::B(c, t)) } else { d.uni().captures_in(t, pos, false) };
+                if ascii && verify() {
+                    let u = d.uni().captures_in(t, pos, false);
+                    let spans = |c: &Option<Caps>| c.as_ref().map(|c| (0..c.len()).map(|i| c.span(i)).collect::<Vec<_>>());
+                    assert_eq!(spans(&r), spans(&u), "ASCII and Unicode engines differ on {:?} at {pos} in {:?}", d.src, &t[..t.len().min(200)]);
+                }
+                r
+            }
             Engine::Plain(re) => re.captures_at(t, pos).map(Caps::P),
             Engine::Fancy(re, pre) => {
                 // no match of the pattern starts before the first place its
@@ -49,8 +108,22 @@ impl Engine {
             }
         }
     }
+    fn is_match(&self, t: &str) -> bool {
+        match self {
+            Engine::Dual(d) => {
+                let r = if self.ascii_for(t) { d.ascii.is_match(t.as_bytes()) } else { d.uni().is_match(t) };
+                if verify() && self.ascii_for(t) {
+                    assert_eq!(r, d.uni().is_match(t), "ASCII and Unicode engines differ on {:?} in {:?}", d.src, &t[..t.len().min(200)]);
+                }
+                r
+            }
+            Engine::Plain(re) => re.is_match(t),
+            Engine::Fancy(re, pre) => pre.as_ref().map(|p| p.is_match(t)).unwrap_or(true) && re.is_match(t).unwrap_or(false),
+        }
+    }
     fn captures_len(&self) -> usize {
         match self {
+            Engine::Dual(d) => d.ascii.captures_len(),
             Engine::Plain(re) => re.captures_len(),
             Engine::Fancy(re, _) => re.captures_len(),
         }
@@ -64,6 +137,7 @@ pub struct Rx {
 }
 
 pub enum Caps<'t> {
+    B(regex::bytes::Captures<'t>, &'t str),
     P(regex::Captures<'t>),
     F(fancy_regex::Captures<'t, str>),
 }
@@ -71,12 +145,14 @@ pub enum Caps<'t> {
 impl<'t> Caps<'t> {
     fn span_of(&self, i: usize) -> Option<(usize, usize, &'t str)> {
         match self {
+            Caps::B(c, t) => c.get(i).map(|m| (m.start(), m.end(), &t[m.start()..m.end()])),
             Caps::P(c) => c.get(i).map(|m| (m.start(), m.end(), m.as_str())),
             Caps::F(c) => c.get(i).map(|m| (m.start(), m.end(), m.as_str())),
         }
     }
     fn len(&self) -> usize {
         match self {
+            Caps::B(c, _) => c.len(),
             Caps::P(c) => c.len(),
             Caps::F(c) => c.len(),
         }
@@ -111,6 +187,7 @@ impl<'t> Caps<'t> {
     }
     pub fn name(&self, n: &str) -> Option<&'t str> {
         match self {
+            Caps::B(c, t) => c.name(n).map(|m| &t[m.start()..m.end()]),
             Caps::P(c) => c.name(n).map(|m| m.as_str()),
             Caps::F(c) => c.name(n).map(|m| m.as_str()),
         }
@@ -119,7 +196,7 @@ impl<'t> Caps<'t> {
 
 impl Rx {
     pub fn new(pat: &str) -> Result<Rx, String> {
-        Engine::build(&translate(pat)).map(|re| Rx { re, full: OnceLock::new(), src: pat.to_string() })
+        Engine::compile(pat).map(|re| Rx { re, full: OnceLock::new(), src: pat.to_string() })
     }
 
     /// For patterns written in this crate: a bad one is a bug, not input.
@@ -141,12 +218,7 @@ impl Rx {
     }
 
     pub fn is_match(&self, t: &str) -> bool {
-        match &self.re {
-            Engine::Plain(re) => re.is_match(t),
-            Engine::Fancy(re, pre) => {
-                pre.as_ref().map(|p| p.is_match(t)).unwrap_or(true) && re.is_match(t).unwrap_or(false)
-            }
-        }
+        self.re.is_match(t)
     }
 
     /// Python `pattern.search(t, pos)`.
@@ -175,7 +247,7 @@ impl Rx {
 
     /// Python `pattern.fullmatch(t)`.
     pub fn fullmatch<'t>(&self, t: &'t str) -> Option<Caps<'t>> {
-        let full = self.full.get_or_init(|| Engine::build(&format!(r"\A(?:{})\z", translate(&self.src))).ok());
+        let full = self.full.get_or_init(|| Engine::compile(&format!(r"\A(?:{})\z", self.src)).ok());
         full.as_ref().and_then(|re| re.captures_at(t, 0))
     }
 
@@ -189,8 +261,9 @@ impl Rx {
         let hay = &t[..b];
         let mut out = Vec::new();
         let mut pos = a.min(b);
+        let ascii = self.re.ascii_for(hay);
         while pos <= hay.len() {
-            let Some(c) = self.re.captures_at(hay, pos) else { break };
+            let Some(c) = self.re.captures_in(hay, pos, ascii) else { break };
             let (s, e) = (c.start(), c.end());
             out.push(c);
             if e > s {
@@ -342,6 +415,16 @@ pub fn floor_char(t: &str, mut i: usize) -> usize {
 
 /// Python pattern text -> the same meaning in fancy-regex's dialect.
 pub fn translate(pat: &str) -> String {
+    translate_in(pat, false)
+}
+
+/// `translate` for the `(?-u)` byte engine, which reads only ASCII text:
+/// Python's `\w` is the ASCII word characters there.
+fn translate_ascii(pat: &str) -> String {
+    format!("(?-u){}", translate_in(pat, true))
+}
+
+fn translate_in(pat: &str, ascii: bool) -> String {
     let c: Vec<char> = pat.chars().collect();
     let mut out = String::with_capacity(pat.len() + 8);
     let mut i = 0;
@@ -355,9 +438,9 @@ pub fn translate(pat: &str) -> String {
                 'Z' if !in_class => out.push_str(r"\z"),
                 // Python's \w is str.isalnum() or "_": letters and every number
                 // (`₀` too), no combining marks or other connectors
-                'w' if in_class => out.push_str(r"\p{L}\p{N}_"),
-                'w' => out.push_str(r"[\p{L}\p{N}_]"),
-                'W' => out.push_str(r"[^\p{L}\p{N}_]"),
+                'w' if in_class => out.push_str(if ascii { "A-Za-z0-9_" } else { r"\p{L}\p{N}_" }),
+                'w' => out.push_str(if ascii { "[A-Za-z0-9_]" } else { r"[\p{L}\p{N}_]" }),
+                'W' => out.push_str(if ascii { "[^A-Za-z0-9_]" } else { r"[^\p{L}\p{N}_]" }),
                 // Python: an escaped punctuation mark is itself (Rust reads `\<` `\>` as word boundaries)
                 '<' | '>' | '/' | '\'' | '"' | '`' | '@' | '%' | '=' | ':' | ',' | ';' | '!' => out.push(n),
                 _ => {

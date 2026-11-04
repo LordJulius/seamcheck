@@ -315,8 +315,7 @@ fn questions<'g>(
 
 /// Where answers are kept between runs (fingerprint.CACHE_DIR).
 pub fn cache_dir() -> std::path::PathBuf {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
-    home.join(".cache/seamcheck")
+    super::cache::default_dir()
 }
 
 fn cache_path(dir: &Path, root: &Path) -> std::path::PathBuf {

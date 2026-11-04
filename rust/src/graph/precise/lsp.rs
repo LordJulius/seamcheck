@@ -175,8 +175,16 @@ impl Conn {
     }
 
     fn why(&mut self) -> String {
-        // (a moment for an exiting process to be reaped, as Python's poll() sees it gone)
-        let code = self.child.try_wait().ok().flatten();
+        // its output closed or its input broke, so it is exiting: give it a moment to be
+        // reaped, or the exit code (and the warning that names it) comes and goes
+        let mut code = self.child.try_wait().ok().flatten();
+        for _ in 0..40 {
+            if code.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            code = self.child.try_wait().ok().flatten();
+        }
         let tail = self.err.lock().unwrap().back().cloned().unwrap_or_default();
         match code {
             Some(st) => {

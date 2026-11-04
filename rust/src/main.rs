@@ -204,6 +204,9 @@ fn main() {
         std::path::absolute(&a.root).unwrap_or_else(|_| PathBuf::from(&a.root))
     };
     let t0 = Instant::now();
+    if !a.no_cache && std::env::var_os("SEAMCHECK_NO_CACHE").is_none() {
+        seamcheck::graph::cache::enable(seamcheck::graph::cache::default_dir());
+    }
     let code = match a.cmd.as_str() {
         "check" => check(&a, &root, t0),
         "gate" => seamcheck::tidy::cli::gate(&tidy_opts(&a), &root, t0),

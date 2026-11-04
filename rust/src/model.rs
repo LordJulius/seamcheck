@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// Python source files (a `.pyw` is a Python script run without a console) (model.PY_EXTS).
@@ -23,7 +24,7 @@ pub fn is_py(file: &str) -> bool {
     file.ends_with(".py") || file.ends_with(".pyw")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Call {
     /// the called function's name
     pub name: String,
@@ -46,7 +47,7 @@ impl Call {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Func {
     pub module: String,
     pub name: String,
@@ -129,16 +130,19 @@ pub struct Span {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Module {
     pub name: String,
     pub file: String,
     pub lines: usize,
     /// the original lines (suppression comments, snippets)
+    #[serde(with = "crate::graph::cache::shared_lines")]
     pub raw: Arc<Vec<String>>,
     /// lines with comments / string contents blanked
+    #[serde(with = "crate::graph::cache::shared_lines")]
     pub code: Arc<Vec<String>>,
     /// the raw lines with comments blanked (arch._text), made on first use
+    #[serde(skip)]
     pub text: std::sync::OnceLock<Arc<Vec<String>>>,
     pub funcs: Vec<Func>,
     /// extends / parent module ("" = none)
