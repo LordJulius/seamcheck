@@ -53,9 +53,9 @@ mostly parsing and linking: phase 1 takes the first, phase 2 the second.
 | `infer.py` | 2,166 | receiver type inference over the graph | `graph/infer.rs` | 2 |
 | `precise.py` | 848 | language servers settle guessed calls | `graph/precise/` (done) | 4 |
 | `lint.py`, `lint_infra.py`, `lint_qml.py`, `structure.py`, `css.py` | 2,241 | `kind = "lint"` checks, `essential`, brace / JSX trees, CSS index | `lint/` | 1 (all but `auth-in-background` and `ets-owner`, which walk the graph: 3, done in `lint/graph.rs`) |
-| `tidy.py` | 980 | gate, dead / test-only / unused, dups, test audit, split, hotspots, remove, refs, moved code | `gate.rs` (1: changed lines, moved lines, forbid_added, moved refs) / `tidy/` | 1 / 3 |
-| `tidy_cli.py` | 241 | tidy command output | `main.rs` | 1 (gate) / 3 |
-| `exactness.py` | 176 | gate's import-resolution guard (warns) | `tidy/` | 3 |
+| `tidy.py` | 980 | gate, dead / test-only / unused, dups, test audit, split, hotspots, remove, refs, moved code | `gate.rs` (changed lines, moved lines, forbid_added, moved refs, the graph half) / `tidy/` | 1 / 3 (done) |
+| `tidy_cli.py` | 241 | tidy command output | `tidy/cli.rs` | 3 (done) |
+| `exactness.py` | 176 | gate's import-resolution guard (warns) | `tidy/exactness.rs` | 3 (done) |
 | `deps.py` | 796 | declared vs used dependencies | `deps/` | 3 (done) |
 | `arch.py` | 737 | depend / layers / cycles / path rules, `graph` command | `arch/` (`mod.rs`, `path.rs`, `taint.rs`) | 3 (done) |
 | `queries.py` | 205 | answers as data (CLI and MCP share them) | `queries.rs` | 3 |
@@ -119,9 +119,9 @@ side by side:
    defers, with the reason (a graph rule kind, a lint not ported, functions of
    a file whose adapter is phase 2).
 2. `check --format json`: Python with `--skip <deferred>`, Rust as is.
-3. With `--gate`: `gate --format json [--staged]` from both; Python's
-   graph-only findings (`unused`, `test_only`, `dups`, `tests`,
-   `exactness`) and those of deferred rules are set aside.
+3. With `--gate`: `gate --format json [--staged] [--since REF]` from both,
+   graph findings (`unused`, `test_only`, `dups`, `tests`, `exactness`)
+   included; findings of rules `port-status` still defers are set aside.
 4. Findings compare as multisets of (kind, rule, severity, file, line,
    message, snippet), plus `func` for files whose functions phase 1 knows
    (Elixir, and files no adapter reads). `config` notes about `[[bridge]]`s
@@ -144,6 +144,12 @@ blanked code). `--ext` picks the languages; `--check` adds the phase 1
 comparison back. `--formats` also runs `check` as text, sarif and github and
 compares them line for line (the `(N ms)` tail and bad-regex text aside).
 
+`--tidy` runs every tidy command on both (`src/bin/parity/tidy.rs`):
+`tests`, `test-only`, `unused`, `dups`, `tidy` and `hotspots` as JSON and as
+text, `split` on the six biggest files, `refs` and a dry `remove` on four
+unused functions, and the `--ids` lists; JSON compares as values, text line
+for line (timing lines aside).
+
 ## Known differences (by design or not worth matching)
 
 - Error text for a bad regex or a TOML syntax error is each library's own.
@@ -157,6 +163,20 @@ compares them line for line (the `(N ms)` tail and bad-regex text aside).
 - Python's `finditer` may return an empty match at the position of a
   previous empty match when a non-empty one also starts there; never in a
   rule pattern so far.
+- `dups`: Python orders a group's pairs, and groups of equal size, by the
+  iteration order of sets of strings (hash-seeded per process); Rust sorts
+  pairs by id and ties by file pair. The harness compares both in one order.
+  A shingle is a 64-bit hash of its six tokens' hashes (Python keeps the
+  tuple): a collision would move one similarity by one shingle in millions.
+- `split`: a cluster's `examples` after the first follow the walk's set
+  order in Python; Rust walks neighbours in sorted order. The harness
+  compares a cluster's size, lines and first example.
+- The exactness guard's records: Python pickles them, Rust keeps its own
+  JSON book beside them (`<repo>-exactness-rs.json` in `~/.cache/seamcheck`,
+  keyed by commit, this binary and the config). A warning needs a record of
+  the ref (or a project under 300 files to measure it from scratch), so each
+  side warns from its own book; a gate on a tree whose ref neither side
+  recorded gives none from either.
 
 ## Security pack: sink, source and sanitizer resolution (2026-11-03)
 
@@ -267,6 +287,31 @@ classes on the flask_sqla fixture, and test_security_round2.py's), `tests/field_
 (test_field_run.py).
 Parity: `--fixtures tests/fixtures` and `--fixtures rust/tests/fixtures` with
 `--check --formats`: 0 differences.
+
+## Phase 3 status: the gate's graph half and tidy (gate-graph lane, 2026-11-03)
+
+`src/tidy/`: `mod.rs` (`Tidy`: the project, its graph and each file's
+is-test answer worked out once; `is_entry` with the Flask registrations of
+de775e3; `refs`; `changed_files`; `normpath`), `corpus.rs` (the name corpus,
+read in parallel, no cache: it costs less than reading Python's pickle),
+`audit.rs` (the tests audit: exact reach, product types named, Phoenix
+routes, spawned scripts, files read), `dead.rs` (test-only, unused),
+`dups.rs`, `split.rs` (split, hotspots), `remove.rs` (with the orphan
+cascade and orphaned declarations), `exactness.rs`, `cli.rs` (the gate's
+and the tidy commands' text / JSON / sarif / github). `gate.rs` runs the
+graph half on the changed lines and shares `Project::graph()` with the
+rules. No `cache.rs`: the graph loads fresh each run.
+
+Tests: `tests/tidy.rs` (test_tidy.py, test_slint.py's copies),
+`tests/gate_graph.rs` (test_gate.py's and test_gate_moves.py's graph
+halves, test_gate_reach.py, test_gate_exactness.py with the CLI).
+
+Parity (desk, Primos unreachable): `--tidy` and `--gate --staged` on an
+86-file Python repo (this package and its tests) with staged dead code, a
+copy, a do-nothing test, a source-reading test and a fallback name: 0
+differences, every command (19 comparisons) and the gate's 5 / 5 findings.
+Queued for Primos: `--tidy` and `--gate --staged` on elixir-pot and an
+ep-gate-style copy, `--tidy` on the bench repos, and the wall times.
 
 ## Phase 1 status (2026-10-24)
 
