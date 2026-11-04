@@ -63,7 +63,7 @@ fn a_graph_read_back_is_the_graph_built() {
     let built = Graph::load(&p);
     let slot = cache::slot_in(&p, true, cdir.path().to_path_buf());
     assert!(slot.load().is_none(), "nothing cached yet");
-    slot.save(&built);
+    slot.save(&built, 5000);
     let again = cache::slot_in(&p, true, cdir.path().to_path_buf()).load().expect("cached");
     assert_eq!(shape(&built), shape(&again));
     assert!(again.funcs.contains_key("app.main"));
@@ -87,7 +87,7 @@ fn modules_of_one_file_share_their_lines() {
     let built = Graph::load(&p);
     let shared = built.modules.values().filter(|m| m.file == "m.py").count();
     assert!(shared >= 2, "a module per class and one for the file");
-    cache::slot_in(&p, true, cdir.path().to_path_buf()).save(&built);
+    cache::slot_in(&p, true, cdir.path().to_path_buf()).save(&built, 5000);
     let again = cache::slot_in(&p, true, cdir.path().to_path_buf()).load().unwrap();
     let arcs: Vec<_> = again.modules.values().filter(|m| m.file == "m.py").map(|m| std::sync::Arc::as_ptr(&m.raw)).collect();
     assert!(arcs.windows(2).all(|w| w[0] == w[1]), "one copy of the file's lines");
@@ -98,7 +98,7 @@ fn modules_of_one_file_share_their_lines() {
 fn a_changed_file_is_a_new_key() {
     let (d, p) = project();
     let cdir = TempDir::new().unwrap();
-    cache::slot_in(&p, true, cdir.path().to_path_buf()).save(&Graph::load(&p));
+    cache::slot_in(&p, true, cdir.path().to_path_buf()).save(&Graph::load(&p), 5000);
     std::fs::write(d.path().join("lib.py"), "def helper():\n    return 2\n\ndef other():\n    return 4\n").unwrap();
     let p2 = common::load(d.path());
     assert!(cache::slot_in(&p2, true, cdir.path().to_path_buf()).load().is_none());
@@ -113,7 +113,7 @@ fn a_changed_file_is_a_new_key() {
 fn config_flags_and_file_lists_are_in_the_key() {
     let (d, p) = project();
     let cdir = TempDir::new().unwrap();
-    cache::slot_in(&p, true, cdir.path().to_path_buf()).save(&Graph::load(&p));
+    cache::slot_in(&p, true, cdir.path().to_path_buf()).save(&Graph::load(&p), 5000);
     assert!(cache::slot_in(&p, false, cdir.path().to_path_buf()).load().is_none(), "bridges off is another graph");
     common::write(d.path(), &[("extra.py", "def e():\n    return 1\n")]);
     assert!(cache::slot_in(&common::load(d.path()), true, cdir.path().to_path_buf()).load().is_none());
@@ -131,6 +131,7 @@ fn run(root: &Path, cdir: &Path, args: &[&str]) -> (String, String) {
         .env("SEAMCHECK_RS_QUIET", "1")
         .env("SEAMCHECK_CACHE_DIR", cdir)
         .env("SEAM_TIMING", "1")
+        .env("SEAMCHECK_CACHE_MIN_MS", "0")
         .output()
         .unwrap();
     (String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
@@ -184,4 +185,41 @@ fn a_worktree_shares_the_graph() {
     common::git(d.path(), &["worktree", "add", "-q", wt.to_str().unwrap()]);
     let (_o, err) = run(&wt, cdir.path(), &["stats"]);
     assert!(err.contains("cache load"), "{err}");
+}
+
+// exactness.record in queries.check / queries.stats: a `check` or `stats` on a tree that is HEAD's
+// remembers HEAD's shares for the gate's exactness guard
+#[test]
+fn check_and_stats_record_the_exactness_shares() {
+    for cmd in ["check", "stats"] {
+        let (d, _p) = project();
+        common::git(d.path(), &["init", "-q", "-b", "main"]);
+        common::git(d.path(), &["add", "-A"]);
+        common::git(d.path(), &["commit", "-q", "-m", "x"]);
+        let cdir = TempDir::new().unwrap();
+        run(d.path(), cdir.path(), &[cmd]);
+        let records: Vec<String> = std::fs::read_dir(cdir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with("-exactness-rs.json"))
+            .collect();
+        assert_eq!(records.len(), 1, "{cmd}: {records:?}");
+    }
+}
+
+// a graph built in a moment isn't worth a file, and a small project's run leaves the directory empty
+#[test]
+fn a_quick_graph_is_not_kept() {
+    let (d, _p) = project();
+    let cdir = TempDir::new().unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_seamcheck"))
+        .args(["stats"])
+        .current_dir(d.path())
+        .env("SEAMCHECK_RS_QUIET", "1")
+        .env("SEAMCHECK_CACHE_DIR", cdir.path())
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    assert!(std::fs::read_dir(cdir.path()).unwrap().next().is_none(), "nothing written");
 }

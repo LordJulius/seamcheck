@@ -142,9 +142,18 @@ impl Graph {
     /// whose answers from earlier runs may answer (None, `--no-cache`: ask
     /// them all).
     pub fn load_precise(p: &Project, bridges: bool, precise: bool, cache: Option<&std::path::Path>) -> Graph {
+        Graph::load_kept(p, bridges, precise, cache, true)
+    }
+
+    /// The graph of a scratch tree (a commit unpacked to measure it): built every time and not kept.
+    pub fn load_scratch(p: &Project, bridges: bool) -> Graph {
+        Graph::load_kept(p, bridges, precise::enabled(p), Some(&precise::cache_dir()), false)
+    }
+
+    fn load_kept(p: &Project, bridges: bool, precise: bool, cache: Option<&std::path::Path>, keep: bool) -> Graph {
         let t0 = std::time::Instant::now();
         // the linked graph of a tree seen before (not the precise one: language servers settle it)
-        let slot = if precise { None } else { cache::slot(p, bridges) };
+        let slot = if precise || !keep { None } else { cache::slot(p, bridges) };
         if let Some(mut g) = slot.as_ref().and_then(|s| s.load()) {
             g.load_ms = t0.elapsed().as_millis();
             return g;
@@ -175,7 +184,7 @@ impl Graph {
         g.load_ms = t0.elapsed().as_millis();
         // (a graph with a bridge that couldn't be built here is not the tree's graph: a run with the tools would read it)
         if let Some(s) = slot.as_ref().filter(|_| g.env_notes.is_empty()) {
-            s.save(&g);
+            s.save(&g, g.load_ms);
         }
         g
     }

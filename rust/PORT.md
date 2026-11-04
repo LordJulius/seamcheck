@@ -329,11 +329,9 @@ lock), `parity --tidy` / `--gate`, 0 rules deferred:
 | an 86-file Python repo (this package) `--tidy`, `--gate --staged` with the same kinds of debt (desk) | 0 differences, gate 5 / 5 |
 | koa, flask, urfave/cli `--tidy` (desk) | 0 differences |
 
-sinatra (`split`, `refs`) and cJSON (`hotspots`' caller files) differ where
-the graphs differ, not in the tidy code: Rust links 738 edges out of
-sinatra's lib/sinatra/base.rb to Python's 401 (Ruby receivers), and the
-tests' calls into cJSON.c, `#include "../cJSON.c"` through tests/common.h,
-are exact in Python and name guesses in Rust (C includes).
+sinatra (`split`, `refs`) and cJSON (`hotspots`' caller files) differed where
+the graphs differed, not in the tidy code; both graph gaps are closed (see
+"Graph speed and the graph cache" below).
 
 Wall time on elixir-pot (seconds; max RSS): Rust loads the graph from
 scratch every run, Python reads its pickled graph when the tree is one it
@@ -348,12 +346,8 @@ loaded before (each run below), and relinks (~100 s) when it isn't.
 | `dups` | 13.5 | 27.9 |
 | `tests` | 5.9 | 25.4 |
 
-Where Rust's time goes: the graph, 23.2 s of every command (`examples/
-parse_times.rs`): parsing 6.6 s in parallel (one 3.4 s bundle,
-viz-global.js, is the critical path), linking 16.6 s. No `cache.rs` yet: a
-content-hash parse cache would save at most the 6.6 s; what would make
-repeat runs Python-fast is caching the linked graph by the files' hashes
-(fingerprint.py's scheme) or a faster link. Both are graph-core work.
+(Those are the numbers before the graph cache and the cheaper regex
+compile; the table in "Graph speed and the graph cache" replaces them.)
 
 ## Phase 1 status (2026-10-24)
 
@@ -614,13 +608,12 @@ check, and the error replies. Timings (`N ms`, `load_ms`) are masked.
 | desk, 15 picks each: sinatra, cJSON | 628 | 328 | 14 + 13, all graph differences |
 
 The differences are the graph's, not the queries': `parity --edges` shows
-them (today's main): this repo's ruby_core_method fixture (the Ruby link
-guessing `opts.each` / `opts.key?` onto Drop#each / #key?, test_ruby.py's
-test_a_core_method_on_an_untyped_receiver_is_rubys, ignored in
-tests/queries.rs until the Ruby resolution closes it), sinatra (1,121 guessed
-edges only Rust draws, `respond_to?` / `empty?` on untyped receivers) and
-cJSON (92: test calls into cJSON.c Python makes exact, Rust guesses). On
-every other repo every query and every reply is identical.
+them (the day of that run): this repo's ruby_core_method fixture (the Ruby
+link guessing `opts.each` / `opts.key?` onto Drop#each / #key?), sinatra
+(1,121 guessed edges only Rust drew, `respond_to?` / `empty?` on untyped
+receivers) and cJSON (92: test calls into cJSON.c Python makes exact, Rust
+guessed). All three closed since by the graph-speed lane (below). On every
+other repo every query and every reply was identical.
 
 `map --html` on elixir-pot: the page outside the data is byte for byte
 Python's; nodes (9,999) and module edges (15,336, same order) identical,
@@ -701,3 +694,104 @@ InitDetectsPacks).
 file holding `""`, crashes Python (KeyError on `deps[""]`); Rust skips it.
 Manifest shapes that crash Python (a non-object package.json, a non-string
 script) are skipped.
+
+## Graph speed and the graph cache (graph-speed lane, 2026-11-04)
+
+**Where the cold load's time went** (elixir-pot on Pylon Primos, 4,135
+files; a sampling profile through `eu-stack`, which Primos has, over a
+child that sets `PR_SET_PTRACER`; `SEAM_TIMING=1` prints the load's phases):
+parsing 5-7 s (parallel), imports/bases/groups 0.8 s, and the call
+resolution loop 12-16 s on one thread. Of the loop: 35 % was compiling
+regexes (`pyre::rx_built`: 28,000 patterns built from names, 800 us each
+because Unicode `\w` / `\s` / `\b` make the automaton huge) and 25 % hashing
+and `Graph::lookup`. The 256-pattern cap of 78c1848 was not the cause on its
+own: `js_property_fn` rebuilt the same pattern for every call that reached a
+JS function (4,213 compiles for 4,213 functions, again and again).
+
+**What changed.**
+- `pyre::Engine::Dual`: a pattern with no lookaround or Unicode property
+  compiles a second `(?-u)` byte engine (32 us against 813 us) that answers
+  for any ASCII haystack up to 64 KB; the Unicode engine is built the first
+  time a haystack needs it. The ASCII translation is the same text with
+  `\w` as `[A-Za-z0-9_]`. `SEAM_RX_VERIFY=1` runs both engines on every
+  search and asserts the same spans: the whole test suite, elixir-pot's
+  `check` / `tidy` / `unused` and `parity --edges --parse` on all 55 bench
+  repos pass under it. Debug builds build the Unicode engine eagerly too.
+- `Types::memo_flag`: the verdicts about one JS function that cost a pattern
+  built from its name (`js_property_fn`, `js_plain_function`,
+  `js_scoped_patch`) are worked out once.
+- `graph/cache.rs`: the linked graph is kept between runs. bincode of
+  `Graph` (about 280 MB on elixir-pot), keyed by this binary (length +
+  mtime), the merged config, the file list, the bridges flag and the content
+  hashes (blake2b-128) of every parsed-language file and manifest-like file
+  (`.json .toml .godot .mod .work .gradle .uid`, `CMakeLists.txt`) behind
+  a stamp map (mtime + size) so a warm run stats the tree and reads nothing.
+  Files, in `SEAMCHECK_CACHE_DIR` or `~/.cache/seamcheck`, never Python's:
+  `<repo>-graph-rs-<key>.bin` (the newest 3 per repository; git's common dir
+  is the repo key, so a worktree shares the main checkout's graph; 3 GB
+  over all, least recently used first), `<repo>-graphs-rs.json`,
+  `<root>-stamps-rs.bin`. Only the CLI turns it on (`--no-cache` and
+  `SEAMCHECK_NO_CACHE` leave it off; the library and the tests build every
+  graph); the precise graph is never kept; a graph with a bridge that
+  couldn't be built here (`env_notes`) isn't kept, so a run without `mix`
+  doesn't hand its half graph to a run with it; a graph built in under a
+  second isn't kept (`SEAMCHECK_CACHE_MIN_MS`); the scratch trees the
+  exactness guard unpacks to measure a commit are never kept
+  (`Graph::load_scratch`). `Module.raw` / `code` are written once per file
+  and read back shared. Python's tests have none for its cache; the Rust
+  ones are `tests/graph_cache.rs` (round trip, shared lines, a changed file /
+  config / flag / file list is a new key, the CLI reads and sees edits,
+  `--no-cache`, keep 3, a worktree shares, quick graphs aren't kept, `check`
+  and `stats` record the exactness shares).
+- `check` and `stats` write the exactness record (Python's
+  `queries.check` / `stats`), as `gate` already did.
+- A process that is about to end no longer frees its Project and Graph
+  (`project::exit_soon`: seconds of `free` in `check`); `serve` keeps freeing.
+- The flaky `precise::a_crashing_server_is_a_warning_and_the_graph_stays_static`
+  (1 in 3): the exit code was read before the child was reaped; `Conn::why`
+  now waits up to 200 ms for a closed server to be reaped.
+- Ruby: `lang/ruby/infer.rs` is `_infer_types` (constructor and method
+  parameters typed from their callers, option fields, alternatives,
+  library receivers, Ruby's core methods on untyped receivers). Python mutates
+  the graph while its type walk reads it; here each work item reads through a
+  `Types` and its changes are applied before the next, with a fresh `Types`
+  built only after a change (`drive`). The C adapter now fills
+  `Module.c_includes` (it never did, so `#include "../cJSON.c"` through a
+  test's `common.h` guessed where Python is exact); `Module::dump` and
+  `parity --parse` compare it.
+
+**Parity** (Pylon Primos): `--edges` elixir-pot 145,540 / 145,540 identical
+(127,521 exact); `--tidy` 19 comparisons 0; `--gate` 0 / 0 (check 667 / 667);
+`--queries --serve` 524 queries and 293 requests 0 differ. `--edges --parse`
+on all 50 bench repos in seamcheck-rs/bench plus sinatra, jekyll, rack,
+sidekiq, flask, httpx, requests, godot-demo-projects, Pixelorama: 0
+differences, with `SEAM_RX_VERIFY=1`. sinatra 3,543 / 3,543, jekyll
+5,492 / 5,492, rack 5,512 / 5,512, sidekiq 4,755 / 4,755, cJSON 3,524 / 3,524.
+`parity --edges` now runs the Rust side with `--no-cache`: it compares the
+resolver, not a graph an earlier run kept.
+
+**Wall time and peak memory on elixir-pot** (Pylon Primos, load 1-2, a login
+shell so the `http` bridge's `mix phx.routes` runs; seconds, max RSS in GB).
+"before" is the binary of 7c8d573; "cold" is this tree with the cache off;
+"first" builds and saves; "repeat" reads the graph. Python is warm (its
+pickled graph).
+
+| command | Python warm | before | cold | first | repeat |
+|---------|------------:|-------:|-----:|------:|-------:|
+| `check` | 25.2 (1.3) | 46.6 (3.2) | 31.9 (2.2) | 30.9 (2.2) | 13.7-16.7 (1.8-2.3) |
+| `gate --staged` (probe file: dead code, `use_fallback`) | 13.4 (1.3) | 31.2 (2.0) | 21.5 (1.8) | 21.2 (1.7) | 6.5-7.2 (1.6) |
+| `unused` | 3.8 (0.9) | 24.6 (1.6) | 16.3 (1.1) | 16.5 (1.2) | 1.9 (0.8) |
+| `tests` | 3.8 (0.9) | 23.3 (1.4) | 15.3 (1.0) | 15.1 (1.2) | 0.9 (0.8) |
+| `tidy` | 15.1 (1.7) | 26.0 (1.8) | 17.7 (1.4) | 17.6 (1.4) | 3.4 (1.1) |
+| `callers ElixirPot.Settings.get` | 2.6 (0.9) | 23.5 (1.5) | 15.2 (1.0) | 15.1 (1.2) | 0.8 (0.8) |
+
+(A Python run on a tree it hasn't seen takes 65-110 s; the Rust cold run is
+the number a changed tree pays: 15-32 s.) `check`'s remainder is the rules
+(lints, the `command` rules' processes), which both sides pay alike.
+
+**Left.** A parse cache (per file, by content hash) would take 3-4 s off a
+changed tree's 15 s; the resolution loop is one thread (the Resolver's
+caches are `RefCell`s) and spends a quarter of itself hashing strings with
+SipHash (`rustc-hash` on the big maps is the next cheap win). The exactness
+guard's record is only written when `check` / `stats` / `gate` run on HEAD's
+own tree (as in Python).

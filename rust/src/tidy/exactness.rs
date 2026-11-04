@@ -308,7 +308,7 @@ impl Book {
             let cfgs: Vec<String> =
                 crate::config::files_for(&p.root, extra).iter().map(|x| x.to_string_lossy().to_string()).collect();
             let then = Project::load(&tmp, &cfgs);
-            Some(shares(&Graph::load_with(&then, false)))
+            Some(shares(&Graph::load_scratch(&then, false)))
         })();
         let _ = std::fs::remove_dir_all(&tmp);
         got

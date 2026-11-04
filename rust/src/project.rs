@@ -60,6 +60,28 @@ impl Finding {
 
 type Memo = Mutex<HashMap<String, Arc<dyn Any + Send + Sync>>>;
 
+/// A process about to exit gains nothing from freeing a big project (texts, modules, the graph:
+/// seconds of `free`): with this set, a dropped Project lets them go to the OS with the process.
+static EXIT_SOON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The command line sets it for every command that ends the process when it is done (not `serve`,
+/// which loads projects again and again).
+pub fn exit_soon() {
+    EXIT_SOON.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+impl Drop for Project {
+    fn drop(&mut self) {
+        if EXIT_SOON.load(std::sync::atomic::Ordering::Relaxed) {
+            std::mem::forget(std::mem::take(&mut self.raw));
+            std::mem::forget(std::mem::take(&mut self.texts));
+            std::mem::forget(std::mem::take(&mut self.ex));
+            std::mem::forget(std::mem::take(&mut self.graph));
+            std::mem::forget(std::mem::take(&mut self.memo));
+        }
+    }
+}
+
 pub struct Project {
     pub root: PathBuf,
     pub config: Config,

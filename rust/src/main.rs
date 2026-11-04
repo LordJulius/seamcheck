@@ -204,6 +204,9 @@ fn main() {
         std::path::absolute(&a.root).unwrap_or_else(|_| PathBuf::from(&a.root))
     };
     let t0 = Instant::now();
+    if a.cmd != "serve" {
+        seamcheck::project::exit_soon();
+    }
     if !a.no_cache && std::env::var_os("SEAMCHECK_NO_CACHE").is_none() {
         seamcheck::graph::cache::enable(seamcheck::graph::cache::default_dir());
     }
@@ -254,10 +257,14 @@ fn query(a: &Args, root: &Path, t0: Instant) -> i32 {
     let precise = a.precise || seamcheck::graph::precise::enabled(&p);
     let cache = (!a.no_cache).then(seamcheck::graph::precise::cache_dir);
     let g = seamcheck::graph::Graph::load_precise(&p, true, precise, cache.as_deref());
+    if a.cmd == "stats" {
+        seamcheck::tidy::exactness::Book::default().record(&p, &|| &g, None);
+    }
     let q = seamcheck::queries::Q::new(&p, &g);
     let r = if a.cmd == "stats" { q.cmd_stats(&a.q, Some(t0.elapsed().as_millis())) } else { q.command(&a.cmd, &a.q) };
     print!("{}", r.out);
     eprint!("{}", r.err);
+    std::mem::forget(g); // (the process ends next: see project::exit_soon)
     r.code
 }
 
@@ -296,6 +303,8 @@ fn check(a: &Args, root: &Path, t0: Instant) -> i32 {
     // (as Python's check does: the graph's parser errors and bridge notes are findings too)
     let g = p.graph();
     let mut findings = run_rules(&p, only.as_deref(), skip.as_deref());
+    // (the gate's exactness guard compares a change against these)
+    seamcheck::tidy::exactness::Book::default().record(&p, &|| &*g, None);
     if a.errors_only {
         findings.retain(|f| f.severity == "error");
     }

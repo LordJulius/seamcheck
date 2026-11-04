@@ -33,6 +33,12 @@ use crate::project::{ext_of, Project};
 
 /// How many graphs of one repository are kept (the newest).
 const KEEP: usize = 3;
+/// The size the graphs of all repositories may add up to before the least recently used go.
+const BUDGET: u64 = 3 << 30;
+/// A graph built faster than this isn't worth a file (`SEAMCHECK_CACHE_MIN_MS` moves it).
+fn worth_keeping_ms() -> u128 {
+    std::env::var("SEAMCHECK_CACHE_MIN_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000)
+}
 const MAGIC: &[u8; 8] = b"SEAMGR01";
 
 static DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -298,12 +304,16 @@ impl Slot {
             eprintln!("  cache load {} MB: {} ms", bytes.len() / 1_000_000, t0.elapsed().as_millis());
         }
         self.hashes.save();
-        self.touch();
+        self.touch(true);
         Some(g)
     }
 
-    /// Keep a graph made now, and drop this repository's older ones.
-    pub fn save(&self, g: &Graph) {
+    /// Keep a graph that took `built_ms` to make (a small one is built again faster than it is read),
+    /// and drop this repository's older ones.
+    pub fn save(&self, g: &Graph, built_ms: u128) {
+        if built_ms < worth_keeping_ms() {
+            return;
+        }
         SEEN.with(|s| s.borrow_mut().clear());
         // (`serialize` would size the graph first, a pass the shared-lines table can't tell from the real one)
         let mut out = Vec::with_capacity(256 << 20);
@@ -315,11 +325,12 @@ impl Slot {
         }
         write_atomic(&self.dir.join(&self.name), &out);
         self.hashes.save();
-        self.touch();
+        self.touch(false);
     }
 
-    /// Put this graph first in the repository's index and delete the ones past `KEEP`.
-    fn touch(&self) {
+    /// Put this graph first in the repository's index, delete the ones past `KEEP`, and the least
+    /// recently used of all once the graphs add up to more than the budget.
+    fn touch(&self, read: bool) {
         let index = self.dir.join(format!("{}-graphs-rs.json", self.repo));
         let mut names: Vec<String> =
             std::fs::read_to_string(&index).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
@@ -329,5 +340,29 @@ impl Slot {
             let _ = std::fs::remove_file(self.dir.join(gone));
         }
         write_atomic(&index, serde_json::to_string(&names).unwrap_or_default().as_bytes());
+        if read {
+            // (reading it counts as using it)
+            if let Ok(f) = std::fs::OpenOptions::new().write(true).open(self.dir.join(&self.name)) {
+                let _ = f.set_modified(std::time::SystemTime::now());
+            }
+        }
+        let mut all: Vec<(std::time::SystemTime, u64, PathBuf)> = std::fs::read_dir(&self.dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains("-graph-rs-"))
+            .filter_map(|e| e.metadata().ok().map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len(), e.path())))
+            .collect();
+        let mut total: u64 = all.iter().map(|x| x.1).sum();
+        all.sort();
+        for (_, size, path) in all {
+            if total <= BUDGET {
+                break;
+            }
+            if path.file_name().is_some_and(|n| *n != *self.name) {
+                let _ = std::fs::remove_file(&path);
+                total -= size;
+            }
+        }
     }
 }
