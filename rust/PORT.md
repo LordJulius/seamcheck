@@ -520,6 +520,15 @@ check, and the error replies. Timings (`N ms`, `load_ms`) are masked.
 |-------|--------:|---------------:|-------:|
 | tests/fixtures/* + tests/queries_fixtures/* (desk) | 973 | 595 | 0 |
 | flask (Pylon, before the argparse fix) | 517 | 264 | 0 serve; 25 queries, all the argparse case |
+| this repo (desk, 20 picks; 13,907 output lines) | 415 | 214 | 4, all one graph gap (below) |
+
+The 4 on this repo are the Ruby link guessing `opts.each` / `opts.key?` onto
+Drop#each / #key? (the ruby_core_method fixture, test_ruby.py's
+test_a_core_method_on_an_untyped_receiver_is_rubys, ignored in
+tests/queries.rs until the Ruby resolution closes it): two more guessed edges,
+so `dead` and `stats` differ; every query over the rest is identical. Still
+to run (Pylon Primos unreachable): elixir-pot and the bench repos, e.g.
+`parity --queries --serve ~/Documents/elixir-pot ~/bench/{pallets__flask,encode__httpx,sinatra__sinatra,square__okhttp,gin-gonic__gin,BurntSushi__ripgrep,JamesNK__Newtonsoft.Json,slimphp__Slim,DaveGamble__cJSON,godotengine__godot-demo-projects,plausible__analytics}`.
 
 **Not yet.** serve's `gate`, `refs`, `unused` and `tests` tools answer "not
 ported" until the gate-graph lane's tidy lands (the tool list and schemas are
