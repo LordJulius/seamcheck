@@ -321,8 +321,14 @@ Parity (desk, Primos unreachable): `--tidy` and `--gate --staged` on an
 86-file Python repo (this package and its tests) with staged dead code, a
 copy, a do-nothing test, a source-reading test and a fallback name: 0
 differences, every command (19 comparisons) and the gate's 5 / 5 findings.
+`--tidy` on bench repos (desk, single-threaded): koa, flask, urfave/cli 0
+differences; sinatra (`split`, `refs`) and cJSON (`hotspots`' caller files)
+differ where the graphs differ, not in the tidy code: Rust links 738 edges
+out of sinatra's lib/sinatra/base.rb to Python's 401 (Ruby receivers), and
+the tests' calls into cJSON.c, `#include "../cJSON.c"` through
+tests/common.h, are exact in Python and name guesses in Rust (C includes).
 Queued for Primos: `--tidy` and `--gate --staged` on elixir-pot and an
-ep-gate-style copy, `--tidy` on the bench repos, and the wall times.
+ep-gate-style copy, the other bench repos, and the wall times.
 
 ## Phase 1 status (2026-10-24)
 
