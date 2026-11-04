@@ -577,14 +577,19 @@ check, and the error replies. Timings (`N ms`, `load_ms`) are masked.
 | tests/fixtures/* + tests/queries_fixtures/* (desk) | 973 | 595 | 0 |
 | flask (Pylon, before the argparse fix) | 517 | 264 | 0 serve; 25 queries, all the argparse case |
 | this repo (desk, 20 picks; 13,907 output lines) | 415 | 214 | 4, all one graph gap (below) |
+| desk, 15 picks each: flask, httpx, ky, SwiftyJSON, koa, urfave/cli, gin, monolog, javapoet, Dapper, tps-demo, fd (75k output lines) | 3,775 | 1,968 | 0 |
+| desk, 15 picks each: sinatra, cJSON | 628 | 328 | 14 + 13, all graph differences |
 
-The 4 on this repo are the Ruby link guessing `opts.each` / `opts.key?` onto
-Drop#each / #key? (the ruby_core_method fixture, test_ruby.py's
+The differences are the graph's, not the queries': `parity --edges` shows
+them (today's main): this repo's ruby_core_method fixture (the Ruby link
+guessing `opts.each` / `opts.key?` onto Drop#each / #key?, test_ruby.py's
 test_a_core_method_on_an_untyped_receiver_is_rubys, ignored in
-tests/queries.rs until the Ruby resolution closes it): two more guessed edges,
-so `dead` and `stats` differ; every query over the rest is identical. Still
-to run (Pylon Primos unreachable): elixir-pot and the bench repos, e.g.
-`parity --queries --serve ~/Documents/elixir-pot ~/bench/{pallets__flask,encode__httpx,sinatra__sinatra,square__okhttp,gin-gonic__gin,BurntSushi__ripgrep,JamesNK__Newtonsoft.Json,slimphp__Slim,DaveGamble__cJSON,godotengine__godot-demo-projects,plausible__analytics}`.
+tests/queries.rs until the Ruby resolution closes it), sinatra (1,121 guessed
+edges only Rust draws, `respond_to?` / `empty?` on untyped receivers) and
+cJSON (92: test calls into cJSON.c Python makes exact, Rust guesses). On
+every other repo every query and every reply is identical. Still to run
+(Pylon Primos unreachable): elixir-pot and the bigger bench repos, e.g.
+`parity --queries --serve ~/Documents/elixir-pot ~/bench/{square__okhttp,BurntSushi__ripgrep,JamesNK__Newtonsoft.Json,godotengine__godot-demo-projects,excalidraw__excalidraw}`.
 
 **Not yet.** serve's `gate`, `refs`, `unused` and `tests` tools answer "not
 ported" until the gate-graph lane's tidy lands (the tool list and schemas are
@@ -595,7 +600,8 @@ already Python's); `stats` doesn't write the exactness record (tidy/exactness).
   length: Python iterates a set (hash order, per process), Rust the
   functions in load order. `impact` over several start functions likewise
   lists areas of equal size in BFS order from the sorted starts; `context`'s
-  tests that share a file and line are ordered by id.
+  tests that share a file and line are ordered by id. The harness compares
+  those areas and tests unordered (Python's own order changes run to run).
 - A crashing tool answers `{"error": "panic: ..."}`, not Python's
   `TypeError: ...`; a bad `search` regex is each engine's own words.
 

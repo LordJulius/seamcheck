@@ -136,6 +136,51 @@ fn mask(s: &str) -> String {
     regex::Regex::new(r"\d+ ms\b").unwrap().replace_all(s, "N ms").into_owned()
 }
 
+/// `impact` from several functions: Python orders areas of one size by a
+/// set's hash order (per process), so the areas compare as a set of blocks.
+fn areas_unordered(out: &str) -> String {
+    let multi = out.lines().any(|l| l.starts_with("change to ") && !l.starts_with("change to 1 functions"));
+    if !multi {
+        return out.to_string();
+    }
+    let mut head: Vec<&str> = Vec::new();
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    for l in out.lines() {
+        if l.starts_with("  ") && !l.starts_with("    ") {
+            blocks.push(vec![l]);
+        } else if let Some(b) = blocks.last_mut() {
+            b.push(l);
+        } else {
+            head.push(l);
+        }
+    }
+    blocks.sort();
+    let mut v: Vec<&str> = head;
+    v.extend(blocks.into_iter().flatten());
+    v.join("\n") + "\n"
+}
+
+/// `context`: Python sorts the tests (a set) by file and line only, so two
+/// tests at one line come in hash order; each test block compares sorted.
+fn tests_unordered(out: &str) -> String {
+    let mut v: Vec<String> = Vec::new();
+    let mut block: Vec<String> = Vec::new();
+    let mut inside = false;
+    for l in out.lines() {
+        if inside && l.starts_with("   ") {
+            block.push(l.to_string());
+            continue;
+        }
+        block.sort();
+        v.append(&mut block);
+        inside = l.starts_with("-- tests reaching it");
+        v.push(l.to_string());
+    }
+    block.sort();
+    v.append(&mut block);
+    v.join("\n") + "\n"
+}
+
 fn lines_of(r: &Ran) -> Vec<Value> {
     r.out.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
 }
@@ -165,8 +210,21 @@ pub fn query_parity(o: &Opts, repo: &Path, name: &str) -> usize {
     let mut lines = 0;
     for (i, argv) in list.iter().enumerate() {
         let (p, r) = (pv.get(i), rv.get(i));
-        let (pc, po) = p.map(|v| (v["code"].clone(), mask(v["out"].as_str().unwrap_or("")))).unwrap_or((Value::Null, String::new()));
-        let (rc, ro) = r.map(|v| (v["code"].clone(), mask(v["out"].as_str().unwrap_or("")))).unwrap_or((Value::Null, String::new()));
+        let text = |v: &Value| {
+            let t = mask(v["out"].as_str().unwrap_or(""));
+            match argv[0].as_str() {
+                "impact" => areas_unordered(&t),
+                "context" if !argv.iter().any(|a| a == "--json") => tests_unordered(&t),
+                "context" => {
+                    let mut v: Value = serde_json::from_str(&t).unwrap_or(Value::Null);
+                    sort_tests(&mut v);
+                    serde_json::to_string_pretty(&v).unwrap_or(t)
+                }
+                _ => t,
+            }
+        };
+        let (pc, po) = p.map(|v| (v["code"].clone(), text(v))).unwrap_or((Value::Null, String::new()));
+        let (rc, ro) = r.map(|v| (v["code"].clone(), text(v))).unwrap_or((Value::Null, String::new()));
         lines += po.lines().count();
         if pc != rc || po != ro {
             n += 1;
@@ -245,6 +303,14 @@ fn serve(cmd: &mut Command, input: &str) -> Ran {
     }
 }
 
+fn sort_tests(v: &mut Value) {
+    for c in v.as_array_mut().into_iter().flatten() {
+        if let Some(t) = c.get_mut("tests").and_then(|t| t.as_array_mut()) {
+            t.sort_by_key(|x| (x["file"].as_str().unwrap_or("").to_string(), x["line"].as_u64(), x["id"].as_str().unwrap_or("").to_string()));
+        }
+    }
+}
+
 /// A reply with its tool's JSON text parsed (and `load_ms` set aside).
 fn norm(mut v: Value) -> Value {
     if let Some(text) = v.pointer("/result/content/0/text").and_then(|t| t.as_str()) {
@@ -252,6 +318,7 @@ fn norm(mut v: Value) -> Value {
         if let Some(m) = inner.as_object_mut() {
             m.remove("load_ms");
         }
+        sort_tests(&mut inner);
         // a bad regex is reported by both, each in its own engine's words (PORT.md, known differences)
         for f in inner.as_array_mut().into_iter().flatten() {
             if let Some(msg) = f.get("message").and_then(|m| m.as_str()) {
