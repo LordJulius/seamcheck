@@ -56,7 +56,7 @@ mostly parsing and linking: phase 1 takes the first, phase 2 the second.
 | `tidy.py` | 980 | gate, dead / test-only / unused, dups, test audit, split, hotspots, remove, refs, moved code | `gate.rs` (1: changed lines, moved lines, forbid_added, moved refs) / `tidy/` | 1 / 3 |
 | `tidy_cli.py` | 241 | tidy command output | `main.rs` | 1 (gate) / 3 |
 | `exactness.py` | 176 | gate's import-resolution guard (warns) | `tidy/` | 3 |
-| `deps.py` | 796 | declared vs used dependencies | `deps.rs` | 3 |
+| `deps.py` | 796 | declared vs used dependencies | `deps/` | 3 (done) |
 | `arch.py` | 737 | depend / layers / cycles / path rules, `graph` command | `arch/` (`mod.rs`, `path.rs`, `taint.rs`) | 3 (done) |
 | `queries.py` | 205 | answers as data (CLI and MCP share them) | `queries.rs` | 3 |
 | `structure.py` | 316 | (see lint) | `lint/structure.rs` | 1 |
@@ -64,7 +64,7 @@ mostly parsing and linking: phase 1 takes the first, phase 2 the second.
 | `serve.py` | 252 | MCP server over queries | `serve.rs` | 4 |
 | `report.py` | 118 | HTML map | `report.rs` | 4 |
 | `runtime.py`, `runcmd.py` | 559 | `trace` / `run` / `fuzz` (reads only config) | `runtime/` (done) | 4 (independent, any time) |
-| `init.py` | 203 | first seamcheck.toml, pack detection, hook | `init.rs` | 4 |
+| `init.py` | 203 | first seamcheck.toml, pack detection, hook | `init.rs` | 4 (done) |
 | `output.py` | 72 | SARIF, GitHub annotations | `output.rs` | 1 |
 
 `verify` (docs/verify.md) is new work with no Python twin: it lives only in
@@ -524,3 +524,50 @@ already Python's); `stats` doesn't write the exactness record (tidy/exactness).
   tests that share a file and line are ordered by id.
 - A crashing tool answers `{"error": "panic: ..."}`, not Python's
   `TypeError: ...`; a bad `search` regex is each engine's own words.
+
+## deps and init (deps-init lane, 2026-11-03)
+
+**In.** `deps/` is deps.py: every manifest reader (mix, npm, gradle with
+the version catalog and the Gradle cache's jars / aars / POMs, cargo with
+`[lib]` names, pyproject / requirements with python3's dist-info, go.mod),
+the statuses over the graph's dead functions, the main checkout's packages
+for a worktree, `seamcheck deps [NAME] [--all] [--json]`, and the rule kind:
+`check` runs `kind = "deps"` through `deps::rule(p, &p.graph(), r)`, so
+`port-status` defers nothing for it. Walks and globs list directories in
+the kernel's order, as `os.walk` / `glob.glob` do, so every list prints in
+Python's order. `init.rs` is init.py whole (`--hook`, `--force`).
+
+**Parity.** `parity_cmd` (src/bin) runs one command with both and compares
+stdout (timings aside), exit codes and, with `--copy DIR`, the files it
+wrote, each side in a fresh reflink copy:
+
+| what | where | result |
+|------|-------|--------|
+| `deps --all`, `--json`, `NAME`, plain | test_deps.py's fixture, a fixture with every reader's branches | 0 differ |
+| `deps --all` | a copy of elixir-pot on the desk (255 dependencies) | 0 differ |
+| `check` with deps rules (report, ignore, message, waivers, nothing installed) | tests/fixtures, both deps fixtures | 0 differences |
+| `init --hook --force` | copies of seamcheck and elixir-pot | 0 differ |
+
+Queued for Pylon Primos: `deps` on elixir-pot there (its Gradle cache) and
+on the bench repos, `init` on copies of the bench repos.
+
+**Memory.** Patterns built from names (one per Kotlin function, per JS
+assignment...) went into pyre's run-long cache: on elixir-pot 12,000
+compiled automata, 9.5 GB. They now go through `pyre::rx_built`, which keeps
+the 256 most recently used; config and code patterns stay in `rx`.
+
+**Time and memory** (desk, elixir-pot copy, 5,227 files):
+
+| run | Python | Rust |
+|-----|-------:|-----:|
+| `deps --all` | 62 s, 1.2 GB | 25 s, 1.5 GB (graph load 20 s of it) |
+| `check` | (not measured here) | 54 s, 4.8 GB (was 9.8 GB) |
+
+**Tests.** `tests/deps.rs` (test_deps.py whole, the rule through `check`),
+`tests/init.rs` (test_cli.py's init and hook tests, test_packs.py's
+InitDetectsPacks).
+
+**Known differences.** A mix.exs whose deps list is empty, with an asset
+file holding `""`, crashes Python (KeyError on `deps[""]`); Rust skips it.
+Manifest shapes that crash Python (a non-object package.json, a non-string
+script) are skipped.

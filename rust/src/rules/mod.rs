@@ -121,7 +121,6 @@ pub fn scope_files(p: &Project, r: &Rule) -> Vec<String> {
 pub fn deferred(r: &Rule) -> Option<String> {
     let kind = s(r, "kind").unwrap_or("forbid");
     match kind {
-        "deps" => return Some("kind deps reads the dependency analysis".into()),
         "lint" => {
             let name = s(r, "lint").unwrap_or("");
             if let Some(l) = crate::lint::get(name) {
@@ -249,6 +248,7 @@ pub fn run_one(p: &Project, r: &Rule) -> Vec<Finding> {
         "layers" => crate::arch::layers(p, r),
         "cycles" => crate::arch::cycles(p, r),
         "path" => crate::arch::path::path(p, r),
+        "deps" => Ok(crate::deps::rule(p, &p.graph(), r)),
         _ => {
             return vec![Finding::new(rid, "error", &file_of(r), 0, "", format!("unknown rule kind {}", repr(kind)))];
         }

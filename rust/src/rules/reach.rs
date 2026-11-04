@@ -14,7 +14,7 @@ use crate::pyre::Rx;
 /// Does this rule read the call graph? (`run_rules` loads it first, outside its threads.)
 pub fn needs_graph(r: &Rule) -> bool {
     match s(r, "kind").unwrap_or("forbid") {
-        "reach" | "depend" | "layers" | "cycles" | "path" => true,
+        "reach" | "depend" | "layers" | "cycles" | "path" | "deps" => true,
         "together" => truthy(r.get("depth")),
         "lint" => matches!(s(r, "lint"), Some("auth-in-background" | "ets-owner")),
         _ => false,

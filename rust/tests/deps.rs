@@ -143,7 +143,6 @@ const PKG: &str = r#"{"devDependencies": {"typescript": "5"}, "scripts": {"build
 const P_EX: &str = "defmodule P do\n  def x, do: LangChain.run()\nend\n";
 
 // test_deps.py: UninstalledTest.test_nothing_installed_is_one_warning
-// (Python runs it through core.run_rules; here the rule's entry point, which `check` calls)
 #[test]
 fn nothing_installed_is_one_warning() {
     let d = tempfile::tempdir().unwrap();
@@ -165,9 +164,12 @@ fn nothing_installed_is_one_warning() {
     assert_eq!(st["langchain"], "uninstalled");
     assert_eq!(st["typescript"], "uninstalled");
     let r = p.config.rules().find(|r| seamcheck::config::id(r) == "lean").unwrap();
-    let found = deps::rule(&p, &g, r);
+    assert_eq!(deps::rule(&p, &g, r).len(), 2);
+    // as `check` runs it
+    assert!(seamcheck::rules::deferred_rules(&p).is_empty());
+    let found = seamcheck::rules::run_rules(&p, None, None);
     assert!(found.iter().all(|f| f.severity != "error"), "{found:?}");
-    assert_eq!(found.len(), 2); // one note per manifest
+    assert_eq!(found.iter().filter(|f| f.rule == "lean").count(), 2); // one note per manifest
 }
 
 // test_deps.py: UninstalledTest.test_worktree_reads_main_checkout

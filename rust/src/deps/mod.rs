@@ -40,7 +40,7 @@ use crate::config::{id, list_or, s_or, Rule};
 use crate::graph::Graph;
 use crate::output::dumps;
 use crate::project::{Finding, Project};
-use crate::pyre::{rx, Rx};
+use crate::pyre::Rx;
 use crate::rules::suppressed;
 
 pub use fsx::main_checkout;
@@ -581,7 +581,7 @@ pub fn rule(p: &Project, g: &Graph, r: &Rule) -> Vec<Finding> {
 
 /// A pattern built from names at run time (dependency names escaped in).
 pub(crate) fn dyn_rx(pat: &str) -> std::sync::Arc<Rx> {
-    rx(pat).unwrap_or_else(|e| panic!("deps pattern {pat:?}: {e}"))
+    crate::pyre::rx_built(pat).unwrap_or_else(|e| panic!("deps pattern {pat:?}: {e}"))
 }
 
 /// Python `re.escape` (the metacharacters escaped).
