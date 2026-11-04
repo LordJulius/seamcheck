@@ -317,18 +317,43 @@ Tests: `tests/tidy.rs` (test_tidy.py, test_slint.py's copies),
 `tests/gate_graph.rs` (test_gate.py's and test_gate_moves.py's graph
 halves, test_gate_reach.py, test_gate_exactness.py with the CLI).
 
-Parity (desk, Primos unreachable): `--tidy` and `--gate --staged` on an
-86-file Python repo (this package and its tests) with staged dead code, a
-copy, a do-nothing test, a source-reading test and a fallback name: 0
-differences, every command (19 comparisons) and the gate's 5 / 5 findings.
-`--tidy` on bench repos (desk, single-threaded): koa, flask, urfave/cli 0
-differences; sinatra (`split`, `refs`) and cJSON (`hotspots`' caller files)
-differ where the graphs differ, not in the tidy code: Rust links 738 edges
-out of sinatra's lib/sinatra/base.rb to Python's 401 (Ruby receivers), and
-the tests' calls into cJSON.c, `#include "../cJSON.c"` through
-tests/common.h, are exact in Python and name guesses in Rust (C includes).
-Queued for Primos: `--tidy` and `--gate --staged` on elixir-pot and an
-ep-gate-style copy, the other bench repos, and the wall times.
+Parity on Pylon Primos (load 3-8, other lanes' steps queued on the same
+lock), `parity --tidy` / `--gate`, 0 rules deferred:
+
+| run | result |
+|-----|--------|
+| elixir-pot `--tidy` (19 comparisons: tests, test-only, unused, dups, tidy, hotspots JSON and text, split on the 6 biggest files, refs, a dry remove, the `--ids` lists) | 0 differences |
+| elixir-pot `--gate` (clean tree) | 0 / 0, check 587 / 587 |
+| ep-gg (an elixir-pot copy) `--gate --staged`: new dead code, a copy of `ElixirPot.AgentBus.send`, a do-nothing test, a source-reading test, `use_fallback` | 7 / 7 identical |
+| ep-gg `--gate --since HEAD~3` | 7 / 7 identical |
+| an 86-file Python repo (this package) `--tidy`, `--gate --staged` with the same kinds of debt (desk) | 0 differences, gate 5 / 5 |
+| koa, flask, urfave/cli `--tidy` (desk) | 0 differences |
+
+sinatra (`split`, `refs`) and cJSON (`hotspots`' caller files) differ where
+the graphs differ, not in the tidy code: Rust links 738 edges out of
+sinatra's lib/sinatra/base.rb to Python's 401 (Ruby receivers), and the
+tests' calls into cJSON.c, `#include "../cJSON.c"` through tests/common.h,
+are exact in Python and name guesses in Rust (C includes).
+
+Wall time on elixir-pot (seconds; max RSS): Rust loads the graph from
+scratch every run, Python reads its pickled graph when the tree is one it
+loaded before (each run below), and relinks (~100 s) when it isn't.
+
+| command | Python (warm) | Rust |
+|---------|-------:|-----:|
+| `gate`, clean tree (exactness recorded) | 5.8 (1.3 GB) | 0.5 (13 MB) |
+| `gate --staged`, ep-gg's debt | 17.1 (1.4 GB) | 35.6 (2.2 GB) |
+| `tidy` | 24.4 (1.8 GB) | 41.7 (1.7 GB) |
+| `unused` | 6.3 | 34.2 |
+| `dups` | 13.5 | 27.9 |
+| `tests` | 5.9 | 25.4 |
+
+Where Rust's time goes: the graph, 23.2 s of every command (`examples/
+parse_times.rs`): parsing 6.6 s in parallel (one 3.4 s bundle,
+viz-global.js, is the critical path), linking 16.6 s. No `cache.rs` yet: a
+content-hash parse cache would save at most the 6.6 s; what would make
+repeat runs Python-fast is caching the linked graph by the files' hashes
+(fingerprint.py's scheme) or a faster link. Both are graph-core work.
 
 ## Phase 1 status (2026-10-24)
 

@@ -24,6 +24,9 @@ fn main() {
     }
     println!("{by_ext:?}");
     let t = Instant::now();
+    let n = seamcheck::graph::parse_all(&p, None).len();
+    println!("parallel parse: {} ms, {n} files", t.elapsed().as_millis());
+    let t = Instant::now();
     let g = seamcheck::graph::Graph::load_with(&p, false);
     println!("graph (parallel parse + link): {} ms, {} funcs", t.elapsed().as_millis(), g.funcs.len());
 }
