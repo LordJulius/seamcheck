@@ -158,6 +158,7 @@ pub fn path(p: &Project, r: &Rule) -> Res<Vec<Finding>> {
             let sum = p.memo("security.summaries", || security::summaries(&g, &|h: &Func| own_code(&g, h, true)));
             kinds.confined = sum.0.clone();
             kinds.same_site = sum.1.clone();
+            kinds.free = sum.2.clone();
             if !done.is_empty() {
                 let mut names: Vec<&String> = done.iter().collect();
                 names.sort();

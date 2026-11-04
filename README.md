@@ -459,6 +459,16 @@ sanitizers = ["coerce_safe_redirect_target"]  # their return value is clean
   two functions of one name disagree on still holds for a call resolved to
   the one that returns the buffer. Every name a loop binds holds part of the
   value (`for table, rows in data.items()`).
+- A list kept to an allow-list's members (`[t for t in tables if t in known]`)
+  holds only those names, and an SQLAlchemy Core statement
+  (`known[t].select()`, `t.delete().where(...)`) is no SQL text. A file name
+  with no separator left (`os.path.basename(x)`, both `/` and `\` replaced, a
+  helper that returns one) joined to a directory is no traversal; one
+  separator replaced still is. A fixed program's argument list stays the
+  "argument of a fixed program" warning through a helper's parameter
+  (`_run(["pdftotext", path, "-"])`) and through `[shutil.which("git") or
+  "/usr/bin/git"] + args`. A Python import inside a function names what it
+  binds there, not in the file's other functions.
 - A request-scoped store (`stores`, Flask's `session` in the pack) carries the
   value across requests: a key written with request data
   (`session["backup"] = json.dumps(data)`) is request data where another

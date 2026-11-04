@@ -368,6 +368,19 @@ def _py_imports(mod: Module, rel: str, code: str) -> None:
             mod.imported[local] = (where(spec), bits[0])
 
 
+def _py_local_imports(f: Func, rel: str, lines: list[str], a: int, b: int, nested: set[int]) -> None:
+    """`from x import y` in f's own lines (not a nested function's): f.imported."""
+    d = rel.rsplit("/", 1)[0] if "/" in rel else ""
+    own = "\n".join("" if i in nested else lines[i] for i in range(a + 1, b + 1))
+    if "import" not in own:
+        return
+    for m in _PY_FROM.finditer(own):
+        for part in m.group(2).strip().strip("()").split(","):
+            bits = part.split()
+            if bits and bits[0] != "*":
+                f.imported[bits[2] if len(bits) == 3 and bits[1] == "as" else bits[0]] = (f"py:{d}\0{m.group(1)}", bits[0])
+
+
 def parse_python(path: str, rel: str, text: str, res_of=None) -> list[Module]:
     """One Module for the file, and one per class (`<file>.<Class>`, its
     parent the first base): a method is `self.x()`'s target, and two classes'
@@ -463,6 +476,7 @@ def parse_python(path: str, rel: str, text: str, res_of=None) -> list[Module]:
             if j >= 0 and blocks[j][3] == "class" and owner_of.get(j):
                 f.bound.setdefault("self", "mod:" + owner_of[j])
         nested = {i for (a2, b2, _, kind2, _) in blocks if kind2 == "def" and a < a2 <= b for i in range(a2, b2 + 1)}
+        _py_local_imports(f, rel, lines, a, b, nested)
         _py_collect(f, lines, a, b, first=True, skip=nested)
         _py_types(f, lines, a, b, test_file, fixture=any(
             re.match(r"\s*@(?:pytest\.)?fixture\b", lines[j]) for j in range(max(0, a - 3), a)), raw=raw)

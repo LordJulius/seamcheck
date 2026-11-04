@@ -146,6 +146,7 @@ fn injected_imports(g: &Graph, use_: &str, depth: i32) -> Vec<String> {
 /// core._resolve_imports.
 fn resolve_imports(g: &mut Graph, p: &Project) {
     crate::lang::ruby::link::link(g); // Ruby: requires, constants and supertypes, across files
+    crate::lang::ruby::link::library_receivers(g, p); // Ruby: a call on a library's value is the library's
     crate::graph::qt::qt_dbus_interfaces(g); // Qt: a generated D-Bus proxy stands for the class it calls
     crate::graph::qt::qml_page_props(g); // QML: what each page's untyped properties are handed
     let names: Vec<String> = g.modules.keys().cloned().collect();
@@ -164,6 +165,7 @@ fn resolve_imports(g: &mut Graph, p: &Project) {
         Vec<String>,
         std::collections::BTreeSet<String>,
         bool,
+        Vec<(usize, indexmap::IndexMap<String, (String, String)>)>, // (a function's index, its own imports)
     );
     let mut done: Vec<(String, Resolved)> = Vec::new();
     {
@@ -206,11 +208,36 @@ fn resolve_imports(g: &mut Graph, p: &Project) {
             let ext_star = rx.iter().any(|r| r == EXTERNAL); // `export * from "@testing-library/react"`
             let reexports: Vec<String> = rx.into_iter().filter(|r| !r.is_empty() && r != EXTERNAL).collect();
             let external = ext.into_iter().filter(|k| !aliases.contains_key(k) && !imported.contains_key(k)).collect();
-            done.push((n.clone(), (aliases, imported, uses, reexports, external, ext_star)));
+            // each function's own imports (a library's name: "", nothing in the project)
+            let locals: Vec<(usize, indexmap::IndexMap<String, (String, String)>)> = m
+                .funcs
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| !f.imported.is_empty())
+                .map(|(i, f)| {
+                    let got = f
+                        .imported
+                        .iter()
+                        .filter_map(|(k, (v, nm))| {
+                            let r = imp.resolve_where(&py, v);
+                            if r.is_empty() {
+                                None
+                            } else {
+                                Some((k.clone(), (if r == EXTERNAL { String::new() } else { r }, nm.clone())))
+                            }
+                        })
+                        .collect();
+                    (i, got)
+                })
+                .collect();
+            done.push((n.clone(), (aliases, imported, uses, reexports, external, ext_star, locals)));
         }
     }
-    for (n, (aliases, imported, uses, reexports, external, ext_star)) in done {
+    for (n, (aliases, imported, uses, reexports, external, ext_star, locals)) in done {
         let m = g.modules.get_mut(&n).unwrap();
+        for (i, got) in locals {
+            m.funcs[i].imported = got;
+        }
         m.aliases = aliases;
         m.imported = imported;
         m.uses = uses;

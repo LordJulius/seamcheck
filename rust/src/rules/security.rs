@@ -119,6 +119,28 @@ rx!(free_name, r"(?<![\w.$])[A-Za-z_]\w*");
 rx!(str_start, r#"(?<![\w$])(?:[rRbBuUfF]{1,2}|\$@?|@\$?)?(?:"{3}|'{3}|["'`])"#);
 // what a non-f string interpolates: Ruby / Elixir `#{x}`, `${x}`, PHP `{$x}` and `$x->y`, Swift `\(x)`
 rx!(interp, r"#\{[^}]*\}|\$\{[^}]*\}|\{\$[^}]*\}|\$[A-Za-z_]\w*(?:->\w+|\[[^\]]*\])*|\\\([^)]*\)");
+// an SQLAlchemy Core statement as the call's last step (`known[name].select()`): a query object
+rx!(
+    statement_tail,
+    r"(?s)\.(?:select|insert|update|delete|where|filter|filter_by|values|order_by|limit|offset|join|outerjoin|group_by|having|returning|with_only_columns)\s*\((?:[^()]|\([^()]*\))*\)\s*$"
+);
+// a comprehension that keeps only members of something (`[t for t in tables if t in known]`)
+rx!(
+    keep_members,
+    r"(?s)^\s*[\[{(]\s*([A-Za-z_]\w*)\s+for\s+([A-Za-z_]\w*)\s+in\s+(.+?)\s+if\s+([A-Za-z_]\w*)\s+in\s+([A-Za-z_][\w.]*(?:\[[^\]]*\])?)\s*[\]})]\s*$"
+);
+// a path component with no separator left: `os.path.basename(x)`, `Path(x).name`, `secure_filename(x)`
+rx!(
+    basename,
+    r"(?s)^(?:os\.path\.|posixpath\.|ntpath\.)?basename\s*\(|^(?:pathlib\.)?(?:Pure)?Path\s*\(.*\)\.name\s*$|^(?:\w+\.)?secure_filename\s*\("
+);
+rx!(replace_sep, r#"\.replace\(\s*[bu]?(["'])(/|\\\\)\1\s*,"#);
+rx!(or_word, r"\s(?:or|\|\|)\s");
+rx!(join_call, r"(?s)^(?:os\.path\.|posixpath\.|ntpath\.)join\s*\((.*)\)\s*$");
+fn trim_calls() -> &'static Rx {
+    static R: OnceLock<Rx> = OnceLock::new();
+    R.get_or_init(|| Rx::lit(&format!(r"(?:\.(?:strip|lstrip|rstrip|lower|upper|casefold)\(\s*(?:{STR})?\s*\))+\s*$")))
+}
 rx!(site_hint, r#"(?i)\breturn\b[ \t]*[fbru]{0,2}["'`]/[^/]"#);
 rx!(interp_rx, r"#\{|\$\{");
 rx!(relative_lead, r"/[^/\\]");
@@ -294,13 +316,14 @@ fn returns_buffer(body: &str, exprs: &[String]) -> bool {
     })
 }
 
-/// What else functions give back (security.summaries): (confined, same_site), each by name (every
+/// What else functions give back (security.summaries): (confined, same_site, free: a name with no
+/// path separator, a basename or both separators replaced), each by name (every
 /// function of it alike) and by function id (a call resolved exactly). Confined: it resolves a path
 /// and checks it is under a root (`.resolve()`, then `.relative_to(root)` / `.is_relative_to` /
 /// `commonpath`, raising or returning None when it isn't), or calls such a function; same-site: each
 /// `return` is a URL with the site's scheme, host and path (`url_for(...) + "?" + urlencode(q)`, a
 /// literal "/path", such a function's result).
-pub fn summaries(g: &Graph, code: &dyn Fn(&Func) -> String) -> (HashSet<String>, HashSet<String>) {
+pub fn summaries(g: &Graph, code: &dyn Fn(&Func) -> String) -> (HashSet<String>, HashSet<String>, HashSet<String>) {
     let mut bodies: HashMap<&str, (&Func, String)> = HashMap::new();
     let mut by_name: HashMap<&str, Vec<&str>> = HashMap::new();
     for id in g.funcs.keys() {
@@ -390,10 +413,33 @@ pub fn summaries(g: &Graph, code: &dyn Fn(&Func) -> String) -> (HashSet<String>,
             }
         }
     }
-    let (cn, sn) = (named(&conf), named(&same));
+    // a name with no separator: each return is a basename, both separators replaced, a literal with
+    // none, or a local assigned one (`name = os.path.basename(v).strip(); return name or "attachment"`)
+    let cands: Vec<(&str, &String, Vec<String>)> = bodies
+        .iter()
+        .filter(|(_, (_, b))| {
+            b.contains("return") && (b.contains("basename") || b.contains("replace") || b.contains("secure_filename") || b.contains(".name"))
+        })
+        .map(|(id, (_, b))| (*id, b, return_rx().find_iter(b).iter().map(|m| ret_expr(b, m.span(1).unwrap(), m.end())).collect()))
+        .collect();
+    let mut free: HashSet<String> = HashSet::new();
+    for _ in 0..6 {
+        let names = named(&free);
+        let grown: Vec<String> = cands
+            .iter()
+            .filter(|(id, b, es)| !free.contains(*id) && !es.is_empty() && es.iter().all(|e| free_ret(e, b, &names)))
+            .map(|(id, _, _)| id.to_string())
+            .collect();
+        if grown.is_empty() {
+            break;
+        }
+        free.extend(grown);
+    }
+    let (cn, sn, fname) = (named(&conf), named(&same), named(&free));
     conf.extend(cn);
     same.extend(sn);
-    (conf, same)
+    free.extend(fname);
+    (conf, same, free)
 }
 
 const URL_BUILDERS: [&str; 3] = ["url_for", "reverse", "reverse_lazy"];
@@ -673,6 +719,96 @@ pub fn stored(
     src
 }
 
+/// rhs keeps only the members of a clean collection (`[t for t in tables if t in known]`): an
+/// allow-list (security.keeps_members). `dirty(text)`: the text carries the value.
+pub fn keeps_members(rhs: &str, dirty: &dyn Fn(&str) -> bool) -> bool {
+    let Some(m) = keep_members().match_start(rhs) else { return false };
+    m.s(1) == m.s(2) && m.s(2) == m.s(4) && !dirty(m.s(5))
+}
+
+/// a builds an SQLAlchemy Core statement (its last step `.select()` / `.delete()` / `.where(...)`),
+/// no SQL text (security.statement).
+pub fn statement(a: &str) -> bool {
+    let a = a.trim();
+    text_call().match_start(a).is_none() && !a.contains("text(") && statement_tail().is_match(a)
+}
+
+/// e can't hold a path separator: a basename, a name with both separators replaced, a literal with
+/// none, `x or "attachment"` of those, or a call to a function in `names` (security.separator_free).
+pub fn separator_free(e: &str, names: &HashSet<String>) -> bool {
+    let t = trim_calls().sub("", e.trim());
+    let e = t.trim();
+    let parts = split_top_or(e);
+    if parts.len() > 1 {
+        return parts.iter().all(|p| separator_free(p, names));
+    }
+    if basename().match_start(e).is_some() || whole_call(e).is_some_and(|n| names.contains(n)) {
+        return true;
+    }
+    if literal(e) {
+        return !e.contains('/') && !e.contains("\\\\");
+    }
+    let reps: HashSet<String> = replace_sep().find_iter(e).iter().map(|m| m.s(2).to_string()).collect();
+    reps.contains("/") && reps.contains("\\\\")
+}
+
+/// e split at its top-level `or` / `||` (security._split_top_or).
+fn split_top_or(e: &str) -> Vec<String> {
+    let m = mask(e);
+    let ms = String::from_utf8_lossy(&m).into_owned();
+    let cuts: Vec<(usize, usize)> = or_word().find_iter(&ms).iter().map(|c| (c.start(), c.end())).collect();
+    if cuts.is_empty() {
+        return vec![e.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut k = 0;
+    for (a, b) in cuts {
+        out.push(e[k..a].to_string());
+        k = b;
+    }
+    out.push(e[k..].to_string());
+    out
+}
+
+/// A fixed program: a literal, `sys.executable`, `shutil.which("git")`, or `shutil.which("git") or
+/// "/usr/bin/git"` (security._program).
+fn is_program(e: &str) -> bool {
+    split_top_or(e.trim()).iter().all(|p| program().match_start(p).is_some())
+}
+
+/// A caller's text read on its own: nothing tainted, no assignments (security._NoCtx).
+struct NoCtx;
+impl TaintCtx for NoCtx {
+    fn dirty(&self, _t: &str) -> bool {
+        false
+    }
+    fn rhs(&self, _n: &str) -> Option<(String, Box<dyn TaintCtx + '_>)> {
+        None
+    }
+}
+
+/// A return expression with no separator in it, its bare names read as their one assignment in
+/// body (security._free_ret).
+fn free_ret(e: &str, body: &str, names: &HashSet<String>) -> bool {
+    let mut parts = Vec::new();
+    for p in split_top_or(e) {
+        if let Some(n) = bare(&p) {
+            let got: Vec<String> = Rx::lit(&format!(r"(?m)^[ \t]*{}[ \t]*=(?!=)[ \t]*(.+)$", regex::escape(n)))
+                .find_iter(body)
+                .iter()
+                .map(|m| m.s(1).to_string())
+                .collect();
+            if got.len() != 1 {
+                return false;
+            }
+            parts.push(got[0].clone());
+        } else {
+            parts.push(p);
+        }
+    }
+    parts.iter().all(|p| separator_free(p, names))
+}
+
 /// `[security] sanitizers` from the merged config: the project's own clean-returning functions.
 pub fn sanitizers(config: &Value) -> Vec<String> {
     match config.get("security").and_then(|t| t.get("sanitizers")) {
@@ -725,6 +861,8 @@ pub struct Sinks {
     pub confined: HashSet<String>,
     /// functions that return a same-site URL (from [`summaries`])
     pub same_site: HashSet<String>,
+    /// functions that return a name with no path separator (from [`summaries`])
+    pub free: HashSet<String>,
     pub lookups: Option<Rx>,
     pub severity: String,
     pub url_severity: String,
@@ -754,6 +892,7 @@ impl Sinks {
             buffers: HashSet::new(),
             confined: HashSet::new(),
             same_site: HashSet::new(),
+            free: HashSet::new(),
             lookups,
             severity: sv("severity", "error"),
             url_severity: sv("url_severity", "warn"),
@@ -797,7 +936,7 @@ impl Sinks {
             "sql" => pick(&SQL_KWS).filter(|(_, a)| sql_dirty(a, ctx, 0)).and_then(|_| hit(&self.severity, "")),
             "path" => {
                 let safe: HashSet<String> = self.buffers.union(&self.confined).cloned().collect();
-                pick(&PATH_KWS).filter(|(_, a)| path_dirty(a, ctx, 0, &safe)).and_then(|_| hit(&self.severity, ""))
+                pick(&PATH_KWS).filter(|(_, a)| path_dirty(a, ctx, 0, &safe, &self.free)).and_then(|_| hit(&self.severity, ""))
             }
             // an open redirect needs the value in the scheme or host (a literal host can't leave)
             "redirect" => {
@@ -834,13 +973,22 @@ impl Sinks {
                     return None;
                 }
                 let elems = if shell { None } else { argv(&first, ctx, 0) };
+                if elems.is_none() && !shell {
+                    if let Some(n) = bare(&first).filter(|n| ctx.rhs(n).is_none()) {
+                        // `_run(args)`: what every caller passes, a fixed program's list each
+                        let given = ctx.passed(n).unwrap_or_default();
+                        if !given.is_empty() && given.iter().all(|x| argv(x, &NoCtx, 0).is_some_and(|g| !g.is_empty() && is_program(&g[0]))) {
+                            return hit(&self.argv_severity, " (an argument of a fixed program, no shell)");
+                        }
+                    }
+                }
                 let Some(elems) = elems else {
                     return if !first.is_empty() && ctx.dirty(&first) { hit(&self.severity, "") } else { None };
                 };
                 if elems.is_empty() {
                     return None;
                 }
-                if program().match_start(&elems[0]).is_none() && ctx.dirty(&elems[0]) {
+                if !is_program(&elems[0]) && ctx.dirty(&elems[0]) {
                     return hit(&self.severity, "");
                 }
                 if elems[1..].iter().any(|e| ctx.dirty(e)) && self.argv_severity != "off" {
@@ -877,7 +1025,7 @@ pub fn sql_dirty(a: &str, ctx: &dyn TaintCtx, depth: usize) -> bool {
         let inner = split_args(m.s(1));
         return !inner.is_empty() && sql_dirty(&inner[0], ctx, depth + 1);
     }
-    if query_object().match_start(a).is_some() {
+    if query_object().match_start(a).is_some() || statement(a) {
         return false;
     }
     if let Some(name) = bare(a) {
@@ -890,11 +1038,22 @@ pub fn sql_dirty(a: &str, ctx: &dyn TaintCtx, depth: usize) -> bool {
 }
 
 /// The path argument carries the value (an in-memory buffer is no path, nor what a function that
-/// returns one or a confined path gives; `ctx.assigned` sees past `buf.write(x)`).
-pub fn path_dirty(a: &str, ctx: &dyn TaintCtx, depth: usize, buffers: &HashSet<String>) -> bool {
+/// returns one or a confined path gives, nor a name with no separator in it: a basename, both
+/// separators replaced, a function in `free`; `os.path.join` is read part by part; `ctx.assigned`
+/// sees past `buf.write(x)`).
+pub fn path_dirty(a: &str, ctx: &dyn TaintCtx, depth: usize, buffers: &HashSet<String>, free: &HashSet<String>) -> bool {
     let a = a.trim();
     if buffer().match_start(a).is_some() || !ctx.dirty(a) || summarised(a, ctx, buffers) {
         return false;
+    }
+    if separator_free(a, &HashSet::new()) || summarised(a, ctx, free) {
+        return false; // (`os.path.basename(x)`, both separators replaced: a name in its directory)
+    }
+    if let Some(j) = join_call().match_start(a) {
+        if depth <= 6 {
+            // `os.path.join(tmp, name)`: each part
+            return split_args(j.s(1)).iter().any(|x| path_dirty(x, ctx, depth + 1, buffers, free));
+        }
     }
     if let Some(name) = bare(a) {
         if let Some((v, at)) = ctx.assigned(name) {
@@ -904,7 +1063,7 @@ pub fn path_dirty(a: &str, ctx: &dyn TaintCtx, depth: usize, buffers: &HashSet<S
             }
         }
         return match ctx.rhs(name) {
-            Some((v, sub)) if depth <= 6 => path_dirty(&v, sub.as_ref(), depth + 1, buffers),
+            Some((v, sub)) if depth <= 6 => path_dirty(&v, sub.as_ref(), depth + 1, buffers, free),
             _ => true,
         };
     }
@@ -914,6 +1073,22 @@ pub fn path_dirty(a: &str, ctx: &dyn TaintCtx, depth: usize, buffers: &HashSet<S
 /// An argument list's elements (a list or tuple literal, or a name assigned one), else None.
 pub fn argv(a: &str, ctx: &dyn TaintCtx, depth: usize) -> Option<Vec<String>> {
     let a = a.trim();
+    let parts = split_top(a, '+');
+    if parts.len() > 1 {
+        // `[git_path] + args`: the first part says the program, the rest are its arguments
+        let head = argv(&parts[0], ctx, depth + 1).filter(|h| !h.is_empty())?;
+        if depth >= 6 {
+            return None;
+        }
+        let mut out = head;
+        for p in &parts[1..] {
+            match argv(p, ctx, depth + 1) {
+                Some(got) => out.extend(got),
+                None => out.push(p.trim().to_string()),
+            }
+        }
+        return Some(out);
+    }
     if (a.starts_with('[') || a.starts_with('(')) && (a.ends_with(']') || a.ends_with(')')) && a.len() >= 2 {
         return Some(split_args(&a[1..a.len() - 1]));
     }
@@ -1451,8 +1626,8 @@ mod tests {
     #[test]
     fn filled_buffer_is_no_path() {
         let c = Filled(Ctx { names: vec!["buffer", "p"], values: HashMap::new() });
-        assert!(!path_dirty("buffer", &c, 0, &HashSet::new()));
-        assert!(path_dirty("p", &c, 0, &HashSet::new()));
+        assert!(!path_dirty("buffer", &c, 0, &HashSet::new(), &HashSet::new()));
+        assert!(path_dirty("p", &c, 0, &HashSet::new(), &HashSet::new()));
     }
 
     /// test_security_round4.Helpers.test_code_parts
@@ -1500,6 +1675,38 @@ mod tests {
         assert!(summarised("render_pdf('x.html', po=po)", &c, &ids));
         assert!(!summarised("other('x')", &c, &ids));
         assert!(summarised("helper(1)", &c, &HashSet::from(["helper".to_string()])));
+    }
+
+    /// test_security_round5.Helpers.test_allow_lists_and_statements
+    #[test]
+    fn allow_lists_and_statements() {
+        let dirty = |t: &str| t.contains("tables");
+        assert!(keeps_members("[name for name in tables if name in known]", &dirty));
+        assert!(!keeps_members("[name for name in tables if name in tables]", &dirty));
+        assert!(!keeps_members("[name for name in tables if other in known]", &dirty));
+        assert!(statement("known[table_name].select()"));
+        assert!(statement("t.delete().where(t.c.id == x)"));
+        assert!(!statement("db.text(f'SELECT {x}')"));
+    }
+
+    /// test_security_round5.Helpers.test_separator_free
+    #[test]
+    fn separator_free_cases() {
+        let none = HashSet::new();
+        assert!(separator_free("f.replace('/', '_').replace('\\\\', '_')", &none));
+        assert!(!separator_free("f.replace('/', '_')", &none));
+        assert!(separator_free("os.path.basename(_coerce_text(v)).strip()", &none));
+        assert!(separator_free("helper(v) or 'attachment'", &HashSet::from(["helper".to_string()])));
+        assert!(!separator_free("v or 'attachment'", &none));
+    }
+
+    /// test_security_round5.Helpers.test_argument_lists
+    #[test]
+    fn argument_lists() {
+        let c = Ctx { names: vec!["args"], values: HashMap::new() };
+        assert_eq!(Some(vec!["git_path".to_string(), "args".to_string()]), argv("[git_path] + args", &c, 0));
+        assert!(is_program("shutil.which('git') or '/usr/bin/git'"));
+        assert!(!is_program("shutil.which(tool) or '/usr/bin/git'"));
     }
 
     #[test]

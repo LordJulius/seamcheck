@@ -502,18 +502,19 @@ impl<'a> Resolver<'a> {
         } else if crate::model::is_py(&f.file)
             && f.kind != "top"
             && c.name.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
-            && rxd(&format!(
+            && (f.imported.contains_key(&c.name) || rxd(&format!(
                 r"(?m)^[ \t]+(?:from[ \t]+[\w.]+[ \t]+)?import[ \t][^\n]*(?:(?<![\w.]){n}\b(?![ \t]+as\b)|\bas[ \t]+{n}\b)",
                 n = esc(&c.name)
             ))
             .search(&f.code)
             .is_some()
-            && m_or_owner_imports(g, md, &c.name)
+            && m_or_owner_imports(g, md, &c.name))
         {
             // `from ._termui_impl import get_pager_file` inside the function: that one, not the
-            // module's own function of the same name (Python scoping: the local binding wins)
-            let (w_, n_) = file_mod_of(g, md).imported[&c.name].clone();
-            let hits = self.t.in_scope(&w_, &n_, 0);
+            // module's own function of the same name (Python scoping: the local binding wins), and
+            // not another function's import of the same name (f.imported: two routes, two render_pdf)
+            let (w_, n_) = f.imported.get(&c.name).cloned().unwrap_or_else(|| file_mod_of(g, md).imported[&c.name].clone());
+            let hits = if w_.is_empty() { Vec::new() } else { self.t.in_scope(&w_, &n_, 0) };
             if hits.len() == 1 {
                 targets.push((hits[0], true));
             } else {

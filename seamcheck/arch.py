@@ -344,7 +344,8 @@ def path(project, r: dict) -> list:
         if kinds.any():
             own = lambda g, raw=False: _own_code(project, g, raw)  # noqa: E731
             done, kinds.buffers = security.returns(project, own, clean)
-            kinds.confined, kinds.same_site = security.summaries(project, own)  # (a path checked under a root, a same-site URL)
+            # (a path checked under a root, a same-site URL, a name with no separator)
+            kinds.confined, kinds.same_site, kinds.free = security.summaries(project, own)
             if done:
                 extra = re.compile(rf"(?<![\w$])(?:{'|'.join(map(re.escape, sorted(done)))})\s*\(")
                 clean = (re.compile(f"(?:{clean[0].pattern})|(?:{extra.pattern})") if clean else extra,
@@ -642,6 +643,8 @@ class _Taint:
                                                                      (clean and any(c.search(rhs) for c in clean)))
             if dirty and kinds is not None and val not in adds and val not in conds and kinds.lookup(raw[val:end]):
                 dirty = False  # `user = User.query.filter_by(name=q).first()`: the database's row, not the value
+            if dirty and val not in adds and security.keeps_members(raw[val:end], lambda t: _dirty(t, source, clean, self.at(ln))):
+                dirty = False  # `tables = [t for t in tables if t in known]`: only the allow-list's own names
             if val in adds and not dirty:
                 continue  # (adding a clean value cleans nothing)
             if val in muts:

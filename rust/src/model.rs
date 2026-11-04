@@ -61,6 +61,9 @@ pub struct Func {
     pub refs: BTreeSet<String>,
     /// local variable -> what it holds ("group:<id>", "type:<Name>", ...)
     pub bound: IndexMap<String, String>,
+    /// Python: a `from x import y` inside the function, local name -> (where, name); it wins over
+    /// the file's names inside the function (two routes importing two `render_pdf`s)
+    pub imported: IndexMap<String, (String, String)>,
     /// Kotlin extension function: the receiver type
     pub recv: String,
     /// the declared return type's class, "" unknown
@@ -91,6 +94,7 @@ impl Func {
             calls: Vec::new(),
             refs: BTreeSet::new(),
             bound: IndexMap::new(),
+            imported: IndexMap::new(),
             recv: String::new(),
             returns: String::new(),
             kind: kind.into(),

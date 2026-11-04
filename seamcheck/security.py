@@ -222,9 +222,10 @@ _REJECTS = re.compile(r"\braise\b|\babort\s*\(|\bthrow\b|\breturn\s+(?:None|Fals
 _URL_BUILDERS = ("url_for", "reverse", "reverse_lazy")
 
 
-def summaries(project, code) -> tuple[set, set]:
+def summaries(project, code) -> tuple[set, set, set]:
     """What else functions give back, by name (every function of that name alike): (confined,
-    same_site). Confined: it resolves a path and checks it is under a root (`.resolve()`, then
+    same_site, free). Free: each `return` is a name with no path separator (a basename, both
+    separators replaced, `name or "attachment"` of one). Confined: it resolves a path and checks it is under a root (`.resolve()`, then
     `.relative_to(root)` / `.is_relative_to(root)` / `commonpath`, raising or returning None when
     it isn't), or calls such a function: what it returns is no path the request can move.
     Same-site: each `return` is a URL whose scheme, host and path are the site's (`url_for(...)
@@ -238,7 +239,7 @@ def summaries(project, code) -> tuple[set, set]:
     return cache[key]
 
 
-def _summaries(project, code) -> tuple[set, set]:
+def _summaries(project, code) -> tuple[set, set, set]:
     cands = [f for f in project.funcs.values() if f.kind != "top" and f.file.endswith(PY_EXTS + _JS_EXTS)]
     by_name = {}
     for f in project.funcs.values():
@@ -280,7 +281,32 @@ def _summaries(project, code) -> tuple[set, set]:
             calls = re.compile(rf"(?<![\w$])(?:{'|'.join(map(re.escape, sorted(new)))})\s*\(")
             rets.update({fid: es for fid, (f, body) in bodies.items() if fid not in rets and "return" in body
                          and calls.search(body) and (es := site_rets(body))})
-    return conf | named(conf), same | named(same)
+    # a name with no separator: each return is a basename, both separators replaced, a literal with
+    # none, or a local assigned one (`name = os.path.basename(v).strip(); return name or "attachment"`)
+    free = set()
+    cands_ = {fid: (body, [_ret_expr(body, m) for m in _RETURN.finditer(body)]) for fid, (f, body) in bodies.items()
+              if "return" in body and ("basename" in body or "replace" in body or "secure_filename" in body or ".name" in body)}
+    for _ in range(6):
+        names = named(free)
+        grown = {fid for fid, (body, es) in cands_.items() if fid not in free and es and all(_free_ret(e, body, names) for e in es)}
+        if not grown:
+            break
+        free |= grown
+    return conf | named(conf), same | named(same), free | named(free)
+
+
+def _free_ret(e: str, body: str, names) -> bool:
+    """A return expression with no separator in it, its bare names read as their assignment in body."""
+    parts = []
+    for p in _split_top_or(e):
+        n = _bare(p)
+        if n is not None:
+            got = re.findall(rf"^[ \t]*{re.escape(n)}[ \t]*=(?!=)[ \t]*(.+)$", body, re.M)
+            if len(got) != 1:
+                return False
+            p = got[0]
+        parts.append(p)
+    return all(separator_free(p, names) for p in parts)
 
 
 _SITE_HINT = re.compile(r"""\breturn\b[ \t]*[fbru]{0,2}["'`]/[^/]""", re.I)
@@ -507,6 +533,60 @@ def stored(project, stores: list, source, code, taint, dirty):
     return source
 
 
+# an SQLAlchemy Core statement as the call's last step (`known[name].select()`, `t.delete().where(...)`):
+# a query object, no SQL text
+_STATEMENT_TAIL = re.compile(r"\.(?:select|insert|update|delete|where|filter|filter_by|values|order_by|limit|offset|"
+                             r"join|outerjoin|group_by|having|returning|with_only_columns)\s*\((?:[^()]|\([^()]*\))*\)\s*$", re.S)
+# a comprehension that keeps only members of something (`[t for t in tables if t in known]`)
+_KEEP_MEMBERS = re.compile(r"^\s*[\[{(]\s*([A-Za-z_]\w*)\s+for\s+([A-Za-z_]\w*)\s+in\s+(.+?)\s+if\s+([A-Za-z_]\w*)\s+in\s+"
+                           r"([A-Za-z_][\w.]*(?:\[[^\]]*\])?)\s*[\]})]\s*$", re.S)
+# a path component with no separator left: `os.path.basename(x)`, `Path(x).name`, `secure_filename(x)`,
+# both separators replaced (`x.replace("/", "_").replace("\\", "_")`)
+_BASENAME = re.compile(r"^(?:os\.path\.|posixpath\.|ntpath\.)?basename\s*\(|^(?:pathlib\.)?(?:Pure)?Path\s*\(.*\)\.name\s*$|^(?:\w+\.)?secure_filename\s*\(", re.S)
+_TRIM = re.compile(r"(?:\.(?:strip|lstrip|rstrip|lower|upper|casefold)\(\s*(?:" + _STR + r")?\s*\))+\s*$")
+_JOIN = re.compile(r"^(?:os\.path\.|posixpath\.|ntpath\.)join\s*\((.*)\)\s*$", re.S)
+
+
+def keeps_members(rhs: str, dirty) -> bool:
+    """rhs keeps only the members of a clean collection (`[t for t in tables if t in known]`): an allow-list.
+    `dirty(text)`: the text carries the value."""
+    m = _KEEP_MEMBERS.match(rhs)
+    return bool(m and m.group(1) == m.group(2) == m.group(4) and not dirty(m.group(5)))
+
+
+def statement(a: str) -> bool:
+    """a builds an SQLAlchemy Core statement (its last step `.select()` / `.delete()` / `.where(...)`), no SQL text."""
+    a = a.strip()
+    return not _TEXT_CALL.match(a) and "text(" not in a and bool(_STATEMENT_TAIL.search(a))
+
+
+def separator_free(e: str, names=frozenset()) -> bool:
+    """e can't hold a path separator: a basename, a name with both separators replaced, a literal with
+    none, `x or "attachment"` of those, or a call to a function in `names` (that returns one)."""
+    e = _TRIM.sub("", e.strip()).strip()
+    parts = _split_top_or(e)
+    if len(parts) > 1:
+        return all(separator_free(p, names) for p in parts)
+    if _BASENAME.match(e) or _whole_call(e) in names:
+        return True
+    if _literal(e):
+        return "/" not in e and "\\\\" not in e
+    reps = re.findall(r"""\.replace\(\s*[bu]?(["'])(/|\\\\)\1\s*,""", e)
+    return {r[1] for r in reps} >= {"/", "\\\\"}
+
+
+def _split_top_or(e: str) -> list[str]:
+    masked = _mask(e)
+    cuts = [m.start() for m in re.finditer(r"\s(?:or|\|\|)\s", masked)]
+    if not cuts:
+        return [e]
+    out, k = [], 0
+    for c in cuts:
+        out.append(e[k:c])
+        k = c + len(re.match(r"\s(?:or|\|\|)\s", masked[c:]).group(0))
+    return out + [e[k:]]
+
+
 def sanitizers(project) -> list[str]:
     """`[security] sanitizers`: the project's own functions whose return value is clean."""
     got = (project.config.get("security", {}) or {}).get("sanitizers", [])
@@ -547,6 +627,7 @@ class Sinks:
         self.buffers: set = set()  # functions that return an in-memory buffer (set by the path rule)
         self.confined: set = set()  # functions that return a path checked to be under a root (summaries)
         self.same_site: set = set()  # functions that return a same-site URL (summaries)
+        self.free: set = set()  # functions that return a name with no path separator (summaries)
         self.lookups = re.compile(r["lookups"]) if r.get("lookups") else None
         self.severity = r.get("severity", "error")
         self.url_severity = r.get("url_severity", "warn")
@@ -579,7 +660,7 @@ class Sinks:
         if kind == "path":
             first = next((kws[k] for k in _PATH_KWS if k in kws), pos[0] if pos else None)
             safe = self.buffers | self.confined
-            return (self.severity, "") if first is not None and path_dirty(first, ctx, 0, safe) else None
+            return (self.severity, "") if first is not None and path_dirty(first, ctx, 0, safe, self.free) else None
         if kind == "redirect":  # an open redirect needs the value in the scheme or host (a literal host can't leave)
             first = next((kws[k] for k in ("location", "url", "redirect_to") if k in kws), pos[0] if pos else None)
             if first is None or via(first, ctx, self.same_site) or url_taint(first, ctx) != "head":
@@ -604,15 +685,25 @@ class Sinks:
             elems = None if shell else argv(first, ctx)
             if not shell and self.argv_severity == "off":
                 return None  # (only a shell counts: the desktop user running the program they picked)
+            if elems is None and not shell and _bare(first) and hasattr(ctx, "passed") and ctx.rhs(_bare(first)) is None:
+                given = ctx.passed(_bare(first))  # `_run(args)`: what every caller passes, a fixed program's list each
+                if given and all((g := argv(x, _NO_CTX)) and _program(g[0]) for x in given):
+                    return (self.argv_severity, " (an argument of a fixed program, no shell)") \
+                        if self.argv_severity != "off" else None
             if elems is None:
                 return (self.severity, "") if first and ctx.dirty(first) else None
-            if not elems or not _PROGRAM.match(elems[0]) and ctx.dirty(elems[0]):
+            if not elems or not _program(elems[0]) and ctx.dirty(elems[0]):
                 return (self.severity, "") if elems else None
             if any(ctx.dirty(e) for e in elems[1:]):
                 return (self.argv_severity, " (an argument of a fixed program, no shell)") \
                     if self.argv_severity != "off" else None
             return None
         return None
+
+
+def _program(e: str) -> bool:
+    """A fixed program: a literal, `sys.executable`, `shutil.which("git")`, or `shutil.which("git") or "/usr/bin/git"`."""
+    return all(_PROGRAM.match(p) for p in _split_top_or(e.strip()))
 
 
 def _kwarg(a: str):
@@ -639,7 +730,7 @@ def sql_dirty(a: str, ctx, depth: int = 0) -> bool:
     if m:  # `text("... :id")` is constant, `text(f"... {q}")` isn't
         inner = _split_args(m.group(1))
         return bool(inner) and sql_dirty(inner[0], ctx, depth + 1)
-    if _QUERY_OBJECT.match(a):
+    if _QUERY_OBJECT.match(a) or statement(a):
         return False
     name = _bare(a)
     if name is not None:
@@ -648,26 +739,43 @@ def sql_dirty(a: str, ctx, depth: int = 0) -> bool:
     return True
 
 
-def path_dirty(a: str, ctx, depth: int = 0, buffers=frozenset()) -> bool:
+def path_dirty(a: str, ctx, depth: int = 0, buffers=frozenset(), free=frozenset()) -> bool:
     """The path argument carries the value (an in-memory buffer is no path, nor what a function
-    that returns one or a confined path gives; `ctx.assigned(name)`, when the ctx has it: the
-    latest plain assignment past calls that add to the object)."""
+    that returns one or a confined path gives, nor a name with no separator in it: a basename,
+    both separators replaced, a function in `free`; `os.path.join` is read part by part;
+    `ctx.assigned(name)`, when the ctx has it: the latest plain assignment past calls that add
+    to the object)."""
     a = a.strip()
     if _BUFFER.match(a) or not ctx.dirty(a) or _summarised(a, ctx, buffers):
         return False
+    if separator_free(a) or _summarised(a, ctx, free):
+        return False  # (`os.path.basename(x)`, both separators replaced: a name in its directory)
+    j = _JOIN.match(a)
+    if j and depth <= 6:  # `os.path.join(tmp, name)`: each part
+        return any(path_dirty(x, ctx, depth + 1, buffers, free) for x in _split_args(j.group(1)))
     name = _bare(a)
     if name is not None:
         made = ctx.assigned(name) if hasattr(ctx, "assigned") else None
         if made is not None and (_BUFFER.match(made[0].strip()) or _summarised(made[0], made[1], buffers)):
             return False  # (`buffer = io.BytesIO()`, then `buffer.write(data)`: still a buffer)
         sub = ctx.rhs(name)
-        return True if sub is None or depth > 6 else path_dirty(sub[0], sub[1], depth + 1, buffers)
+        return True if sub is None or depth > 6 else path_dirty(sub[0], sub[1], depth + 1, buffers, free)
     return True
 
 
 def argv(a: str, ctx, depth: int = 0) -> list[str] | None:
     """An argument list's elements (a list or tuple literal, or a name assigned one), else None."""
     a = a.strip()
+    parts = _split_top(a, "+")
+    if len(parts) > 1:  # `[git_path] + args`: the first part says the program, the rest are its arguments
+        head = argv(parts[0], ctx, depth + 1)
+        if not head or depth >= 6:
+            return None
+        rest = []
+        for p in parts[1:]:
+            got = argv(p, ctx, depth + 1)
+            rest += got if got is not None else [p.strip()]
+        return head + rest
     if a[:1] in "[(" and a[-1:] in "])":
         return _split_args(a[1:-1])
     name = _bare(a)
@@ -676,6 +784,19 @@ def argv(a: str, ctx, depth: int = 0) -> list[str] | None:
         if sub is not None:
             return argv(sub[0], sub[1], depth + 1)
     return None
+
+
+class _NoCtx:
+    """A caller's text read on its own: nothing tainted, no assignments."""
+
+    def dirty(self, _text):
+        return False
+
+    def rhs(self, _name):
+        return None
+
+
+_NO_CTX = _NoCtx()
 
 
 def url_taint(a: str, ctx, depth: int = 0) -> str:

@@ -173,7 +173,7 @@ class RoundThreeHelpers(unittest.TestCase):
                          "def go(q):\n    return mq('x', q)\n\n\n"
                          "def off(q):\n    return q + '/x'\n")
             p = core.load(root, None, use_cache=False)
-            confined, same = security.summaries(p, lambda g, raw=False: arch._own_code(p, g, raw))
+            confined, same, _free = security.summaries(p, lambda g, raw=False: arch._own_code(p, g, raw))
         self.assertEqual({"check", "managed", "app/h.check", "app/h.managed"}, confined)  # (names and function ids)
         self.assertEqual({"mq", "go", "app/h.mq", "app/h.go"}, same)
 

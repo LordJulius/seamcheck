@@ -27,7 +27,7 @@ fn summaries_by_name() {
     let g = Graph::load(&p);
     // (a function's lines; the path rule passes its own code, nested functions blanked)
     let code = |f: &Func| g.modules.get(&f.module).map(|m| m.raw[f.start - 1..f.end.min(m.raw.len())].join("\n")).unwrap_or_default();
-    let (confined, same) = summaries(&g, &code);
+    let (confined, same, _free) = summaries(&g, &code);
     let set = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<HashSet<String>>();
     // (names and function ids)
     assert_eq!(set(&["check", "managed", "app/h.check", "app/h.managed"]), confined);

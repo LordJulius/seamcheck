@@ -7,9 +7,9 @@
 //! with `< Base`, else the file named after it) is the class, the others
 //! `ext` modules linked both ways, so a method from any of them is found on it.
 //!
-//! Not here yet: `_infer_types` (constructor and method parameters typed from
-//! their callers, library receivers, Ruby's own methods on untyped receivers),
-//! which reads the type inference of `graph/infer.rs`.
+//! Library receivers (`_library_receivers`) are here, on the type inference of
+//! `graph/infer.rs`. Not here yet: the rest of `_infer_types` (constructor and
+//! method parameters typed from their callers, Ruby's own methods on untyped receivers).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -765,4 +765,60 @@ fn rewrite_constants(g: &mut Graph, rb: &[String], r: &Resolver) {
             }
         }
     }
+}
+
+
+/// lang_ruby._library_receivers: `last_response.body`, `params[:class].constantize`: a receiver that
+/// starts with a bare call reaching no project method (Rack::Test's, Rails' `params`) is a library
+/// value, so the call on it is the library's too: qualifier `Object`.
+pub fn library_receivers(g: &mut Graph, p: &crate::project::Project) {
+    let rb: Vec<String> =
+        g.modules.values().filter(|m| EXT.iter().any(|e| m.file.ends_with(e))).map(|m| m.name.clone()).collect();
+    let mut set: Vec<(String, usize, usize)> = Vec::new();
+    {
+        let t = crate::graph::infer::Types::new(g, p);
+        let mut reach: HashMap<(String, String), bool> = HashMap::new();
+        for mn in &rb {
+            let m = &g.modules[mn];
+            let fm = if !m.owner.is_empty() && g.modules.contains_key(&m.owner) { m.owner.as_str() } else { m.name.as_str() };
+            for (fi, f) in m.funcs.iter().enumerate() {
+                for (ci, c) in f.calls.iter().enumerate() {
+                    if !c.chain.is_empty() && c.qual != "Object" && library(&t, m, fm, f, &c.chain[0], 0, &mut reach) {
+                        set.push((mn.clone(), fi, ci));
+                    }
+                }
+            }
+        }
+    }
+    for (mn, fi, ci) in set {
+        g.modules.get_mut(&mn).unwrap().funcs[fi].calls[ci].qual = "Object".to_string();
+    }
+}
+
+fn library(
+    t: &crate::graph::infer::Types,
+    m: &Module,
+    fm: &str,
+    f: &crate::model::Func,
+    head: &str,
+    depth: usize,
+    reach: &mut HashMap<(String, String), bool>,
+) -> bool {
+    if let Some(b) = f.bound.get(head) {
+        if b.starts_with("expr:") && depth < 3 {
+            // `error = assert_raises(Foo) do ... end`: a local holding one
+            let inner = b[5..].split('\x1f').next().unwrap_or("").to_string();
+            return library(t, m, fm, f, &inner, depth + 1, reach);
+        }
+    }
+    let Some(name) = head.strip_suffix("()") else { return false };
+    if !name.chars().next().is_some_and(|c| c.is_lowercase() || c == '_') {
+        return false;
+    }
+    let key = (m.name.clone(), name.to_string());
+    if !reach.contains_key(&key) {
+        let hits = !m.owner.is_empty() && !t.method(std::slice::from_ref(&m.name), name, None).0.is_empty();
+        reach.insert(key.clone(), hits || !t.in_scope(fm, name, 0).is_empty());
+    }
+    !reach[&key]
 }

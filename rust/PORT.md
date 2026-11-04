@@ -212,9 +212,21 @@ tainted names in, after a `len(...)` becomes `0`; the source still reads the raw
 written with the value joins the source. A Python `for a, b in ...` binds every name.
 security_paths.rs ports round 3's and round 4's rule-level classes from the Python
 tests' own inputs and findings. Check parity identical on flask_sqla, flask_round3,
-flask_round4 and the vulnerable apps but railsgoat, where 4 Ruby sinks are written
-`Object.constantize()` by Python and `.constantize()` by Rust (the Ruby adapters'
-receiver, the same sinks).
+flask_round4 and the vulnerable apps but railsgoat, where 4 Ruby sinks were written
+`Object.constantize()` by Python and `.constantize()` by Rust (round 5 ports the
+receiver rule).
+
+Round 5 (same lane; tests/test_security_round5.py, tests/fixtures/flask_round5):
+`security::keeps_members` (the Taint step: a comprehension kept to a clean collection's
+members is clean), `statement` (an SQLAlchemy Core statement in `sql_dirty`),
+`separator_free` / `path_dirty`'s `os.path.join` parts and `summaries`' third set `free`
+(`Sinks.free`), `argv` over `+` and a shell sink's parameter whose callers each pass a
+fixed program's list (`is_program` takes `shutil.which(...) or "/usr/bin/x"`). Python's
+function-local `from x import y` is `Func.imported` (lang/python.rs `local_imports`,
+resolved beside the module's imports in graph/link.rs, read first by link/call.rs's
+local-import branch). `lang/ruby/link.rs::library_receivers` ports
+`_library_receivers` (a call on a receiver chain that starts at a bare call reaching
+no project method gets qualifier `Object`): railsgoat parse / edges / check parity 0.
 
 Flask types (same lane): `infer_flask.py` / `graph/infer/flask.rs` (a
 model's `.query` as an `Ext` value tagged `\0rows`, Flask-Login's

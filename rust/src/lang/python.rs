@@ -227,6 +227,27 @@ fn imports(m: &mut Module, rel: &str, code: &str) {
     }
 }
 
+/// `from x import y` in f's own lines (not a nested function's): f.imported (lang_other._py_local_imports).
+fn local_imports(f: &mut Func, rel: &str, lines: &[&str], a: usize, b: usize, nested: &[bool]) {
+    let d = if rel.contains('/') { rel.rsplit_once('/').unwrap().0 } else { "" };
+    let own: Vec<&str> = (a + 1..=b.min(lines.len().saturating_sub(1))).map(|i| if nested[i - a] { "" } else { lines[i] }).collect();
+    let own = own.join("\n");
+    if !own.contains("import") {
+        return;
+    }
+    for c in pats().from.find_iter(&own) {
+        let spec = c.s(1);
+        for part in strip(c.s(2)).trim_matches(|ch| ch == '(' || ch == ')').split(',') {
+            let bits: Vec<&str> = part.split_whitespace().collect();
+            if bits.is_empty() || bits[0] == "*" {
+                continue;
+            }
+            let local = if bits.len() == 3 && bits[1] == "as" { bits[2] } else { bits[0] };
+            f.imported.insert(local.to_string(), (format!("py:{d}\0{spec}"), bits[0].to_string()));
+        }
+    }
+}
+
 struct Block {
     start: usize,
     end: usize,
@@ -413,6 +434,7 @@ pub fn parse_python(rel: &str, text: &str) -> Vec<Module> {
                 }
             }
         }
+        local_imports(f, rel, &lines, a, bb, &nested);
         collect(f, &lines, &raw, a, bb, true, Some((&nested, a)), o);
         let fixture = (a.saturating_sub(3)..a).any(|j| p.fixture.match_start(lines[j]).is_some());
         types(f, &lines, &raw, a, bb, test_file, fixture, o);

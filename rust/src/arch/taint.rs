@@ -548,6 +548,9 @@ impl Taint {
             if dt && !adds.contains(&val) && !conds.contains_key(&val) && kinds.map(|k| k.lookup(value)).unwrap_or(false) {
                 dt = false; // `user = User.query.filter_by(name=q).first()`: the database's row, not the value
             }
+            if dt && !adds.contains(&val) && security::keeps_members(value, &|x: &str| dirty(x, cx, &now)) {
+                dt = false; // `tables = [t for t in tables if t in known]`: only the allow-list's own names
+            }
             if adds.contains(&val) && !dt {
                 continue; // (adding a clean value cleans nothing)
             }

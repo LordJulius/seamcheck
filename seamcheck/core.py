@@ -1105,6 +1105,9 @@ def _resolve_imports(project: Project) -> None:
             elif r:
                 imported[k] = (r, n)
         m.aliases, m.imported = aliases, imported
+        for f in m.funcs:
+            if f.imported:  # (a library's name: "", nothing in the project)
+                f.imported = {k: ("" if r == EXTERNAL else r, n) for k, (v, n) in f.imported.items() if (r := res(v))}
         m.uses = [r for r in (res(u) for u in m.uses) if r and r != EXTERNAL]
         rx = [res(u) for u in m.reexports]
         if EXTERNAL in rx:
@@ -2393,13 +2396,14 @@ def _build_edges(project: Project) -> None:
                         if hits:
                             targets = [(t, len(hits) == 1) for t in hits]
                             break
-            elif not q and mod and f.file.endswith(PY_EXTS) and f.kind != "top" and re.search(
+            elif not q and mod and f.file.endswith(PY_EXTS) and f.kind != "top" and (c.name in f.imported or re.search(
                     rf"^[ \t]+(?:from[ \t]+[\w.]+[ \t]+)?import[ \t][^\n]*(?:(?<![\w.]){re.escape(c.name)}\b(?![ \t]+as\b)|\bas[ \t]+{re.escape(c.name)}\b)",
-                    f.code, re.M) and c.name in project.modules.get(mod.owner, mod).imported:
+                    f.code, re.M) and c.name in project.modules.get(mod.owner, mod).imported):
                 # `from ._termui_impl import get_pager_file` inside the function: that one, not the
-                # module's own function of the same name (Python scoping: the local binding wins)
-                w_, n_ = project.modules.get(mod.owner, mod).imported[c.name]
-                hits = _in_scope(project, w_, n_)
+                # module's own function of the same name (Python scoping: the local binding wins), and
+                # not another function's import of the same name (f.imported: two routes, two render_pdf)
+                w_, n_ = f.imported.get(c.name) or project.modules.get(mod.owner, mod).imported[c.name]
+                hits = _in_scope(project, w_, n_) if w_ else []
                 if len(hits) == 1:
                     targets = [(hits[0], True)]
                 else:

@@ -40,6 +40,9 @@ class Func:
     # (GDScript get_first_node_in_group, named in [project.groups]) or
     # "type:<Name>" (a declared type: Kotlin / TS `name: Type`, C++ `Type* name`)
     bound: dict[str, str] = field(default_factory=dict)
+    # Python: a `from x import y` inside the function, local name -> (where, name); it wins over the
+    # file's names inside the function (two routes importing two `render_pdf`s)
+    imported: dict[str, tuple[str, str]] = field(default_factory=dict)
     recv: str = ""  # Kotlin extension function: the receiver type (`fun JSONObject.opt(`)
     returns: str = ""  # the declared return type's class ("Self": the class it is called on), "" unknown
     kind: str = "func"  # "func", "top" (module-level code), "private"...

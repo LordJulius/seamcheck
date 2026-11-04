@@ -626,3 +626,35 @@ fn round4_only_the_injections_are_errors() {
     assert_eq!(got, want);
 }
 
+
+// ---- test_security_round5.py: the rule-level classes (generated as above) ----
+
+// test_security_round5.py: LocalImports.test_an_import_inside_the_function_wins_there
+#[test]
+fn round5_an_import_inside_the_function_wins_there() {
+    let files: &[(&str, &str)] = &[
+        ("app/pdf.py", "import io\n\n\ndef render_pdf(name, **kw):\n    buf = io.BytesIO()\n    buf.write(name.encode())\n    return buf\n"),
+        ("app/help.py", "def render_pdf(guide):\n    return open(guide).read()\n"),
+        ("app/routes.py", "from flask import request, send_file\n\n\ndef report():\n    from app.pdf import render_pdf\n\n    out = render_pdf('r.html', q=request.args.get('q'))\n    return send_file(out)\n\n\ndef guide():\n    from app.help import render_pdf\n\n    return render_pdf('g')\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round5.py: TheAppShape.test_only_the_injections_are_errors
+#[test]
+fn round5_only_the_injections_are_errors() {
+    let got = fixture_findings("flask_round5");
+    let want: Vec<(String, String, usize)> = vec![
+        ("error".into(), "app/inventory/routes.py".into(), 62),
+        ("error".into(), "app/mail/attach.py".into(), 50),
+        ("error".into(), "app/ops/git.py".into(), 22),
+        ("warn".into(), "app/mail/attach.py".into(), 20),
+        ("warn".into(), "app/ops/git.py".into(), 11),
+    ];
+    assert_eq!(got, want);
+}
+
