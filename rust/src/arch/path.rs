@@ -256,7 +256,7 @@ pub fn path(p: &Project, r: &Rule) -> Res<Vec<Finding>> {
                         let params: Vec<String> = taint::param_decls(&g, h).into_iter().map(|x| x.0).collect();
                         let mut got: HashSet<String> = HashSet::new();
                         for c in f.calls.iter().filter(|c| c.line == *ln && c.name == h.name) {
-                            got.extend(taint::passed(&g, f, c, &params, cx, &tn.at(c.line)));
+                            got.extend(taint::passed(&g, f, c, h, &params, cx, &tn.at(c.line)));
                         }
                         let had = given.get(dst);
                         if got.is_empty() || (prev.contains_key(dst) && had.is_some_and(|h| got.iter().all(|x| h.contains(x)))) {

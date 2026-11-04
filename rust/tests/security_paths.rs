@@ -658,3 +658,60 @@ fn round5_only_the_injections_are_errors() {
     assert_eq!(got, want);
 }
 
+
+// ---- test_security_round6.py: the rule-level classes (generated as above) ----
+
+// test_security_round6.py: KeywordNames.test_a_keyword_name_is_no_value
+#[test]
+fn round6_a_keyword_name_is_no_value() {
+    let files: &[(&str, &str)] = &[
+        ("app/report.py", "def render(name, **context):\n    path = context.get('logo', 'logo.png')\n    with open(path, 'rb') as fh:\n        return name, fh.read()\n"),
+        ("app/routes.py", "from flask import request\nfrom app.report import render\n\n\ndef low():\n    items = request.args.get('items')\n    print(items)\n    return render('x.html', items=[])\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round6.py: KeywordNames.test_a_keyword_value_reaches_the_star_parameter
+#[test]
+fn round6_a_keyword_value_reaches_the_star_parameter() {
+    let files: &[(&str, &str)] = &[
+        ("app/report.py", "def render(name, **context):\n    path = context.get('logo', 'logo.png')\n    with open(path, 'rb') as fh:\n        return name, fh.read()\n"),
+        ("app/routes.py", "from flask import request\nfrom app.report import render\n\n\ndef logo():\n    return render('x.html', logo=request.args['logo'])\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+        ("python-injection".into(), "error".into(), "app/report.py".into(), 3),
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round6.py: FreeValues.test_built_of_sanitized_values
+#[test]
+fn round6_built_of_sanitized_values() {
+    let files: &[(&str, &str)] = &[
+        ("app/upload.py", "import os\nimport tempfile\nfrom flask import request\n\n\ndef upload():\n    safe = os.path.basename(request.form['name'])\n    d = tempfile.mkdtemp()\n    a = open(os.path.join(d, f'{safe}.pdf'), 'rb')\n    b = open(os.path.join(d, safe if safe.endswith('.pdf') else safe + '.pdf'), 'rb')\n    c = open(os.path.join(d, f'../{safe}'), 'rb')\n    return a, b, c\n"),
+    ];
+    let mut got: Vec<(String, String, String, usize)> = findings(files, "").into_iter().map(|g| (g.0, g.1, g.2, g.3)).collect();
+    got.sort();
+    let want: Vec<(String, String, String, usize)> = vec![
+        ("python-injection".into(), "error".into(), "app/upload.py".into(), 11),
+    ];
+    assert_eq!(got, want);
+}
+
+// test_security_round6.py: TheAppShape.test_only_the_injections_are_errors
+#[test]
+fn round6_only_the_injections_are_errors() {
+    let got = fixture_findings("flask_round6");
+    let want: Vec<(String, String, usize)> = vec![
+        ("error".into(), "app/upload.py".into(), 31),
+        ("error".into(), "app/utils/reports.py".into(), 3),
+    ];
+    assert_eq!(got, want);
+}
+

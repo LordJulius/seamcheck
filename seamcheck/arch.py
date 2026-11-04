@@ -776,6 +776,9 @@ def _call_args(project, f, c) -> list[str]:
 _FUNCTION_LITERAL = re.compile(r"\s*(?:async\s+)?(?:function\b|(?:\([^()]*\)|[\w$]+)\s*=>|lambda\b|func\s*\(|proc\b|->)")
 
 
+_KEYWORD_NAME = re.compile(r"((?:^|[(,])\s*)[A-Za-z_]\w*\s*=(?![=>])")
+
+
 def _dirty(arg: str, source, clean, tainted: set) -> bool:
     """The text carries the value: the source or a tainted name, outside the sanitizer
     calls in it (`request.referrer or url_for("index")` is still the referrer); a
@@ -783,6 +786,8 @@ def _dirty(arg: str, source, clean, tainted: set) -> bool:
     (`(err, rows) => {...}`) is code, not the value, whatever names its body uses."""
     if _FUNCTION_LITERAL.match(arg):
         return False
+    # a keyword argument's name is no value read (`render_pdf("x.html", items=[])` beside a tainted `items`)
+    arg = _KEYWORD_NAME.sub(r"\1", arg)
     # Flask / Werkzeug: `request.args.get("page", 1, type=int)` is an int; `",".join("?" for _ in ids)` holds
     # only its literal
     arg = re.sub(r"[\w.]+\.get\(\s*[^()]*\btype\s*=\s*(?:int|float|bool)\b[^()]*\)", " ", arg)
@@ -909,12 +914,17 @@ def _passed(project, f, c, g, params: list[str], source, clean, tainted: set) ->
     """The parameters of g that call c (in f) passes a tainted value to."""
     got = set()
     pos = 0
+    star = next((n for n, d in _param_decls(project, g) if d.strip().startswith("**")), None)  # (`**context`)
     for a in _call_args(project, f, c):
         kw = re.match(r"\s*([A-Za-z_]\w*)\s*[=:](?!=)", a)
         dirty = _dirty(a, source, clean, tainted)
         if kw and kw.group(1) in params:
             if dirty:
                 got.add(kw.group(1))
+            continue
+        if kw and f.file.endswith(PY_EXTS) and "=" in a[:kw.end()]:
+            if dirty and star:  # a keyword g has no parameter for: its `**` one holds it, no positional one
+                got.add(star)
             continue
         if dirty and pos < len(params):
             got.add(params[pos])

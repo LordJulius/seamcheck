@@ -469,6 +469,13 @@ sanitizers = ["coerce_safe_redirect_target"]  # their return value is clean
   (`_run(["pdftotext", path, "-"])`) and through `[shutil.which("git") or
   "/usr/bin/git"] + args`. A Python import inside a function names what it
   binds there, not in the file's other functions.
+- A keyword argument's name is no value read (`render_pdf("x.html",
+  items=[])` beside a request-tainted `items` passes nothing tainted), and a
+  keyword the callee has no parameter for goes to its `**context`, never to
+  a positional parameter. A file name built only from separator-free values
+  and literals stays separator-free: `f"{safe_name}.pdf"`, `safe_name + ".pdf"`
+  and `safe_name if ... else f"{safe_name}.pdf"` after `os.path.basename`; a
+  literal holding `/`, `\` or `..` (`f"../{safe_name}"`) breaks it.
 - A request-scoped store (`stores`, Flask's `session` in the pack) carries the
   value across requests: a key written with request data
   (`session["backup"] = json.dumps(data)`) is request data where another

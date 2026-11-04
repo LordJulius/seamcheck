@@ -125,9 +125,11 @@ pub fn dirty(arg: &str, cx: &Ctx, tainted: &HashSet<String>) -> bool {
     if function_literal().match_start(arg).is_some() {
         return false;
     }
+    // a keyword argument's name is no value read (`render_pdf("x.html", items=[])` beside a tainted `items`)
+    let arg = re!(r"((?:^|[(,])\s*)[A-Za-z_]\w*\s*=(?![=>])").sub_with(arg, |m| m.s(1).to_string());
     // Flask / Werkzeug: `request.args.get("page", 1, type=int)` is an int; `",".join("?" for _ in ids)` holds
     // only its literal
-    let arg = re!(r"[\w.]+\.get\(\s*[^()]*\btype\s*=\s*(?:int|float|bool)\b[^()]*\)").sub_with(arg, |_| " ".to_string());
+    let arg = re!(r"[\w.]+\.get\(\s*[^()]*\btype\s*=\s*(?:int|float|bool)\b[^()]*\)").sub_with(&arg, |_| " ".to_string());
     let arg = re!(r#"\.join\(\s*(?:"[^"]*"|'[^']*')\s+for\s+[\w, ]+\s+in\s+[^()]*(?:\([^()]*\)[^()]*)*\)"#)
         .sub_with(&arg, |_| ".join()".to_string());
     // (a length is a number: `["%s"] * len(exact)`)
@@ -372,16 +374,26 @@ pub fn param_decls(g: &Graph, h: &Func) -> Vec<(String, String)> {
     out
 }
 
-/// The parameters of g that call c (in f) passes a tainted value to (arch._passed).
-pub fn passed(g: &Graph, f: &Func, c: &Call, params: &[String], cx: &Ctx, tainted: &HashSet<String>) -> HashSet<String> {
+/// The parameters of h that call c (in f) passes a tainted value to (arch._passed).
+pub fn passed(g: &Graph, f: &Func, c: &Call, h: &Func, params: &[String], cx: &Ctx, tainted: &HashSet<String>) -> HashSet<String> {
     let mut got = HashSet::new();
     let mut pos = 0;
+    // (`**context`)
+    let star = param_decls(g, h).into_iter().find(|(_, d)| d.trim().starts_with("**")).map(|(n, _)| n);
     for a in call_args(g, f, c) {
-        let kw = re!(r"\s*([A-Za-z_]\w*)\s*[=:](?!=)").match_start(&a).map(|m| m.s(1).to_string());
+        let kw = re!(r"\s*([A-Za-z_]\w*)\s*[=:](?!=)").match_start(&a).map(|m| (m.s(1).to_string(), m.end()));
         let dt = dirty(&a, cx, tainted);
-        if let Some(k) = kw.filter(|k| params.contains(k)) {
+        if let Some((k, _)) = kw.as_ref().filter(|(k, _)| params.contains(k)) {
             if dt {
-                got.insert(k);
+                got.insert(k.clone());
+            }
+            continue;
+        }
+        if kw.is_some_and(|(_, end)| crate::model::is_py(&f.file) && a[..end].contains('=')) {
+            if dt {
+                if let Some(st) = &star {
+                    got.insert(st.clone()); // a keyword g has no parameter for: its `**` one holds it, no positional one
+                }
             }
             continue;
         }

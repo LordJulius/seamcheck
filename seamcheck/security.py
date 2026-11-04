@@ -575,6 +575,30 @@ def separator_free(e: str, names=frozenset()) -> bool:
     return {r[1] for r in reps} >= {"/", "\\\\"}
 
 
+def free_value(e: str, ctx, free=frozenset(), depth: int = 0) -> bool:
+    """The value can't hold a path separator (separator_free), followed through the names it was
+    assigned and through what it is built of: an f-string or `+` of such values and literals with
+    no `/`, `\\` or `..`, each branch of a conditional (`n if n.endswith(".pdf") else f"{n}.pdf"`)."""
+    e = e.strip()
+    if separator_free(e) or _summarised(e, ctx, free):
+        return True
+    if depth > 6:
+        return False
+    bs = branches(e)
+    if len(bs) > 1:
+        return all(free_value(b, ctx, free, depth + 1) for b in bs)
+    parts = _parts(e)
+    if parts and (len(parts) > 1 or parts[0][0] == "expr"):
+        return all(not re.search(r"[/\\]|\.\.", t) if kind == "lit" else free_value(t, ctx, free, depth + 1) for kind, t in parts)
+    name = _bare(e)
+    if name is not None:
+        if not ctx.dirty(name):
+            return True  # (not the request's: what it holds is the program's own)
+        sub = ctx.rhs(name)
+        return sub is not None and free_value(sub[0], sub[1], free, depth + 1)
+    return False
+
+
 def _split_top_or(e: str) -> list[str]:
     masked = _mask(e)
     cuts = [m.start() for m in re.finditer(r"\s(?:or|\|\|)\s", masked)]
@@ -748,8 +772,8 @@ def path_dirty(a: str, ctx, depth: int = 0, buffers=frozenset(), free=frozenset(
     a = a.strip()
     if _BUFFER.match(a) or not ctx.dirty(a) or _summarised(a, ctx, buffers):
         return False
-    if separator_free(a) or _summarised(a, ctx, free):
-        return False  # (`os.path.basename(x)`, both separators replaced: a name in its directory)
+    if free_value(a, ctx, free):
+        return False  # (`os.path.basename(x)`, both separators replaced, `f"{name}.pdf"` of one: a name in its directory)
     j = _JOIN.match(a)
     if j and depth <= 6:  # `os.path.join(tmp, name)`: each part
         return any(path_dirty(x, ctx, depth + 1, buffers, free) for x in _split_args(j.group(1)))

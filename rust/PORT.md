@@ -228,6 +228,15 @@ local-import branch). `lang/ruby/link.rs::library_receivers` ports
 `_library_receivers` (a call on a receiver chain that starts at a bare call reaching
 no project method gets qualifier `Object`): railsgoat parse / edges / check parity 0.
 
+Round 6 (same lane; tests/test_security_round6.py, tests/fixtures/flask_round6):
+`taint::dirty` strips a keyword argument's name (`items=[]` reads no `items`);
+`taint::passed` takes the callee and sends a Python keyword it has no parameter
+for to its `**` parameter (from `param_decls`), never to a positional one.
+`security::free_value` (`path_dirty`'s separator-free test) follows a name to its
+assignment and an f-string / `+` / conditional through its parts: literals with no
+`/`, `\\` or `..`, values that are free themselves. Check parity identical on
+flask_sqla, flask_round3–6 and the vulnerable apps.
+
 Flask types (same lane): `infer_flask.py` / `graph/infer/flask.rs` (a
 model's `.query` as an `Ext` value tagged `\0rows`, Flask-Login's
 `current_user`), `_PY_ROW` in both Python adapters (`db.session.get(User,

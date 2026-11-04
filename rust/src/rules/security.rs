@@ -752,6 +752,45 @@ pub fn separator_free(e: &str, names: &HashSet<String>) -> bool {
     reps.contains("/") && reps.contains("\\\\")
 }
 
+/// The value can't hold a path separator ([`separator_free`]), followed through the names it was
+/// assigned and through what it is built of: an f-string or `+` of such values and literals with no
+/// `/`, `\\` or `..`, each branch of a conditional (`n if n.endswith(".pdf") else f"{n}.pdf"`)
+/// (security.free_value).
+pub fn free_value(e: &str, ctx: &dyn TaintCtx, free: &HashSet<String>, depth: usize) -> bool {
+    let e = e.trim();
+    if separator_free(e, &HashSet::new()) || summarised(e, ctx, free) {
+        return true;
+    }
+    if depth > 6 {
+        return false;
+    }
+    let bs = branches(e);
+    if bs.len() > 1 {
+        return bs.iter().all(|b| free_value(b, ctx, free, depth + 1));
+    }
+    if let Some(ps) = parts(e) {
+        if !ps.is_empty() && (ps.len() > 1 || ps[0].0) {
+            return ps.iter().all(|(is_expr, t)| {
+                if *is_expr {
+                    free_value(t, ctx, free, depth + 1)
+                } else {
+                    !re!(r"[/\\]|\.\.").is_match(t)
+                }
+            });
+        }
+    }
+    if let Some(name) = bare(e) {
+        if !ctx.dirty(name) {
+            return true; // (not the request's: what it holds is the program's own)
+        }
+        return match ctx.rhs(name) {
+            Some((v, sub)) => free_value(&v, sub.as_ref(), free, depth + 1),
+            None => false,
+        };
+    }
+    false
+}
+
 /// e split at its top-level `or` / `||` (security._split_top_or).
 fn split_top_or(e: &str) -> Vec<String> {
     let m = mask(e);
@@ -1046,8 +1085,8 @@ pub fn path_dirty(a: &str, ctx: &dyn TaintCtx, depth: usize, buffers: &HashSet<S
     if buffer().match_start(a).is_some() || !ctx.dirty(a) || summarised(a, ctx, buffers) {
         return false;
     }
-    if separator_free(a, &HashSet::new()) || summarised(a, ctx, free) {
-        return false; // (`os.path.basename(x)`, both separators replaced: a name in its directory)
+    if free_value(a, ctx, free, 0) {
+        return false; // (`os.path.basename(x)`, both separators replaced, `f"{name}.pdf"` of one: a name in its directory)
     }
     if let Some(j) = join_call().match_start(a) {
         if depth <= 6 {
@@ -1698,6 +1737,21 @@ mod tests {
         assert!(separator_free("os.path.basename(_coerce_text(v)).strip()", &none));
         assert!(separator_free("helper(v) or 'attachment'", &HashSet::from(["helper".to_string()])));
         assert!(!separator_free("v or 'attachment'", &none));
+    }
+
+    /// test_security_round6.Helpers.test_free_value
+    #[test]
+    fn free_value_cases() {
+        let c = Ctx { names: vec!["raw", "safe"], values: HashMap::from([("safe", "os.path.basename(raw)")]) };
+        let none = HashSet::new();
+        assert!(free_value(r#"f"{safe}.pdf""#, &c, &none, 0));
+        assert!(free_value(r#"safe if safe.lower().endswith(".pdf") else f"{safe}.pdf""#, &c, &none, 0));
+        assert!(free_value(r#"safe + ".pdf""#, &c, &none, 0));
+        assert!(!free_value(r#"f"../{safe}""#, &c, &none, 0));
+        assert!(!free_value(r#"f"a/{safe}""#, &c, &none, 0));
+        assert!(!free_value("raw", &c, &none, 0));
+        assert!(!free_value(r#"f"{raw}.pdf""#, &c, &none, 0));
+        assert!(free_value("name", &c, &none, 0)); // (not the request's)
     }
 
     /// test_security_round5.Helpers.test_argument_lists
