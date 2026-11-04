@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Map, Value};
 
 use crate::config::{self, truthy};
-use crate::graph::Graph;
 use crate::output::{dumps, dumps_line};
 use crate::project::Project;
 use crate::pyre::repr;
@@ -98,7 +97,7 @@ fn stamp(path: &Path) -> Option<(u128, u64)> {
 pub struct Server {
     pub root: PathBuf,
     pub extra: Vec<String>,
-    loaded: Option<(Project, Graph)>,
+    loaded: Option<Project>,
     stamps: Stamps,
     /// how many times a call loaded the project (the reload test counts them)
     pub loads: usize,
@@ -148,12 +147,12 @@ impl Server {
         out
     }
 
-    fn project(&mut self) -> &mut (Project, Graph) {
+    fn project(&mut self) -> &mut Project {
         let now = self.stamps_now(); // (before the load: an edit during it is seen by the next call)
         if self.loaded.is_none() || now != self.stamps {
             let p = Project::load(&self.root, &self.extra);
-            let g = Graph::load(&p);
-            self.loaded = Some((p, g));
+            let _ = p.graph(); // (the graph the rules and the queries share)
+            self.loaded = Some(p);
             self.loads += 1;
             self.stamps = now;
         }
@@ -177,8 +176,9 @@ impl Server {
             }
             return Err(ToolError(parts.join("; ")));
         }
-        let (p, g) = self.project();
-        let out = run_tool(p, g, name, args);
+        let extra = self.extra.clone();
+        let p = self.project();
+        let out = run_tool(p, name, args, &extra);
         p.gate_changed = None; // (a gate's scope: the next check sees everything)
         out
     }
@@ -238,8 +238,27 @@ impl Server {
     }
 }
 
-fn run_tool(p: &mut Project, g: &Graph, name: &str, args: &Map<String, Value>) -> Result<Value, ToolError> {
-    let q = Q::new(p, g);
+/// serve._since: only the rows of files changed since the `since` ref, when one is given.
+fn since_rows(p: &Project, args: &Map<String, Value>, rows: Vec<Value>) -> Value {
+    match arg_str(args, "since").filter(|s| !s.is_empty()) {
+        Some(r) => {
+            let changed = crate::tidy::changed_files(p, r);
+            Value::Array(rows.into_iter().filter(|x| x["file"].as_str().is_some_and(|f| changed.contains(f))).collect())
+        }
+        None => Value::Array(rows),
+    }
+}
+
+fn run_tool(p: &mut Project, name: &str, args: &Map<String, Value>, extra: &[String]) -> Result<Value, ToolError> {
+    if name == "gate" {
+        let r = arg_str(args, "since").filter(|s| !s.is_empty()).unwrap_or("HEAD").to_string();
+        let rep = crate::gate::gate_with(p, &r, truthy(args.get("staged")), extra, &crate::tidy::exactness::Book::default());
+        let findings = crate::tidy::cli::gate_findings(p, &rep, &r);
+        return Ok(json!({"blocked": rep.failed(), "changed_files": rep.changed_files, "findings": findings}));
+    }
+    let p: &Project = p;
+    let g = p.graph();
+    let q = Q::new(p, &g);
     let fuzzy = truthy(args.get("fuzzy"));
     Ok(match name {
         "check" => {
@@ -309,8 +328,20 @@ fn run_tool(p: &mut Project, g: &Graph, name: &str, args: &Map<String, Value>) -
             json!({"start": start, "own_areas": own, "areas": areas})
         }
         "stats" => q.stats(),
-        // the tidy half (gate's graph checks, refs, unused, test audit) comes with the gate-graph lane
-        other => return Err(ToolError(format!("{other}: not ported to the Rust seamcheck yet"))),
+        "refs" => {
+            let t = crate::tidy::Tidy::new(p, &g);
+            crate::tidy::refs(&t, arg_str(args, "name").unwrap_or(""), &crate::tidy::Corpus::new(p))
+        }
+        "unused" => {
+            let t = crate::tidy::Tidy::new(p, &g);
+            let rows = crate::tidy::dead::unused(&t, &crate::tidy::Corpus::new(p)).iter().map(|r| r.json()).collect();
+            since_rows(p, args, rows)
+        }
+        "tests" => {
+            let t = crate::tidy::Tidy::new(p, &g);
+            since_rows(p, args, crate::tidy::audit::test_audit(&t, None).iter().map(|r| r.json()).collect())
+        }
+        other => return Err(ToolError(format!("unknown tool {other}"))),
     })
 }
 

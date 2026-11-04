@@ -261,6 +261,10 @@ fn requests(ps: &[Pick], deferred: &[String]) -> Vec<String> {
         json!({"jsonrpc": "2.0", "id": "s", "method": "tools/call", "params": {"name": "stats"}}),
         json!({"jsonrpc": "2.0", "id": "c", "method": "tools/call", "params": {"name": "check", "arguments": {"skip": deferred}}}),
         json!({"jsonrpc": "2.0", "id": "ce", "method": "tools/call", "params": {"name": "check", "arguments": {"skip": deferred, "errors_only": true}}}),
+        json!({"jsonrpc": "2.0", "id": "un", "method": "tools/call", "params": {"name": "unused"}}),
+        json!({"jsonrpc": "2.0", "id": "uh", "method": "tools/call", "params": {"name": "unused", "arguments": {"since": "HEAD"}}}),
+        json!({"jsonrpc": "2.0", "id": "t", "method": "tools/call", "params": {"name": "tests"}}),
+        json!({"jsonrpc": "2.0", "id": "g", "method": "tools/call", "params": {"name": "gate"}}),
         json!([1, 2]),
     ];
     let mut k = 0;
@@ -279,6 +283,7 @@ fn requests(ps: &[Pick], deferred: &[String]) -> Vec<String> {
         call(&mut msgs, "impact", json!({"targets": [x.id]}));
         call(&mut msgs, "impact", json!({"targets": [x.file], "depth": 2, "fuzzy": true}));
         call(&mut msgs, "search", json!({"pattern": format!(r"\b{}\(", esc(&x.name)), "limit": 20, "code": true}));
+        call(&mut msgs, "refs", json!({"name": x.name}));
     }
     let mut out: Vec<String> = msgs.iter().map(|m| m.to_string()).collect();
     out.insert(3, "{not json".into());

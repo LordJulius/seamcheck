@@ -261,7 +261,7 @@ fn query(a: &Args, root: &Path, t0: Instant) -> i32 {
 /// `map --html out.html`: the interactive map (report.rs).
 fn map(a: &Args, root: &Path) -> i32 {
     let p = Project::load(root, &a.config);
-    let g = seamcheck::graph::Graph::load(&p);
+    let g = p.graph();
     if let Some(out) = &a.html {
         let only: Option<Vec<String>> = a.only.as_ref().map(|x| x.split(',').map(String::from).collect());
         let skip: Option<Vec<String>> = a.skip.as_ref().map(|x| x.split(',').map(String::from).collect());
@@ -297,8 +297,7 @@ fn check(a: &Args, root: &Path, t0: Instant) -> i32 {
         findings.retain(|f| f.severity == "error");
     }
     if let Some(out) = &a.html {
-        let g = seamcheck::graph::Graph::load(&p);
-        if let Err(e) = seamcheck::report::write_html(&p, &g, &findings, Path::new(out)) {
+        if let Err(e) = seamcheck::report::write_html(&p, &p.graph(), &findings, Path::new(out)) {
             eprintln!("seamcheck check: {out}: {e}");
         }
     }

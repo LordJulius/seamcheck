@@ -157,7 +157,7 @@ fn ids(v: &Value) -> Vec<String> {
     v.as_array().into_iter().flatten().map(|r| r["id"].as_str().unwrap_or("").to_string()).collect()
 }
 
-// test_serve.py: ServeTest.test_an_edit_between_two_calls_is_seen (its gate half: with the gate-graph lane)
+// test_serve.py: ServeTest.test_an_edit_between_two_calls_is_seen
 #[test]
 fn serve_an_edit_between_two_calls_is_seen() {
     let d = serve_repo();
@@ -180,9 +180,17 @@ fn serve_an_edit_between_two_calls_is_seen() {
         .map(|f| (f["rule"].as_str().unwrap().into(), f["file"].as_str().unwrap().into(), f["line"].as_u64().unwrap(), f["why"].as_str().unwrap().into()))
         .collect();
     assert_eq!(got, [("writes-go-through-store".into(), "src/app/view.py".into(), 9, "the store clears the cache".into())]);
+    let (gate, _) = s.tool("gate", json!({}));
+    assert_eq!(gate["blocked"], true);
+    assert_eq!(gate["changed_files"], json!(["src/app/view.py"]));
+    // a gate looks only at the change; the check after it still sees everything
+    common::write(d.path(), &[("src/app/other.py", "def other(x):\n    db.execute(x)\n")]);
+    common::commit_all(d.path(), "more");
+    assert_eq!(s.tool("gate", json!({})).0["blocked"], false);
+    assert_eq!(s.tool("check", json!({})).0.as_array().unwrap().len(), 2);
 }
 
-// test_serve.py: ServeTest.test_every_tool_answers (refs / unused / tests / gate: with the gate-graph lane)
+// test_serve.py: ServeTest.test_every_tool_answers
 #[test]
 fn serve_every_tool_answers() {
     let d = serve_repo();
@@ -205,6 +213,11 @@ fn serve_every_tool_answers() {
     );
     assert!(s.tool("impact", json!({"targets": ["src/app/store.py"]})).0["areas"].get("tests").is_some());
     assert_eq!(s.tool("stats", json!({})).0["resolution"][".py"]["project_exact"], 100);
+    assert_eq!(s.tool("unused", json!({})).0, json!([]));
+    let reach: Vec<bool> = s.tool("tests", json!({})).0.as_array().unwrap().iter().map(|r| r["reach"].as_u64().unwrap() > 0).collect();
+    assert_eq!(reach, [true]);
+    assert!(!s.tool("refs", json!({"name": "save"})).0["callers"].as_array().unwrap().is_empty());
+    assert_eq!(s.tool("unused", json!({"since": "HEAD"})).0, json!([]));
     let ctx = s.tool("context", json!({"name": "save"})).0[0].clone(); // before editing save: who calls it, which tests to run
     assert!(ctx["source"].as_str().unwrap().contains("db.execute(x)"));
     let callers: Vec<(String, bool)> =

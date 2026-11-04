@@ -597,9 +597,14 @@ every other repo every query and every reply is identical. Still to run
 (Pylon Primos unreachable): elixir-pot and the bigger bench repos, e.g.
 `parity --queries --serve ~/Documents/elixir-pot ~/bench/{square__okhttp,BurntSushi__ripgrep,JamesNK__Newtonsoft.Json,godotengine__godot-demo-projects,excalidraw__excalidraw}`.
 
-**Not yet.** serve's `gate`, `refs`, `unused` and `tests` tools answer "not
-ported" until the gate-graph lane's tidy lands (the tool list and schemas are
-already Python's); `stats` doesn't write the exactness record (tidy/exactness).
+serve's `gate`, `refs`, `unused` (with `since`) and `tests` run the tidy
+lane's code (`gate::gate_with`, `tidy::cli::gate_findings`, `tidy::refs`,
+`tidy::dead::unused`, `tidy::audit::test_audit`) over the server's loaded
+project and its shared graph (`Project::graph`); the 12-repo run above was
+repeated with them in (183 requests per repo): 0 differences.
+
+**Not yet.** `stats` doesn't write the exactness record (Python's
+`exactness.record` in `stats` / `check`).
 
 **Known differences.**
 - `path FROM TO` where TO matches several functions with chains of one
