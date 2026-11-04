@@ -582,6 +582,7 @@ check, and the error replies. Timings (`N ms`, `load_ms`) are masked.
 |-------|--------:|---------------:|-------:|
 | tests/fixtures/* + tests/queries_fixtures/* (desk) | 973 | 595 | 0 |
 | flask (Pylon, before the argparse fix) | 517 | 264 | 0 serve; 25 queries, all the argparse case |
+| elixir-pot (Pylon, 25 picks; 17,390 output lines, the tidy tools in) | 524 | 293 | 0 |
 | this repo (desk, 20 picks; 13,907 output lines) | 415 | 214 | 4, all one graph gap (below) |
 | desk, 15 picks each: flask, httpx, ky, SwiftyJSON, koa, urfave/cli, gin, monolog, javapoet, Dapper, tps-demo, fd (75k output lines) | 3,775 | 1,968 | 0 |
 | desk, 15 picks each: sinatra, cJSON | 628 | 328 | 14 + 13, all graph differences |
@@ -593,9 +594,22 @@ test_a_core_method_on_an_untyped_receiver_is_rubys, ignored in
 tests/queries.rs until the Ruby resolution closes it), sinatra (1,121 guessed
 edges only Rust draws, `respond_to?` / `empty?` on untyped receivers) and
 cJSON (92: test calls into cJSON.c Python makes exact, Rust guesses). On
-every other repo every query and every reply is identical. Still to run
-(Pylon Primos unreachable): elixir-pot and the bigger bench repos, e.g.
-`parity --queries --serve ~/Documents/elixir-pot ~/bench/{square__okhttp,BurntSushi__ripgrep,JamesNK__Newtonsoft.Json,godotengine__godot-demo-projects,excalidraw__excalidraw}`.
+every other repo every query and every reply is identical. Still to run:
+the bigger bench repos (`parity --queries --serve ~/bench/{square__okhttp,BurntSushi__ripgrep,JamesNK__Newtonsoft.Json,godotengine__godot-demo-projects,excalidraw__excalidraw}`).
+
+`map --html` on elixir-pot: the page outside the data is byte for byte
+Python's; nodes (9,999) and module edges (15,336, same order) identical,
+findings the same 587, rules identical.
+
+**Wall time** on elixir-pot (Pylon Primos, load average 7, Python's cache
+warm; the elixir-pot parity run's largest process 2.9 GB): every query
+command is Python 5.3-6.7 s against Rust 31.9-33.5 s, `map --html` 30.7 s
+against 59.6 s. The query itself is milliseconds on both sides (the parity
+run answers 524 command lines in 26 s, load included); what Rust pays is the
+graph load from cold every run (`port-dump parse` 22 s, `port-dump edges`
+42 s at load 19), where Python unpickles its cached graph. The serve session
+pays it once (293 replies: Python 153 s, Rust 132 s). Making the cold load
+fast (or caching it) is what decides these commands' cutover.
 
 serve's `gate`, `refs`, `unused` (with `since`) and `tests` run the tidy
 lane's code (`gate::gate_with`, `tidy::cli::gate_findings`, `tidy::refs`,
