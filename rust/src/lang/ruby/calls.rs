@@ -632,7 +632,7 @@ fn declared(
         // last statement before the def's own `ensure` / `rescue` (at the def's indentation)
         let def_ind = b.pos - (rfind(code, "\n", b.pos).map(|x| x + 1).unwrap_or(0));
         if end_pos > 0 {
-            let cl = crate::pyre::rx(&format!(r"(?m)^[ \t]{{{def_ind}}}(?:ensure|rescue)\b")).unwrap();
+            let cl = crate::pyre::rx_built(&format!(r"(?m)^[ \t]{{{def_ind}}}(?:ensure|rescue)\b")).unwrap();
             let from_ = nl_after.max(0) as usize;
             if let Some(c) = cl.search_range(code, from_, end_pos) {
                 end_pos = c.start();

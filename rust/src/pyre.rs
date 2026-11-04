@@ -540,6 +540,38 @@ pub fn rx(pat: &str) -> Result<Arc<Rx>, String> {
     Ok(r)
 }
 
+static BUILT: OnceLock<Mutex<indexmap::IndexMap<String, Arc<Rx>>>> = OnceLock::new();
+
+/// How many patterns built from names `rx_built` keeps.
+const MAX_BUILT: usize = 256;
+
+/// A pattern built at run time from names (`\bfun\s+...{name}\s*\(`, one per
+/// Kotlin function): cached like `rx`, but only the most recently used
+/// MAX_BUILT stay. Each compiled pattern holds its automata and per-thread
+/// caches; kept forever, a big repo's (elixir-pot: tens of thousands)
+/// took gigabytes. Patterns from config and code stay in `rx`.
+pub fn rx_built(pat: &str) -> Result<Arc<Rx>, String> {
+    let cache = BUILT.get_or_init(|| Mutex::new(indexmap::IndexMap::new()));
+    {
+        let mut c = cache.lock().unwrap();
+        if let Some(i) = c.get_index_of(pat) {
+            let r = c[i].clone();
+            let n = c.len();
+            if i < n / 2 {
+                c.move_index(i, n - 1);
+            }
+            return Ok(r);
+        }
+    }
+    let r = Arc::new(Rx::new(pat)?);
+    let mut c = cache.lock().unwrap();
+    if c.len() >= MAX_BUILT {
+        c.shift_remove_index(0);
+    }
+    c.insert(pat.to_string(), r.clone());
+    Ok(r)
+}
+
 /// Python's `repr()` of a str.
 pub fn repr(s: &str) -> String {
     let q = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };

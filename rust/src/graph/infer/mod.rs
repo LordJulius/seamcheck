@@ -47,7 +47,7 @@ pub(crate) use re;
 
 /// A pattern built at run time (a name escaped into it), cached per run.
 pub(crate) fn rxd(pat: &str) -> std::sync::Arc<crate::pyre::Rx> {
-    crate::pyre::rx(pat).unwrap_or_else(|e| panic!("bad built pattern {pat:?}: {e}"))
+    crate::pyre::rx_built(pat).unwrap_or_else(|e| panic!("bad built pattern {pat:?}: {e}"))
 }
 
 /// Python `re.escape`.

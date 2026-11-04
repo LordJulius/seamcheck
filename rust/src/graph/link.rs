@@ -82,7 +82,7 @@ fn injected_imports(g: &Graph, use_: &str, depth: i32) -> Vec<String> {
     }
     let lines = &m.code;
     let heads: Vec<std::sync::Arc<Rx>> = if !which.is_empty() {
-        vec![crate::pyre::rx(&format!(r"^\s*def\s+{which}\b")).unwrap()]
+        vec![crate::pyre::rx_built(&format!(r"^\s*def\s+{which}\b")).unwrap()]
     } else {
         vec![
             crate::pyre::rx(r"^\s*defmacro\s+__using__\b").unwrap(),
@@ -111,7 +111,7 @@ fn injected_imports(g: &Graph, use_: &str, depth: i32) -> Vec<String> {
     for (a, b) in spans.clone() {
         let text = lines[a..=b].join("\n");
         for helper in unq.find_iter(&text) {
-            let h = crate::pyre::rx(&format!(r"^\s*defp?\s+{}\b", helper.s(1))).unwrap();
+            let h = crate::pyre::rx_built(&format!(r"^\s*defp?\s+{}\b", helper.s(1))).unwrap();
             for (i, ln) in lines.iter().enumerate() {
                 if h.match_start(ln).is_some() {
                     spans.push(span_of(i));
