@@ -1,9 +1,10 @@
 //! Running the rules (core.run_rules): forbid, require, together, coverage,
-//! fanout, command, lint, essential here; reach and together's depth in
+//! fanout, command, design (repo-declared tokens, `design.rs`), lint, essential here; reach and together's depth in
 //! `reach.rs`; depend, layers, cycles and path in `crate::arch`. What isn't
 //! ported yet is reported by [`deferred`].
 
 pub mod command;
+pub mod design;
 pub mod fanout;
 pub mod reach;
 pub mod security;
@@ -241,6 +242,7 @@ pub fn run_one(p: &Project, r: &Rule) -> Vec<Finding> {
         "coverage" => coverage(p, r),
         "fanout" => fanout::fanout(p, r),
         "command" => command::command(p, r),
+        "design" => design::design(p, r),
         "lint" => lint(p, r),
         "essential" => essential(p, r),
         "reach" => reach::reach(p, r),

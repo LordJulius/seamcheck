@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use crate::glob::close_match;
 
 pub const LISTS: [&str; 4] = ["rule", "invariant", "contract", "bridge"];
-pub const TABLES: [&str; 7] = ["project", "runtime", "deps", "tidy", "gate", "precise", "security"];
+pub const TABLES: [&str; 8] = ["project", "runtime", "deps", "tidy", "gate", "precise", "security", "design"];
 const ADDITIVE: [&str; 3] = ["include", "exclude", "packs"];
 const DEFAULT_PACKS: [&str; 1] = ["security"];
 const SEVERITIES: [&str; 3] = ["error", "warn", "info"];
@@ -24,7 +24,7 @@ pub const RULE_KEYS: &[&str] = &[
     "sql_sinks", "url_sinks", "path_sinks", "shell_sinks", "redirect_sinks", "url_severity", "argv_severity", "referer_severity", "stores", "lookups", "views",
     "extra_severity", "match", "fallback", "normalize", "rewrite", "run", "timeout", "sep", "wildcard", "lint",
     "options", "gate", "bar", "controls", "menus", "repo", "files", "prefix", "fix", "tighten", "via", "layers",
-    "level", "allow_to", "fuzzy",
+    "level", "allow_to", "fuzzy", "scale",
 ];
 const INVARIANT_KEYS: &[&str] = &["id", "each", "where", "when", "assert", "for", "key", "why", "severity"];
 const CONTRACT_KEYS: &[&str] = &["id", "act", "when", "assert", "why", "severity"];

@@ -237,7 +237,7 @@ fn rule_scoped(p: &Project, lines: &Lines) -> bool {
             } else {
                 vec![]
             }
-        } else if (kind == "forbid" || kind == "require") && (crate::config::truthy(r.get("repo")) || kind == "require") {
+        } else if (kind == "forbid" || kind == "require" || kind == "design") && (crate::config::truthy(r.get("repo")) || kind == "require") {
             list_or(r, "in", &[])
         } else if kind == "command" {
             list_or(r, "when", &["**/*"])
