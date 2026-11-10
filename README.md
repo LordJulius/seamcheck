@@ -1212,6 +1212,38 @@ anywhere block), `"changed"` (its findings, warnings too, block only on the
 lines a change adds or edits: old debt stays visible in `check`, new debt
 can't land), `"touched"` (any finding in a file the change touches), `"off"`.
 
+### Design rules (`kind = "design"`)
+
+The engine knows no look; a repo declares its own tokens in a `[design]` table and picks a check per rule.
+`check = "colour"` flags raw colour literals (`#rrggbb`, `rgb()`, `0xAARRGGBB` on a colour line, Kotlin `Color.Red`)
+that aren't in the palette, and names the nearest role. `check = "scale", scale = "spacing"` flags a number given
+to a property of `[design.scales.spacing]` that isn't one of its values (CSS, TSX objects, Elixir keyword lists,
+Kotlin `Modifier.padding(..dp)`, QML and Slint alike; `rem` converts at `design.rem`). `check = "font"` flags
+families outside `[design.fonts] allow` and denied words (`serif`, but not `sans-serif`). With `gate = "changed"`
+only the lines a change adds are judged, so old code isn't failed. Values may be inline or read from the repo's
+own JSON (`palette_from = ["design/tokens.json"]`, `values = "json:design/tokens.json#spacing"`).
+
+```toml
+[design]
+palette_from = ["design/tokens.json"]
+allow_literals = ["#ffffff"]
+[design.scales.spacing]
+props = ["padding", "margin", "gap"]
+values = [4, 8, 12, 16]
+units = ["px", "dp"]
+not = ["letter"]
+[design.fonts]
+allow = ["Chakra Petch"]
+deny = ["serif"]
+[[rule]]
+id = "design-spacing"
+kind = "design"
+check = "scale"
+scale = "spacing"
+in = ["**/*.css", "**/*.kt"]
+gate = "changed"
+```
+
 ## One output, many views
 
 A `fanout` rule checks one producer against every consumer: panel types the
