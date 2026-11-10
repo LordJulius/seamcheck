@@ -41,13 +41,13 @@ fn keys_for(kind: &str) -> &'static [&'static str] {
 
 /// The packs seamcheck ships, compiled in (seamcheck/packs/*.toml).
 pub const PACKS: &[(&str, &str)] = &[
-    ("compose", include_str!("../../seamcheck/packs/compose.toml")),
-    ("express", include_str!("../../seamcheck/packs/express.toml")),
-    ("hono", include_str!("../../seamcheck/packs/hono.toml")),
-    ("phoenix", include_str!("../../seamcheck/packs/phoenix.toml")),
-    ("qml", include_str!("../../seamcheck/packs/qml.toml")),
-    ("react", include_str!("../../seamcheck/packs/react.toml")),
-    ("security", include_str!("../../seamcheck/packs/security.toml")),
+    ("compose", include_str!("../packs/compose.toml")),
+    ("express", include_str!("../packs/express.toml")),
+    ("hono", include_str!("../packs/hono.toml")),
+    ("phoenix", include_str!("../packs/phoenix.toml")),
+    ("qml", include_str!("../packs/qml.toml")),
+    ("react", include_str!("../packs/react.toml")),
+    ("security", include_str!("../packs/security.toml")),
 ];
 
 pub fn available_packs() -> Vec<String> {

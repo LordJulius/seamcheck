@@ -9,8 +9,8 @@ names. No compiler sees them, because each side is fine on its own. seamcheck
 builds one call graph across every language in a repo, then checks the rules
 the project writes down about how its parts fit together.
 
-- **Deterministic and local.** No network, no model, no dependencies beyond
-  Python 3.11+ (ripgrep is used when present).
+- **Deterministic and local.** No network, no model, one Rust binary with no
+  runtime dependencies (ripgrep is used when present).
 - **Built for agents and CI.** Plain text, JSON, SARIF (code scanning) or
   GitHub annotations; exit code 1 on errors; a pre-commit gate; queries (`callers`, `impact`, `refs`) that replace grep
   loops and say how sure they are; and an MCP server that keeps the graph loaded.
@@ -58,9 +58,10 @@ the security pack until the repo has a `seamcheck.toml` of its own. Pick how
 to get it:
 
 ```sh
-pipx install git+https://github.com/LordJulius/seamcheck      # installed: `seamcheck ...`
-uvx --from git+https://github.com/LordJulius/seamcheck seamcheck stats    # no install
-python3 seamcheck.pyz stats        # one file from a release (Python 3.11+, no dependencies)
+git clone https://github.com/LordJulius/seamcheck && cd seamcheck/rust
+cargo build --release --locked      # needs a Rust toolchain (stable)
+install -m755 target/release/seamcheck ~/.local/bin/seamcheck
+seamcheck stats
 ```
 
 Measured on the 33 benchmark checkouts with no config and an empty cache:
@@ -68,11 +69,6 @@ the release file's first answer (`find`, then `context` on a function) takes
 0.5-9.5 s cold (excalidraw, 62k calls: 9.5 s) and 0.2-1.1 s per question
 after that. Any id an answer prints, or `path/file.ext:LINE`, works as the
 next question's argument.
-
-`seamcheck.pyz` is attached to each release (`python3 tools/build_pyz.py`
-builds it from a checkout); on first run it unpacks itself into
-`~/.cache/seamcheck/` and starts as fast as an install after that. From a
-checkout with no install: `PYTHONPATH=/path/to/seamcheck python3 -m seamcheck check`.
 
 For an agent (Claude Code shown; any MCP client works the same way), one line
 gives it the graph as tools, kept loaded between questions:
@@ -1619,24 +1615,8 @@ cache, so a gate after a small edit takes seconds.
 
 ### In CI
 
-The repo is a GitHub Action (Python 3.11+ on the runner; `ubuntu-latest` has it):
-
-```yaml
-# .github/workflows/seamcheck.yml
-on: [pull_request]
-jobs:
-  seamcheck:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
-      # annotations on the diff, and a red check when the change may not land
-      - uses: LordJulius/seamcheck@main
-```
-
-`with: { mode: check, format: sarif }` runs every rule instead and gives the
-SARIF file as `steps.<id>.outputs.sarif-file` for `upload-sarif`; `args`
-passes extra flags (`--only security`). Without the action:
+Build the binary on the runner (a Rust toolchain is preinstalled on
+`ubuntu-latest`) and run it:
 
 ```yaml
 on: [pull_request]
@@ -1647,9 +1627,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: pipx install git+https://github.com/LordJulius/seamcheck
+      - uses: actions/checkout@v4
+        with: { repository: LordJulius/seamcheck, path: .seamcheck-src }
+      - run: cargo install --locked --path .seamcheck-src/rust
       # annotations on the diff, and a red check when the change may not land
       - run: seamcheck gate --since origin/${{ github.base_ref }} --format github
       # or: every rule as code-scanning alerts
@@ -1782,7 +1762,7 @@ command that replays its inputs. Logs go to `$TMPDIR/seamcheck-fuzz/`.
 ## Development
 
 ```sh
-python3 -m unittest discover tests     # the suite; CI runs it on Python 3.11, 3.12 and 3.13
+cd rust && cargo test --release --locked     # the suite; CI runs it (.github/workflows/rust.yml)
 ```
 
 Each test reproduces the bug a check was written after, and its fix. A new
@@ -1791,7 +1771,7 @@ must pass.
 
 The cache lives in `~/.cache/seamcheck/`. Parses are keyed by file content and
 the linked graph by every file's content, both with a digest of seamcheck's own
-source (and `CACHE_VERSION`, `seamcheck/core.py`), so every checkout of a repo
+source (and `CACHE_VERSION`, its cache version), so every checkout of a repo
 (a git worktree, a lane) shares them, an upgrade or a local change to an
 adapter never reuses what the old code made, and the cache prunes itself to
 3 GB.

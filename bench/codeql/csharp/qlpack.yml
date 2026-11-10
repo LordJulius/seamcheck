@@ -1,4 +1,0 @@
-name: seamcheck-bench/csharp-calls
-version: 0.0.1
-dependencies:
-  codeql/csharp-all: "*"

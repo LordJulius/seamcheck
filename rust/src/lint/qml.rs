@@ -15,7 +15,7 @@ type Res<T> = Result<T, RuleErr>;
 fn qt_types() -> &'static HashSet<String> {
     static T: OnceLock<HashSet<String>> = OnceLock::new();
     T.get_or_init(|| {
-        include_str!("../../../seamcheck/qt_types.txt")
+        include_str!("../../data/qt_types.txt")
             .lines()
             .map(|l| l.trim())
             .filter(|l| !l.is_empty())

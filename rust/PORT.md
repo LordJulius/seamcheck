@@ -102,9 +102,14 @@ the crate (`src/verify/`), and the Python CLI forwards the command to it.
    deps and arch tests ported.
 4. **The rest.** serve, map, precise, runtime (`trace` / `run` / `fuzz`),
    init, tighten. Exit: every command; the whole Python suite ported.
-5. **Cutover**, when Julius says: the launcher runs the Rust binary, master
-   and the public repo get the crate, the Python package goes. Then new work
-   lands only in Rust: the Slint reader and the module-size rule (D5's
+5. **Cutover. Done.** The launcher runs the Rust binary (2026-11-04); the
+   Python package, its tests, `bench/`, `tools/build_pyz.py`, `pyproject.toml`,
+   the Python GitHub Actions and the Python-based `action.yml` /
+   `.pre-commit-hooks.yaml` were removed on 2026-11-10. The packs and
+   `qt_types.txt` now live in `rust/packs/` and `rust/data/`; the Python
+   suite's fixtures in `rust/tests/python_fixtures/`. CI is
+   `.github/workflows/rust.yml` (cargo build + test). New work lands only in
+   Rust: the Slint reader and the module-size rule (D5's
    split-at-~400-lines rule) are the first two.
 
 ## The parity harness

@@ -323,7 +323,7 @@ fn a_relative_fetch_is_same_origin() {
 /// (tests/fixtures/NAME, copied so nothing is written beside it).
 fn fixture_findings(name: &str) -> Vec<(String, String, usize)> {
     std::env::set_var("SEAMCHECK_RS_QUIET", "1");
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures").join(name);
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/python_fixtures").join(name);
     let d = tempfile::tempdir().unwrap();
     copy(&src, d.path());
     let p = Project::load(d.path(), &[]);
