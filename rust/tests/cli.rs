@@ -70,5 +70,5 @@ fn help_lists_every_command_from_the_readme() {
     }
     let o = Command::new(env!("CARGO_BIN_EXE_seamcheck")).arg("no-such-command").output().unwrap();
     assert_eq!(o.status.code(), Some(2));
-    assert!(String::from_utf8(o.stderr).unwrap().contains("unknown command `no-such-command`"));
+    assert!(String::from_utf8(o.stderr).unwrap().contains("invalid choice: 'no-such-command'"));
 }
