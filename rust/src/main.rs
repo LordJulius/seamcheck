@@ -1,6 +1,5 @@
-//! `seamcheck` CLI (the Python __main__.py's surface). Phase 1 runs `check`
-//! and `gate` without the call graph; graph commands say they are not
-//! ported yet. `seamcheck port-status` lists the rules phase 1 defers.
+//! `seamcheck` CLI: parses the options and runs one command. `--help` prints
+//! README's command list.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -50,6 +49,17 @@ struct Args {
     apply: bool,
 }
 
+/// The command list: README's "## Commands" block, so `--help` and the README never disagree.
+fn usage() -> String {
+    const README: &str = include_str!("../../README.md");
+    let block = README
+        .split_once("## Commands\n\n```\n")
+        .and_then(|(_, rest)| rest.split_once("\n```"))
+        .map(|(block, _)| block)
+        .unwrap_or("see README.md");
+    format!("seamcheck {}\n\n{block}\n", seamcheck::VERSION)
+}
+
 fn usage_error(msg: &str) -> ! {
     eprintln!("usage: seamcheck [-h] [--version] {{{}}} ...", COMMANDS.join(","));
     eprintln!("seamcheck: error: {msg}");
@@ -94,7 +104,7 @@ fn parse(argv: Vec<String>) -> Args {
                 std::process::exit(0);
             }
             "-h" | "--help" => {
-                println!("seamcheck (Rust port, phase 1): check | gate | port-status; see PORT.md");
+                print!("{}", usage());
                 std::process::exit(0);
             }
             "-C" => a.root = val(&mut i),
@@ -241,10 +251,7 @@ fn main() {
         ),
         "deps" => seamcheck::deps::cli(&root, &a.config, &a.args, a.all, a.format == "json", t0),
         other => {
-            eprintln!(
-                "seamcheck (rust, phase 1): `{other}` is not ported yet; it needs the call graph (phase 2). \
-                 Run the Python seamcheck for it."
-            );
+            eprintln!("seamcheck: unknown command `{other}`. `seamcheck --help` lists them.");
             2
         }
     };

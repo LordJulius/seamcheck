@@ -59,3 +59,16 @@ fn split_answers() {
     assert_eq!(o.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&o.stdout).starts_with("src/app/view.py: "));
 }
+
+#[test]
+fn help_lists_every_command_from_the_readme() {
+    let o = Command::new(env!("CARGO_BIN_EXE_seamcheck")).arg("--help").output().unwrap();
+    assert!(o.status.success());
+    let out = String::from_utf8(o.stdout).unwrap();
+    for cmd in ["seamcheck check", "seamcheck gate", "seamcheck callers", "seamcheck map --html", "seamcheck tidy", "--precise"] {
+        assert!(out.contains(cmd), "--help is missing {cmd}");
+    }
+    let o = Command::new(env!("CARGO_BIN_EXE_seamcheck")).arg("no-such-command").output().unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8(o.stderr).unwrap().contains("unknown command `no-such-command`"));
+}
